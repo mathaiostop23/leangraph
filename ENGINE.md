@@ -198,18 +198,63 @@ pub struct Edge {
 
 **Never emit an edge without provenance.** An LLM consuming the graph must be able to tell a proven call from a guess — and a low-confidence edge is still far better than nothing, as long as it is labelled.
 
-### Language plan
+### Language plan — breadth is cheap, depth is not
 
-Start narrow, go deep. Breadth is where CodeGraph is unassailable in the short term (30+ languages, 17 frameworks, Swift↔ObjC and React Native bridging) — competing on breadth first is a losing race.
+An earlier draft of this document claimed breadth was unattainable. That was wrong. Decomposed by tier, the cost per language is:
 
-| Phase | Languages | Rationale |
-|---|---|---|
-| 0–1 | **Python, TypeScript/JS** | Cover the overwhelming majority of repos that get AI issue-triage; both are dynamic, so this is the *hard* end of resolution — succeeding here proves the design |
-| 2 | Go, Rust | Static, cheap to add, resolution is nearly exact |
-| 3 | Java, C# | Large enterprise surface |
-| 4+ | as demanded | |
+| Tier | What | Cost / language | Blocker? |
+|---|---|---|---|
+| 0 · Grammar | tree-sitter crate already exists | ~0 | no |
+| 1 · Node extraction | map node-kind names → def / call / import | **~1 hour** | no |
+| 2 · Global name matching | free once tiers 0–1 exist | 0 | no |
+| 3 · Import resolution | module path → file, per-language semantics | **2–10 days** | **yes** |
+| 4 · Scope resolution | lexical scoping rules | 3–10 days | yes |
+| 5 · Framework routing | per framework | 1–5 days each | unbounded |
 
-Per-language work is a `LanguageSpec`: tree-sitter queries for defs/refs/scopes/imports + a module-path resolver. Adding a static language is days; a dynamic one is weeks.
+**30 languages at tier 0–2 ≈ 2–3 weeks. 30 languages at tier 3–4 ≈ 6–12 months.** There is no technical barrier to breadth — only to depth.
+
+Context for the bar we have to clear: CodeGraph publishes 84–100% "fair coverage" across 22 languages, defined as *the share of source files with **at least one** resolved cross-file dependent*. That is an honest metric (they state the denominator explicitly) but it is measured **per file, not per edge** — a file with 200 call sites where 3 resolve counts as covered. Tier 2.5 (global name matching with confidence) reaches that bar in many languages.
+
+### Declarative language specs, not Rust per language
+
+Adding a language must be a **config PR, not a code PR** — that is what turns breadth into a contribution surface instead of an engineering cost.
+
+```toml
+# langs/ruby.toml
+extensions = ["rb", "rake", "gemspec"]
+grammar    = "tree_sitter_ruby"
+
+[nodes]
+definitions = ["method", "singleton_method", "class", "module"]
+calls       = ["call"]
+imports     = ["call"]          # require / require_relative
+
+[fields]
+def_name  = "name"
+call_name = "method"
+```
+
+The spec compiles to `u16` node-kind and field IDs once per language at startup; the hot loop still compares integers.
+
+### Rollout
+
+```
+Phase 1   Python + TypeScript at tier 4          (depth — proves the design)
+Phase 2   declarative spec loader + ~20 languages at tier 2.5
+Phase 3   tier 3 for Go, Rust, Java, C#          (static — imports are mechanical)
+Phase 4+  frameworks on demand
+```
+
+### Publish a capability matrix, not a single number
+
+| Language | Parse | Defs/Calls | Imports | Scopes | Framework |
+|---|:-:|:-:|:-:|:-:|---|
+| Python | ✅ | ✅ | ✅ | ✅ | Django, FastAPI |
+| TypeScript | ✅ | ✅ | ✅ | ✅ | — |
+| Go, Rust, Java, C# | ✅ | ✅ | ✅ | ⚠️ | — |
+| ~20 more | ✅ | ✅ | ⚠️ name-match | ❌ | ❌ |
+
+More informative than one percentage on a forgiving denominator, and it tells a user exactly what they get.
 
 ---
 
@@ -233,18 +278,48 @@ Plus a golden-fixture suite: hand-built micro-repos per language with hand-verif
 
 ---
 
-## 6. Crate layout
+## 6. Code layout
+
+Modules now, crates when compile time demands it — a workspace split buys nothing until the grammar count makes rebuilds hurt (expect that around 10+ languages, then split `arbor-lang` out first).
 
 ```
-arbor/
-  crates/
-    arbor-core/       # SymId, NodeId, Edge, Csr, mmap format, interner
-    arbor-lang/       # LanguageSpec trait + per-language tree-sitter queries
-    arbor-index/      # discover → extract → resolve → persist pipeline
-    arbor-query/      # traversal, context builder, ranking
-    arbor-cli/        # `arbor index|sync|query|callers|impact|serve`
-    arbor-bench/      # differential harness vs codegraph
+src/
+  core.rs      # SymId, FileId, NodeId, Def, Ref, Edge, Provenance, interner
+  lang.rs      # Lang + Spec (node-kind / field IDs resolved once)
+  extract.rs   # per-file: mmap → parse → cursor walk → FileUnit
+  resolve.rs   # 3-tier resolution → Vec<Edge>          [Phase 1]
+  graph.rs     # CSR build, mmap format, load/save      [Phase 2]
+  query.rs     # traversal, context builder, ranking    [Phase 2]
+  mcp.rs       # JSON-RPC over stdio                    [Phase 3]
+  server/      # axum, webhooks, queue, agent           [Phase 4]
+  main.rs      # CLI
 ```
+
+## 6b. MCP server — ship it, but not as the product
+
+Every relevant agent (Claude Code, Cursor, Codex, Windsurf, Zed, Continue, Kiro) speaks MCP. Integration is one config entry per target plus a writer to emit it (~50 lines each).
+
+```jsonc
+{ "mcpServers": { "arbor": { "command": "arbor", "args": ["serve", "--mcp"] } } }
+```
+
+**The one place we win by construction.** From CodeGraph's own CLAUDE.md:
+
+> *"MCP attach is a startup-latency issue... the agent dives into Read/grep before codegraph finishes its ~2-3s startup, so it runs with no codegraph."*
+
+Their mitigation is a pre-warmed daemon with sockets and an env var to skip a re-exec. Ours is structural: a static Rust binary that `mmap`s the CSR starts in **single-digit milliseconds**. Nothing to warm — the graph *is* the file. That is the difference between "the agent gave up and grepped" and "it was there."
+
+**Tool surface — one primary tool.** Their hardest-won finding is that agents under-pick secondary tools; they *removed* `codegraph_context` and `codegraph_trace` for this reason. Copy the conclusion:
+
+```
+arbor_explore(symbols[])   PRIMARY   — symbol bag → verbatim source,
+                                       call path between them, blast radius
+arbor_node(symbol)         SECONDARY — full body + caller/callee trail
+```
+
+Two additions they do not have: every edge carries **confidence + provenance** so the agent can distinguish proven from guessed, and **co-change edges** from git history catch coupling no static analyzer sees.
+
+**Strategic position:** build it for visibility and dogfooding — if the engine does not serve a local agent well, it will not serve the server agent either. Do *not* make it the headline claim; on MCP we are playing their home turf against 67k stars.
 
 ### Dependency picks (all deliberate)
 
@@ -279,6 +354,52 @@ Extraction is comparable, not thinner: our call-site count on django (201,218) l
 Our own CPU is now **81.9% tree-sitter parse** — i.e. already parse-bound, which is the right place to be. blake3 hashing costs 0.9%, so hash-based change detection for incremental sync is free.
 
 **Honest target for a complete pipeline: 5–7× on django (1.0–1.5s vs 7.6s), not 17×.** Resolution is unimplemented and is the phase most likely to surprise us.
+
+---
+
+## 7b. Cheaper — the uncontested axis
+
+The goal is not just faster. It is **faster and cheaper**, and cheaper is where the ground is genuinely open. From CodeGraph's own CLAUDE.md:
+
+> *"The optimization target is wall-clock latency + tool-call count — **don't optimize for token cost**."*
+
+That is the correct call for their product: their user has a subscription and never sees tokens. **Our user pays per token.** The entire cost axis is uncontested, and it has to be designed into the engine, not bolted on at the product layer.
+
+### Their approach to sufficiency: return more
+
+Their explicit mechanism is *"make the tool's output complete enough that the agent stops"* — because an agent falls back to Read/Grep the instant an answer is insufficient, and that fallback costs far more than a big response. So they scale output by repo size:
+
+| Repo | files | explore calls | chars/call |
+|---|---|---|---|
+| express | 147 | 1 | 18K |
+| django | 3,043 | 2 | 28K |
+| vscode | 10,446 | 3 | 35K |
+
+That is a **size** heuristic, not a **relevance** heuristic. It is reliable, and it is expensive.
+
+### Our approach: return better
+
+Three engine-level levers they structurally lack:
+
+1. **Confidence-ranked selection.** Every edge carries `conf: u8` + provenance. The context builder ranks by confidence × graph centrality × distance-from-seed and cuts, instead of filling a char budget.
+2. **Co-change edges.** Git-derived coupling catches what no static analyzer sees. Each such edge prevents an agent turn spent re-discovering it — and a wasted turn costs more than the edge.
+3. **Token-aware context builder.** `build_context()` reports its own token count and honours a hard ceiling. The product cannot enforce a budget the engine hides.
+
+### The trap to avoid
+
+"Cheaper" is **not** "return less." Under-returning pushes the agent back to Read/Grep, which costs more than the tokens saved. Their finding that *partial coverage is worse than none* is the same lesson from the coverage side.
+
+So the target is precise: **fewer tokens at equal-or-better answer quality.** That is a claim you can only make with a measurement, never by assertion.
+
+### The cost benchmark — Phase 0 for cost
+
+Mirror `bench/run.sh` with `bench/cost.sh`:
+
+1. 40 closed issues with linked merged PRs → ground truth = files changed
+2. For arbor context, CodeGraph explore, and plain embedding RAG, measure **recall@k vs tokens returned**
+3. Publish the curve
+
+The headline claim is one sentence and it must be earned: **"same file recall, N% fewer context tokens."** Nobody in this space publishes that number.
 
 ---
 
