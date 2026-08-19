@@ -342,6 +342,37 @@ impl Db {
     }
 }
 
+// -------------------------------------------------------------------- issues
+
+impl Db {
+    /// Upsert by (repo, number). An issue that is edited and re-labelled should
+    /// update in place rather than accumulate rows.
+    pub fn upsert_issue(
+        &self,
+        repo_id: i64,
+        number: i64,
+        title: &str,
+        body: &str,
+        assoc: &str,
+    ) -> Result<i64> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO issues (repo_id, number, title, body, author_association, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(repo_id, number) DO UPDATE SET
+                   title = ?3, body = ?4, author_association = ?5",
+                params![repo_id, number, title, body, assoc, now()],
+            )?;
+            let id: i64 = c.query_row(
+                "SELECT id FROM issues WHERE repo_id = ?1 AND number = ?2",
+                params![repo_id, number],
+                |r| r.get(0),
+            )?;
+            Ok(id)
+        })
+    }
+}
+
 // ---------------------------------------------------------------- deliveries
 
 impl Db {

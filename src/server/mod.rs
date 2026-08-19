@@ -5,6 +5,7 @@
 //! a 700 ms full index cannot stall the reactor and drop a webhook.
 
 pub mod db;
+pub mod webhook;
 
 use crate::index;
 use anyhow::{Context, Result};
@@ -25,6 +26,12 @@ use std::time::Instant;
 
 pub struct Config {
     pub addr: SocketAddr,
+    /// Shared secret for webhook signatures. Absent means the endpoint refuses
+    /// everything — failing closed, because an unverified webhook is an open
+    /// door to whatever the agent can do.
+    pub webhook_secret: Option<String>,
+    /// Label an issue must carry before the bot acts.
+    pub trigger_label: String,
     /// Where repositories and their graphs live.
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
@@ -37,6 +44,18 @@ pub struct Config {
 pub struct App {
     pub db: Db,
     pub cfg: Arc<Config>,
+}
+
+impl App {
+    pub fn webhook_secret(&self) -> Option<&str> {
+        self.cfg.webhook_secret.as_deref()
+    }
+
+    /// Per-repo override would live in `config_json`; for now one label for the
+    /// whole install.
+    pub fn trigger_label(&self, _repo: &db::Repo) -> String {
+        self.cfg.trigger_label.clone()
+    }
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
@@ -57,6 +76,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .route("/repos", get(list_repos).post(add_repo))
         .route("/repos/{name}", get(get_repo))
         .route("/repos/{name}/sync", post(sync_repo))
+        .route("/webhook/github", post(webhook::github))
         .with_state(app.clone());
 
     let listener = tokio::net::TcpListener::bind(app.cfg.addr)
@@ -64,10 +84,16 @@ pub async fn run(cfg: Config) -> Result<()> {
         .with_context(|| format!("bind {}", app.cfg.addr))?;
 
     println!(
-        "\n  \x1b[1marbor server\x1b[0m  http://{}\n  data      {}\n  workers   {}\n",
+        "\n  \x1b[1marbor server\x1b[0m  http://{}\n  data      {}\n  workers   {}\n  webhook   {}\n  trigger   `{}` label\n",
         app.cfg.addr,
         app.cfg.data_dir.display(),
-        app.cfg.workers
+        app.cfg.workers,
+        if app.cfg.webhook_secret.is_some() {
+            "\x1b[32mverified\x1b[0m"
+        } else {
+            "\x1b[33mdisabled — set ARBOR_WEBHOOK_SECRET\x1b[0m"
+        },
+        app.cfg.trigger_label
     );
 
     axum::serve(listener, router)
@@ -85,7 +111,7 @@ async fn shutdown() {
 
 /// Errors carry a status and a message, and nothing else. An internal error
 /// string is for the log, not for the caller.
-struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
@@ -100,7 +126,7 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-type ApiResult<T> = std::result::Result<T, ApiError>;
+pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 async fn health(State(app): State<App>) -> ApiResult<Json<serde_json::Value>> {
     let (queued, running) = app.db.queue_depth()?;
@@ -223,6 +249,10 @@ async fn run_job(app: &App, job: &db::Job) -> Result<()> {
     match job.kind.as_str() {
         "index" => index_repo(app, job.repo_id, true).await,
         "sync" => index_repo(app, job.repo_id, false).await,
+        "issue" => {
+            tracing_line("info", &format!("issue job {} — agent not wired yet", job.id));
+            Ok(())
+        }
         other => anyhow::bail!("unknown job kind `{other}`"),
     }
 }
@@ -300,7 +330,7 @@ fn git_head(root: &std::path::Path) -> Option<String> {
 
 /// Deliberately minimal: one line, one level, no key-value ceremony. A
 /// self-hosted binary's log is read by a person tailing it, not by a pipeline.
-fn tracing_line(level: &str, msg: &str) {
+pub fn tracing_line(level: &str, msg: &str) {
     let colour = match level {
         "error" => "\x1b[31m",
         "warn" => "\x1b[33m",

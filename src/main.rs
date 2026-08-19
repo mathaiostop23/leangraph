@@ -163,6 +163,9 @@ enum Cmd {
         /// Concurrent workers. Indexing already saturates cores.
         #[arg(long, default_value_t = 2)]
         workers: usize,
+        /// Label an issue must carry before the bot acts
+        #[arg(long, default_value = "arbor")]
+        trigger_label: String,
     },
     /// Graph statistics and load time
     Status {
@@ -479,6 +482,7 @@ fn main() -> Result<()> {
             addr,
             data,
             workers,
+            trigger_label,
         } => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -488,6 +492,12 @@ fn main() -> Result<()> {
                 db_path: data.join("arbor.db"),
                 data_dir: data,
                 workers: workers.max(1),
+                // From the environment, never a flag: a secret in argv is
+                // visible in `ps` to every user on the box.
+                webhook_secret: std::env::var("ARBOR_WEBHOOK_SECRET")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                trigger_label,
             }))
         }
 
