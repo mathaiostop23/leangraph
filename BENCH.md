@@ -648,7 +648,17 @@ resolved to itself.
 | calls into a vendored bundle | 13,718 | 918 |
 | self-calls with no recursion in the source | 1,285 | 425 |
 | **falsification floor, django** | **12.41%** | **0.83%** |
-| **edges, django** | **293,254** | **253,335** |
+| **semantic edges, django** | **206,100** | **179,987** |
+
+26,113 edges left django's graph and **24,076 of them — 92% — were ones a rule
+could prove wrong**. The remaining 2,037 are unverified: they may have been
+right. Structural edges are untouched, and excalidraw *gained* 184, because
+resolving `super()` through the classes a class declares finds edges that were
+previously dropped as too ambiguous.
+
+On flask, the one corpus where recall is measurable, the cost of all this was 7
+confirmed edges out of 541 — while `lib→lib` confirmation at confidence 100 went
+from 51.9% to 65.2%.
 
 **Dotted heritage.** `class X(a.B)` has two identifiers in its base list and only
 one is a base class. Both were tagged, so `a` — a module — was recorded as a
