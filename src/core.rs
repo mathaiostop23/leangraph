@@ -49,6 +49,7 @@ pub enum DefKind {
     Class,
     Interface,
     Module,
+    Variable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -56,6 +57,23 @@ pub enum DefKind {
 pub enum RefKind {
     Call,
     New,
+    /// Base class / implemented interface.
+    Extends,
+    /// Any other mention of a name: inheritance lists, type annotations,
+    /// decorators, arguments. Without these a class that is subclassed but
+    /// never *called* looks unused, which is exactly backwards.
+    Read,
+}
+
+impl RefKind {
+    #[inline]
+    pub fn edge_kind(self) -> EdgeKind {
+        match self {
+            RefKind::Call | RefKind::New => EdgeKind::Calls,
+            RefKind::Extends => EdgeKind::Extends,
+            RefKind::Read => EdgeKind::References,
+        }
+    }
 }
 
 /// How an edge came to exist. Carried on every edge so consumers — human or

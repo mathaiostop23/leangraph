@@ -1,294 +1,306 @@
-//! arbor — native code-graph indexer.
-//!
-//! Phase 0 measured the parse+extract floor (BENCH.md).
-//! Phase 1 extracts interned symbols with containment scopes.
-//! Phase 1b resolves references into a graph.
+//! arbor — native code-graph indexer and query engine.
 
 mod core;
 mod extract;
+mod graph;
+mod index;
 mod lang;
 mod resolve;
 
-use crate::core::{FileUnit, Interner};
-use crate::extract::{extract_file, Timings};
-use crate::lang::{spec_for, Lang, Spec, ALL_LANGS};
-use anyhow::{Context, Result};
-use clap::Parser as ClapParser;
-use ignore::WalkBuilder;
-use rayon::prelude::*;
-use rustc_hash::FxHashMap;
-use std::cell::RefCell;
-use std::path::PathBuf;
+use crate::core::{DefKind, NodeId};
+use crate::graph::{Graph, Neighbor};
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tree_sitter::Parser as TsParser;
 
-const MAX_FILE_BYTES: u64 = 1024 * 1024; // matches CodeGraph's skip, for fair comparison
-
-#[derive(ClapParser, Debug)]
-#[command(name = "arbor", about = "Native code-graph indexer")]
+#[derive(Parser, Debug)]
+#[command(name = "arbor", version, about = "Native code-graph indexer")]
 struct Cli {
-    /// Repository root to index
-    path: PathBuf,
-    /// Worker threads (default: all cores)
-    #[arg(short, long)]
-    threads: Option<usize>,
-    /// Per-language breakdown
-    #[arg(long)]
-    by_lang: bool,
-    /// Show the N most-referenced symbols (extraction sanity check)
-    #[arg(long, value_name = "N")]
-    top: Option<usize>,
-    /// Stop after extraction; skip resolution
-    #[arg(long)]
-    no_resolve: bool,
+    #[command(subcommand)]
+    cmd: Cmd,
 }
 
-thread_local! {
-    static PARSERS: RefCell<FxHashMap<Lang, TsParser>> = RefCell::new(FxHashMap::default());
-}
-
-fn with_parser<R>(lang: Lang, f: impl FnOnce(&mut TsParser) -> R) -> R {
-    PARSERS.with(|cell| {
-        let mut map = cell.borrow_mut();
-        let p = map.entry(lang).or_insert_with(|| {
-            let mut p = TsParser::new();
-            p.set_language(&lang.ts_language())
-                .expect("grammar/ABI mismatch");
-            p
-        });
-        f(p)
-    })
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Index a repository and write its graph
+    Index {
+        path: PathBuf,
+        #[arg(short, long)]
+        threads: Option<usize>,
+        #[arg(long)]
+        by_lang: bool,
+        #[arg(long, value_name = "N")]
+        top: Option<usize>,
+        #[arg(long)]
+        no_resolve: bool,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Index only; do not write the graph to disk
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Look up definitions by name
+    Find {
+        symbol: String,
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// What calls this symbol
+    Callers {
+        symbol: String,
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        #[arg(short, long, default_value_t = 25)]
+        limit: usize,
+        /// Drop edges below this confidence
+        #[arg(long, default_value_t = 0)]
+        min_conf: u8,
+    },
+    /// What this symbol calls
+    Callees {
+        symbol: String,
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        #[arg(short, long, default_value_t = 25)]
+        limit: usize,
+        #[arg(long, default_value_t = 0)]
+        min_conf: u8,
+    },
+    /// Everything affected by changing this symbol
+    Impact {
+        symbol: String,
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        #[arg(short, long, default_value_t = 3)]
+        depth: u32,
+        #[arg(long, default_value_t = 80)]
+        min_conf: u8,
+        #[arg(short, long, default_value_t = 40)]
+        limit: usize,
+        /// Follow containment edges too (file <-> its definitions)
+        #[arg(long)]
+        with_contains: bool,
+    },
+    /// Graph statistics and load time
+    Status {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let threads = cli
-        .threads
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build_global()
-        .ok();
+    match Cli::parse().cmd {
+        Cmd::Index {
+            path,
+            threads,
+            by_lang,
+            top,
+            no_resolve,
+            out,
+            dry_run,
+        } => index::run(&index::Config {
+            path,
+            threads,
+            by_lang,
+            top,
+            no_resolve,
+            out,
+            dry_run,
+        }),
 
-    let root = cli
-        .path
-        .canonicalize()
-        .with_context(|| format!("cannot resolve {}", cli.path.display()))?;
-
-    // ---- discover ----------------------------------------------------------
-    let t0 = Instant::now();
-    let mut found: Vec<(PathBuf, Lang)> = Vec::with_capacity(4096);
-    let mut oversized = 0u64;
-
-    for entry in WalkBuilder::new(&root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .follow_links(false)
-        .build()
-        .flatten()
-    {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Some(lang) = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .and_then(Lang::from_ext)
-        else {
-            continue;
-        };
-        if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
-            oversized += 1;
-            continue;
-        }
-        found.push((path.to_path_buf(), lang));
-    }
-    let d_discover = t0.elapsed();
-
-    if found.is_empty() {
-        println!("no Python/TypeScript files found under {}", root.display());
-        return Ok(());
-    }
-
-    // ---- extract -----------------------------------------------------------
-    let specs: FxHashMap<Lang, Spec> = ALL_LANGS.into_iter().map(|l| (l, spec_for(l))).collect();
-    let interner = Interner::new();
-
-    let t1 = Instant::now();
-    let raw: Vec<Option<(FileUnit, Timings)>> = found
-        .par_iter()
-        .enumerate()
-        .map(|(i, (path, lang))| {
-            with_parser(*lang, |p| {
-                extract_file(path, i as u32, *lang, &specs[lang], p, &interner)
-            })
-        })
-        .collect();
-
-    // Compact into aligned vectors so that vector index == FileId. Files that
-    // failed to open are dropped, so positions must be reassigned.
-    let mut units = Vec::with_capacity(raw.len());
-    let mut paths = Vec::with_capacity(raw.len());
-    let mut langs = Vec::with_capacity(raw.len());
-    let mut agg = Timings::default();
-    let mut errors = 0u64;
-    let mut by_lang: FxHashMap<Lang, (u64, u64, u64, u64)> = FxHashMap::default();
-
-    for ((path, lang), slot) in found.iter().zip(raw) {
-        let Some((mut unit, t)) = slot else { continue };
-        unit.file = units.len() as u32;
-        agg.ns_read += t.ns_read;
-        agg.ns_hash += t.ns_hash;
-        agg.ns_parse += t.ns_parse;
-        agg.ns_walk += t.ns_walk;
-        agg.bytes += t.bytes;
-        agg.ast_nodes += t.ast_nodes;
-        errors += unit.had_parse_error as u64;
-        let e = by_lang.entry(*lang).or_default();
-        e.0 += 1;
-        e.1 += t.bytes;
-        e.2 += unit.defs.len() as u64;
-        e.3 += unit.refs.len() as u64;
-        units.push(unit);
-        paths.push(path.clone());
-        langs.push(*lang);
-    }
-    let d_extract = t1.elapsed();
-
-    let defs: u64 = units.iter().map(|u| u.defs.len() as u64).sum();
-    let refs: u64 = units.iter().map(|u| u.refs.len() as u64).sum();
-    let imports: u64 = units.iter().map(|u| u.imports.len() as u64).sum();
-
-    // ---- resolve -----------------------------------------------------------
-    let t2 = Instant::now();
-    let resolved = (!cli.no_resolve)
-        .then(|| resolve::resolve(&units, &paths, &langs, &root, &interner));
-    let d_resolve = t2.elapsed();
-
-    let wall = d_discover + d_extract + d_resolve;
-    let mb = agg.bytes as f64 / 1_048_576.0;
-    let n_files = units.len() as u64;
-
-    // ---- report ------------------------------------------------------------
-    println!("\n\x1b[1marbor\x1b[0m  {}", root.display());
-    println!("  threads          {threads}");
-    println!(
-        "  files            {n_files}  ({mb:.1} MB{})",
-        if oversized > 0 {
-            format!(", {oversized} skipped >1MB")
-        } else {
-            String::new()
-        }
-    );
-    println!("  ast nodes        {}", agg.ast_nodes);
-    println!(
-        "  extracted        {defs} defs · {refs} refs · {imports} imports · {} unique symbols",
-        interner.len()
-    );
-    if errors > 0 {
-        println!(
-            "  parse errors     {errors} ({:.1}%)",
-            100.0 * errors as f64 / n_files as f64
-        );
-    }
-
-    if let Some(r) = &resolved {
-        let s = &r.stats;
-        let tot = s.total_refs().max(1) as f64;
-        println!(
-            "\n  \x1b[1mgraph\x1b[0m           {} nodes · {} edges",
-            r.space.total,
-            r.edges.len()
-        );
-        let in_repo = s.in_repo().max(1) as f64;
-        println!(
-            "  resolution       \x1b[1m{:.1}%\x1b[0m of in-repo refs   ({} of {} whose target exists here)",
-            100.0 * s.resolved() as f64 / in_repo,
-            s.resolved(),
-            s.in_repo()
-        );
-        for (label, n, conf) in [
-            ("scope", s.scope, "100"),
-            ("import", s.import, " 95"),
-            ("name (unique)", s.name_unique, " 80"),
-            ("name (ambig)", s.name_ambiguous, "45-60"),
-        ] {
-            println!(
-                "    {label:<16} {n:>9}  {:>5.1}%   conf {conf}",
-                100.0 * n as f64 / tot
-            );
-        }
-        for (label, n) in [
-            ("too ambiguous", s.too_ambiguous),
-            ("builtin (runtime)", s.builtin),
-            ("external (deps)", s.external),
-        ] {
-            println!(
-                "    \x1b[2m{label:<16} {n:>9}  {:>5.1}%\x1b[0m",
-                100.0 * n as f64 / tot
-            );
-        }
-    }
-
-    println!("\n  \x1b[1mwall clock\x1b[0m");
-    println!("    discover       {:>8.0} ms", d_discover.as_secs_f64() * 1e3);
-    println!("    extract        {:>8.0} ms", d_extract.as_secs_f64() * 1e3);
-    if resolved.is_some() {
-        println!("    resolve        {:>8.0} ms", d_resolve.as_secs_f64() * 1e3);
-    }
-    println!(
-        "    \x1b[1mtotal          {:>8.0} ms\x1b[0m   ({:.0} files/s, {:.0} MB/s)",
-        wall.as_secs_f64() * 1e3,
-        n_files as f64 / wall.as_secs_f64(),
-        mb / wall.as_secs_f64()
-    );
-
-    println!("\n  \x1b[1mcpu time by stage\x1b[0m (summed over threads)");
-    let cpu = (agg.ns_read + agg.ns_hash + agg.ns_parse + agg.ns_walk) as f64;
-    for (label, ns) in [
-        ("mmap", agg.ns_read),
-        ("blake3", agg.ns_hash),
-        ("parse", agg.ns_parse),
-        ("walk+intern", agg.ns_walk),
-    ] {
-        println!(
-            "    {label:<14} {:>8.0} ms  {:>5.1}%",
-            ns as f64 / 1e6,
-            100.0 * ns as f64 / cpu
-        );
-    }
-
-    if cli.by_lang {
-        println!("\n  \x1b[1mby language\x1b[0m");
-        let mut rows: Vec<_> = by_lang.iter().collect();
-        rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.0));
-        for (lang, (f, b, d, r)) in rows {
-            println!(
-                "    {:<12} {f:>6} files  {:>7.1} MB  {d:>8} defs  {r:>8} refs",
-                lang.name(),
-                *b as f64 / 1_048_576.0
-            );
-        }
-    }
-
-    if let Some(n) = cli.top {
-        let mut counts: FxHashMap<core::SymId, u32> = FxHashMap::default();
-        for unit in &units {
-            for r in &unit.refs {
-                *counts.entry(r.name).or_default() += 1;
+        Cmd::Find { symbol, path } => {
+            let (g, _) = load(&path)?;
+            let hits = g.find(&symbol);
+            if hits.is_empty() {
+                println!("no definition named `{symbol}`");
             }
+            for n in hits.iter().take(50) {
+                println!("  {}", describe(&g, *n));
+            }
+            if hits.len() > 50 {
+                println!("  … {} more", hits.len() - 50);
+            }
+            Ok(())
         }
-        let mut top: Vec<_> = counts.into_iter().collect();
-        top.sort_unstable_by_key(|(_, c)| std::cmp::Reverse(*c));
-        println!("\n  \x1b[1mtop {n} referenced symbols\x1b[0m");
-        for (sym, c) in top.into_iter().take(n) {
-            println!("    {:>8}  {}", c, interner.resolve(&sym));
+
+        Cmd::Callers {
+            symbol,
+            path,
+            limit,
+            min_conf,
+        } => neighbors(&path, &symbol, limit, min_conf, true),
+
+        Cmd::Callees {
+            symbol,
+            path,
+            limit,
+            min_conf,
+        } => neighbors(&path, &symbol, limit, min_conf, false),
+
+        Cmd::Impact {
+            symbol,
+            path,
+            depth,
+            min_conf,
+            limit,
+            with_contains,
+        } => {
+            let (g, _) = load(&path)?;
+            let target = pick(&g, &symbol)?;
+            let t = Instant::now();
+            let hit = g.impact(target, depth, min_conf, !with_contains);
+            let us = t.elapsed().as_micros();
+            println!(
+                "\nimpact of \x1b[1m{symbol}\x1b[0m — {} nodes within {depth} hops (conf ≥ {min_conf}) in {us} µs\n",
+                hit.len()
+            );
+            for n in hit.iter().take(limit) {
+                println!("  {}", describe(&g, *n));
+            }
+            if hit.len() > limit {
+                println!("  … {} more", hit.len() - limit);
+            }
+            println!();
+            Ok(())
         }
+
+        Cmd::Status { path } => {
+            let (g, load_us) = load(&path)?;
+            let bytes = std::fs::metadata(graph_path(&path))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            println!("\n  nodes      {}", g.n_nodes());
+            println!("  edges      {}", g.n_edges());
+            println!("  files      {}", g.n_files());
+            println!("  on disk    {:.1} MB", bytes as f64 / 1_048_576.0);
+            println!("  \x1b[1mload       {load_us} µs\x1b[0m   (mmap + header check; nothing is deserialized)\n");
+            Ok(())
+        }
+    }
+}
+
+fn graph_path(repo: &Path) -> PathBuf {
+    if repo.extension().is_some_and(|e| e == "bin") {
+        repo.to_path_buf()
+    } else {
+        repo.join(".arbor").join("graph.bin")
+    }
+}
+
+fn load(repo: &Path) -> Result<(Graph, u128)> {
+    let p = graph_path(repo);
+    if !p.exists() {
+        bail!(
+            "no graph at {} — run `arbor index {}` first",
+            p.display(),
+            repo.display()
+        );
+    }
+    let t = Instant::now();
+    let g = Graph::open(&p).with_context(|| format!("loading {}", p.display()))?;
+    Ok((g, t.elapsed().as_micros()))
+}
+
+/// Pick a target when a name is ambiguous. Reports the ambiguity on stderr
+/// rather than silently guessing — a wrong silent pick is worse than a noisy
+/// right one.
+fn pick(g: &Graph, symbol: &str) -> Result<NodeId> {
+    let mut hits = g.find(symbol);
+    if hits.is_empty() {
+        bail!("no definition named `{symbol}`");
+    }
+    hits.sort_by_key(|&n| rank_candidate(g, n));
+    if hits.len() > 1 {
+        eprintln!(
+            "note: {} definitions named `{symbol}`; using {}",
+            hits.len(),
+            describe(g, hits[0])
+        );
+    }
+    Ok(hits[0])
+}
+
+fn neighbors(repo: &Path, symbol: &str, limit: usize, min_conf: u8, inbound: bool) -> Result<()> {
+    let (g, _) = load(repo)?;
+    let target = pick(&g, symbol)?;
+    let t = Instant::now();
+    let mut ns: Vec<Neighbor> = if inbound {
+        g.callers(target)
+    } else {
+        g.callees(target)
+    };
+    let us = t.elapsed().as_micros();
+    ns.retain(|n| n.conf >= min_conf);
+    ns.sort_unstable_by_key(|n| std::cmp::Reverse(n.conf));
+
+    println!(
+        "\n{} \x1b[1m{symbol}\x1b[0m — {} edges in {us} µs\n",
+        if inbound { "callers of" } else { "callees of" },
+        ns.len()
+    );
+    for n in ns.iter().take(limit) {
+        println!(
+            "  [{:>3}] {:<10} {}",
+            n.conf,
+            prov_name(n.prov),
+            describe(&g, n.node)
+        );
+    }
+    if ns.len() > limit {
+        println!("  … {} more", ns.len() - limit);
     }
     println!();
-
     Ok(())
+}
+
+fn prov_name(p: u8) -> &'static str {
+    match p {
+        0 => "scope",
+        1 => "import",
+        2 => "name",
+        3 => "co-change",
+        4 => "framework",
+        _ => "?",
+    }
+}
+
+fn kind_name(k: u8) -> &'static str {
+    match k {
+        x if x == DefKind::Function as u8 => "fn",
+        x if x == DefKind::Method as u8 => "method",
+        x if x == DefKind::Class as u8 => "class",
+        x if x == DefKind::Interface as u8 => "iface",
+        x if x == DefKind::Module as u8 => "file",
+        x if x == DefKind::Variable as u8 => "var",
+        _ => "?",
+    }
+}
+
+fn short_path(path: &str) -> String {
+    let tail: Vec<&str> = path.rsplit('/').take(3).collect();
+    tail.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+
+fn describe(g: &Graph, n: NodeId) -> String {
+    let (file, start, _) = g.location(n);
+    let kind = g.node_kind(n);
+    let loc = short_path(g.path(file));
+    if kind == DefKind::Module as u8 {
+        // a file node's name *is* its path — printing both is noise
+        return format!("{:<7} {}", "file", loc);
+    }
+    format!("{:<7} {:<34} {}@{}", kind_name(kind), g.name(n), loc, start)
+}
+
+/// Rank candidates when a name is ambiguous: real code over tests, shallower
+/// paths over deeper, functions over values. Django has five `get_or_create`
+/// definitions and four of them are fixtures.
+fn rank_candidate(g: &Graph, n: NodeId) -> (u8, usize) {
+    let (file, _, _) = g.location(n);
+    let path = g.path(file);
+    let is_test = path.contains("/test") || path.contains("_test.") || path.contains(".test.");
+    let kind = g.node_kind(n);
+    let kind_rank = if kind == DefKind::Variable as u8 { 1 } else { 0 };
+    ((is_test as u8) * 2 + kind_rank, path.matches('/').count())
 }

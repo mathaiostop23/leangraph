@@ -3,7 +3,10 @@
 //! Pure with respect to shared state (the interner is internally concurrent),
 //! so this parallelises across files with no coordination.
 
-use crate::core::{Def, DefIdx, FileId, FileUnit, Import, Interner, Ref, Span, NO_SCOPE};
+use crate::core::{
+    Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, Ref, RefKind, Span, NO_SCOPE,
+};
+use rustc_hash::FxHashSet;
 use crate::lang::{node_text, Lang, Spec};
 use memmap2::Mmap;
 use std::fs::File;
@@ -36,13 +39,24 @@ fn walk(
 ) {
     let mut cursor = tree.walk();
     let mut stack: Vec<(DefIdx, i32)> = Vec::with_capacity(16);
+    // Identifier nodes already recorded as a definition name or a call target.
+    // Without this, `foo()` would yield both a Call and a Read reference.
+    let mut consumed: FxHashSet<usize> = FxHashSet::default();
+    // Depths at which we entered a base-class / implements list.
+    let mut heritage: Vec<i32> = Vec::new();
     let mut depth: i32 = 0;
 
     loop {
-        // Leave any scopes whose subtree we have finished.
         while let Some(&(_, d)) = stack.last() {
             if d >= depth {
                 stack.pop();
+            } else {
+                break;
+            }
+        }
+        while let Some(&d) = heritage.last() {
+            if d >= depth {
+                heritage.pop();
             } else {
                 break;
             }
@@ -53,10 +67,21 @@ fn walk(
         let scope = stack.last().map(|&(i, _)| i).unwrap_or(NO_SCOPE);
         t.ast_nodes += 1;
 
+        // A heritage list only counts as one when it actually hangs off a class:
+        // Python reuses `argument_list` for ordinary call arguments.
+        if spec.is_heritage(kind)
+            && node
+                .parent()
+                .is_some_and(|p| spec.is_class_node(p.kind_id()))
+        {
+            heritage.push(depth);
+        }
+
         if let Some(dk) = spec.def_kind_of(&node) {
             if let Some(nn) = spec.def_name_node(&node) {
                 if let Some(txt) = node_text(&nn, src) {
                     let idx = unit.defs.len() as DefIdx;
+                    consumed.insert(nn.id());
                     unit.defs.push(Def {
                         name: interner.get_or_intern(txt),
                         kind: dk,
@@ -67,9 +92,25 @@ fn walk(
                     stack.push((idx, depth));
                 }
             }
+        } else if let Some(nn) = spec
+            .var_def_name(&node)
+            .filter(|_| at_container_scope(&unit.defs, scope))
+        {
+            if let Some(txt) = node_text(&nn, src) {
+                consumed.insert(nn.id());
+                unit.defs.push(Def {
+                    name: interner.get_or_intern(txt),
+                    kind: DefKind::Variable,
+                    span: Span::of(&node),
+                    name_span: Span::of(&nn),
+                    parent: scope,
+                });
+                // not pushed onto the scope stack: a value does not contain code
+            }
         } else if let Some(rk) = spec.ref_kind(kind) {
             if let Some(nn) = spec.ref_name_node(&node) {
                 if let Some(txt) = node_text(&nn, src) {
+                    consumed.insert(nn.id());
                     unit.refs.push(Ref {
                         name: interner.get_or_intern(txt),
                         kind: rk,
@@ -88,6 +129,22 @@ fn walk(
                     });
                 }
             }
+        } else if spec.is_ident(kind) && !consumed.contains(&node.id()) {
+            // Everything else that names something: superclasses, type
+            // annotations, decorators, arguments. A class that is subclassed
+            // but never called is invisible without these.
+            if let Some(txt) = node_text(&node, src) {
+                unit.refs.push(Ref {
+                    name: interner.get_or_intern(txt),
+                    kind: if heritage.is_empty() {
+                        RefKind::Read
+                    } else {
+                        RefKind::Extends
+                    },
+                    span: Span::of(&node),
+                    scope,
+                });
+            }
         }
 
         if cursor.goto_first_child() {
@@ -105,6 +162,13 @@ fn walk(
             depth -= 1;
         }
     }
+}
+
+/// True at module level or directly inside a class — the scopes where a named
+/// value is part of the API surface rather than a local temporary.
+#[inline]
+fn at_container_scope(defs: &[Def], scope: DefIdx) -> bool {
+    scope == NO_SCOPE || matches!(defs[scope as usize].kind, DefKind::Class | DefKind::Interface)
 }
 
 pub fn extract_file(

@@ -72,6 +72,16 @@ pub struct Spec {
     f_value: Vec<u16>,
     /// value kinds that make a conditional definition count as a function
     fn_values: Vec<u16>,
+    /// nodes that define a named value. Only recorded at module or class
+    /// scope: a local inside a function body is noise in a code graph, but a
+    /// module constant or a class attribute is a real thing people reference.
+    var_defs: Vec<u16>,
+    /// field ids holding a variable definition's name
+    f_var_name: Vec<u16>,
+    /// bare identifier node kinds, captured as generic references
+    idents: Vec<u16>,
+    /// nodes listing base classes / implemented interfaces
+    heritage: Vec<u16>,
 }
 
 fn kinds(l: &Language, names: &[&str]) -> Vec<u16> {
@@ -122,6 +132,10 @@ pub fn spec_for(lang: Lang) -> Spec {
             cond_defs: Vec::new(),
             f_value: Vec::new(),
             fn_values: Vec::new(),
+            var_defs: kinds(&l, &["assignment"]),
+            f_var_name: fields(&l, &["left"]),
+            idents: kinds(&l, &["identifier"]),
+            heritage: kinds(&l, &["argument_list"]),
         },
         Lang::TypeScript | Lang::Tsx => Spec {
             lang,
@@ -155,6 +169,10 @@ pub fn spec_for(lang: Lang) -> Spec {
                 &l,
                 &["arrow_function", "function_expression", "function", "class"],
             ),
+            var_defs: kinds(&l, &["variable_declarator", "public_field_definition"]),
+            f_var_name: fields(&l, &["name"]),
+            idents: kinds(&l, &["identifier", "type_identifier"]),
+            heritage: kinds(&l, &["class_heritage", "extends_clause", "implements_clause"]),
         },
     }
 }
@@ -181,9 +199,43 @@ impl Spec {
         None
     }
 
+    /// Name node for a variable-style definition, if this node is one.
+    /// Destructuring patterns are skipped: `const {a, b} = x` binds several
+    /// names and none of them is *the* definition of that statement.
+    #[inline]
+    pub fn var_def_name<'t>(&self, node: &Node<'t>) -> Option<Node<'t>> {
+        if !self.var_defs.contains(&node.kind_id()) {
+            return None;
+        }
+        let n = first_field(node, &self.f_var_name)?;
+        matches!(n.kind(), "identifier" | "property_identifier" | "type_identifier").then_some(n)
+    }
+
     #[inline]
     pub fn ref_kind(&self, k: u16) -> Option<RefKind> {
         self.refs.iter().find(|(id, _)| *id == k).map(|(_, r)| *r)
+    }
+
+    /// Node kinds that define a class — needed to disambiguate Python's
+    /// `argument_list`, which serves both call arguments and superclasses.
+    #[inline]
+    pub fn is_class_node(&self, k: u16) -> bool {
+        self.defs
+            .iter()
+            .any(|(id, d)| *id == k && matches!(d, DefKind::Class))
+    }
+
+    #[inline]
+    pub fn is_ident(&self, k: u16) -> bool {
+        self.idents.contains(&k)
+    }
+
+    /// True inside a base-class / implements list. Python reuses
+    /// `argument_list` for both call arguments and superclasses, so the caller
+    /// must check the enclosing node kind, not just this one.
+    #[inline]
+    pub fn is_heritage(&self, k: u16) -> bool {
+        self.heritage.contains(&k)
     }
 
     #[inline]

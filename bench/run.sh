@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Reproducible Phase 0 harness: arbor parse+extract vs CodeGraph full index.
+# Differential benchmark: arbor vs CodeGraph, same repos, same machine.
+#
+# Compares both wall clock AND graph size, because a speed number without a
+# graph-size number next to it is meaningless — anyone can be fast by
+# extracting less.
 #
 # Usage: bench/run.sh [repo ...]     (default: flask excalidraw django)
 set -uo pipefail
@@ -26,7 +30,8 @@ if [[ $# -gt 0 ]]; then TARGETS=("$@"); else TARGETS=(flask excalidraw django); 
 [[ -x "$ARBOR" ]] || { echo "build first: cargo build --release" >&2; exit 1; }
 mkdir -p "$REPOS_DIR"
 
-# --- median of N wall-clock seconds for a command -----------------------------
+strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+
 median_wall() {
   local n=$1; shift
   local -a t=()
@@ -37,15 +42,14 @@ median_wall() {
   printf '%s\n' "${t[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'
 }
 
-# --- measure the CLI's fixed process-startup cost, so we can subtract it ------
 echo "measuring codegraph process startup ..."
 STARTUP=$(median_wall 3 "$CG --version")
 echo "  startup overhead: ${STARTUP}s (subtracted from codegraph totals below)"
 echo
 
-printf '%-12s %8s %9s %12s %14s %8s %9s\n' \
-  REPO FILES MB ARBOR CODEGRAPH SHARE HEADROOM
-printf '%.0s-' {1..78}; echo
+printf '%-12s %7s %19s %19s %8s\n' "" "" "--------- arbor ---------" "------- codegraph -------" ""
+printf '%-12s %7s %9s %9s %9s %9s %8s\n' REPO FILES TIME NODES TIME NODES SPEEDUP
+printf '%.0s-' {1..70}; echo
 
 for r in "${TARGETS[@]}"; do
   path="$REPOS_DIR/$r"
@@ -55,27 +59,35 @@ for r in "${TARGETS[@]}"; do
     git clone --depth 1 --quiet "$url" "$path"
   fi
 
-  # arbor: parse + extract only (no resolution, no persistence)
-  a=$(median_wall "$RUNS" "$ARBOR '$path'")
-  read -r files mb < <("$ARBOR" "$path" 2>/dev/null \
-    | sed 's/\x1b\[[0-9;]*m//g' \
-    | awk '/^  files/{gsub(/[(),]/,""); print $2, $3}')
+  a=$(median_wall "$RUNS" "$ARBOR index '$path'")
+  out=$("$ARBOR" index "$path" 2>/dev/null | strip_ansi)
+  files=$(awk '/^  files/{print $2}' <<<"$out")
+  a_nodes=$(awk '/^  graph/{print $2}' <<<"$out")
+  a_edges=$(awk '/^  graph/{print $5}' <<<"$out")
+  a_res=$(awk '/^  resolution/{print $2}' <<<"$out")
 
-  # codegraph: full index (extract + resolve + persist)
   [[ -d "$path/.codegraph" ]] || $CG init "$path" </dev/null >/dev/null 2>&1
   c=$(median_wall "$RUNS" "$CG index '$path' --force </dev/null")
   c=$(awk -v c="$c" -v s="$STARTUP" 'BEGIN{printf "%.2f", (c-s > 0 ? c-s : c)}')
+  cg_out=$($CG index "$path" --force </dev/null 2>&1 | strip_ansi | tr -d '.')
+  c_nodes=$(awk '/nodes,/{for(i=1;i<=NF;i++) if($(i+1)=="nodes,") print $i}' <<<"$cg_out" | head -1)
+  c_edges=$(awk '/edges/{for(i=1;i<=NF;i++) if($(i+1)=="edges") print $i}' <<<"$cg_out" | head -1)
 
-  awk -v r="$r" -v f="$files" -v mb="$mb" -v a="$a" -v c="$c" 'BEGIN{
-    printf "%-12s %8s %9s %10.0f ms %12.2f s %7.1f%% %8.0fx\n",
-           r, f, mb, a*1000, c, 100*a/c, c/a
+  awk -v r="$r" -v f="$files" -v a="$a" -v an="$a_nodes" -v ae="$a_edges" -v ar="$a_res" \
+      -v c="$c" -v cn="$c_nodes" -v ce="$c_edges" 'BEGIN{
+    printf "%-12s %7s %7.0f ms %9s %7.2f s %9s %7.0fx\n", r, f, a*1000, an, c, cn, c/a
+    printf "%-12s %7s %19s %19s\n", "", "", ae " edges", ce " edges"
+    printf "%-12s %7s %19s\n", "", "", ar " resolved"
   }'
 done
 
 cat <<'EOF'
 
-ARBOR      = parse + extract only (mmap, blake3, tree-sitter, cursor walk)
-CODEGRAPH  = full index: extract + resolve + persist, minus process startup
-SHARE      = what fraction of CodeGraph's pipeline parse+extract accounts for
-HEADROOM   = time budget available to us for resolution + persistence
+arbor      discover + extract + resolve.  NOT YET PERSISTED — Phase 2 adds CSR
+           write, so this number will grow. Treat it as a floor, not a product
+           number.
+codegraph  full index: extract + resolve + persist, minus process startup.
+resolved   share of references whose target exists in the repo that we linked.
+           Excludes language builtins and third-party deps, which have no
+           in-repo target and cannot be resolved by anyone.
 EOF

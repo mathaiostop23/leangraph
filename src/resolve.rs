@@ -9,8 +9,10 @@
 //! consumer cannot discount it.
 
 use crate::core::{
-    Def, DefIdx, Edge, EdgeKind, FileId, FileUnit, Interner, NodeId, Provenance, SymId, NO_SCOPE,
+    Def, DefIdx, DefKind, Edge, EdgeKind, FileId, FileUnit, Interner, NodeId, Provenance, RefKind,
+    SymId, NO_SCOPE,
 };
+use lasso::Key;
 use crate::lang::Lang;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -29,6 +31,9 @@ pub struct ResolveStats {
     pub name_unique: u64,
     pub name_ambiguous: u64,
     pub too_ambiguous: u64,
+    /// Bare identifier reads that reached tier 3, where name matching is not
+    /// justified. Reported, not silently dropped.
+    pub weak_read: u64,
     pub builtin: u64,
     pub external: u64,
     pub contains: u64,
@@ -41,6 +46,7 @@ impl ResolveStats {
         self.name_unique += o.name_unique;
         self.name_ambiguous += o.name_ambiguous;
         self.too_ambiguous += o.too_ambiguous;
+        self.weak_read += o.weak_read;
         self.builtin += o.builtin;
         self.external += o.external;
         self.contains += o.contains;
@@ -50,7 +56,7 @@ impl ResolveStats {
         self.scope + self.import + self.name_unique + self.name_ambiguous
     }
     pub fn total_refs(&self) -> u64 {
-        self.resolved() + self.too_ambiguous + self.builtin + self.external
+        self.resolved() + self.too_ambiguous + self.weak_read + self.builtin + self.external
     }
     /// References whose target actually exists in this repository.
     ///
@@ -197,8 +203,19 @@ fn resolve_import(
 
 // ------------------------------------------------------------------ resolve
 
+/// Flat per-node metadata, structure-of-arrays on disk.
+#[derive(Clone, Copy, Default)]
+pub struct NodeMeta {
+    pub name: u32,
+    pub kind: u8,
+    pub file: u32,
+    pub start: u32,
+    pub end: u32,
+}
+
 pub struct Resolved {
     pub space: NodeSpace,
+    pub nodes: Vec<NodeMeta>,
     pub edges: Vec<Edge>,
     pub stats: ResolveStats,
 }
@@ -302,7 +319,7 @@ pub fn resolve(
                     out.push(Edge {
                         src: enclosing(&space, fid, r.scope),
                         dst: space.def_node(fid, hit),
-                        kind: EdgeKind::Calls,
+                        kind: r.kind.edge_kind(),
                         conf: Provenance::Scope.base_conf(),
                         prov: Provenance::Scope,
                     });
@@ -315,7 +332,7 @@ pub fn resolve(
                     out.push(Edge {
                         src: enclosing(&space, fid, r.scope),
                         dst,
-                        kind: EdgeKind::Calls,
+                        kind: r.kind.edge_kind(),
                         conf: Provenance::Import.base_conf(),
                         prov: Provenance::Import,
                     });
@@ -323,7 +340,18 @@ pub fn resolve(
                     continue;
                 }
 
-                // tier 3 — global name match, ranked by locality
+                // tier 3 — global name match, ranked by locality.
+                //
+                // Only for references whose *syntax* says they name a
+                // definition: a call, an instantiation, a superclass. A bare
+                // identifier read is too weak a signal — matching a local
+                // variable `request` against every repo symbol called
+                // `request` is noise, and it is the single largest source of
+                // false edges.
+                if matches!(r.kind, RefKind::Read) {
+                    st.weak_read += 1;
+                    continue;
+                }
                 let Some(cands) = by_name.get(&r.name) else {
                     if builtins.contains(&r.name) {
                         st.builtin += 1;
@@ -361,7 +389,7 @@ pub fn resolve(
                     out.push(Edge {
                         src: enclosing(&space, fid, r.scope),
                         dst: space.def_node(cf, cd),
-                        kind: EdgeKind::Calls,
+                        kind: r.kind.edge_kind(),
                         conf,
                         prov: Provenance::NameMatch,
                     });
@@ -378,8 +406,42 @@ pub fn resolve(
             },
         );
 
+    // Collapse duplicates: a function referencing the same target three times
+    // is one graph edge. Keep the highest-confidence evidence for it.
+    let mut edges = edges;
+    edges.par_sort_unstable_by_key(|e| (e.src.0, e.dst.0, e.kind as u8, std::cmp::Reverse(e.conf)));
+    edges.dedup_by(|a, b| a.src == b.src && a.dst == b.dst && a.kind == b.kind);
+
+    // ---- node metadata -----------------------------------------------------
+    // Files occupy the low ids; their "name" is the interned path so a file
+    // node is searchable like any other.
+    let mut nodes = vec![NodeMeta::default(); space.total as usize];
+    for (f, path) in paths.iter().enumerate() {
+        let key = interner.get_or_intern(path.to_string_lossy().as_ref());
+        nodes[f] = NodeMeta {
+            name: key.into_usize() as u32,
+            kind: DefKind::Module as u8,
+            file: f as u32,
+            start: 0,
+            end: 0,
+        };
+    }
+    for (f, unit) in units.iter().enumerate() {
+        for (d, def) in unit.defs.iter().enumerate() {
+            let n = space.def_node(f as FileId, d as DefIdx).0 as usize;
+            nodes[n] = NodeMeta {
+                name: def.name.into_usize() as u32,
+                kind: def.kind as u8,
+                file: f as u32,
+                start: def.span.start,
+                end: def.span.end,
+            };
+        }
+    }
+
     Resolved {
         space,
+        nodes,
         edges,
         stats,
     }
