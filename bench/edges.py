@@ -172,6 +172,51 @@ class Runtime:
         return False
 
 
+class Static:
+    """The same matching rules, pointed the other way.
+
+    Recall asks whether arbor has an observed edge; calibration asks whether an
+    arbor edge was observed. They must use the same rules or the two numbers are
+    not about the same thing — the first version of this file applied the
+    constructor and MRO rules to one and not the other, which made recall look
+    worse than the calibration table it sat above.
+    """
+
+    def __init__(self, calls, kin):
+        self.exact = set()
+        self.by_caller = defaultdict(set)
+        self.classes = set()
+        for e in calls:
+            sq, dq = norm_qual(e["sq"]), norm_qual(e["dq"])
+            self.exact.add((e["sf"], sq, e["df"], dq))
+            self.by_caller[(e["sf"], sq)].add((e["df"], dq))
+            if e["dk"] in ("class", "iface"):
+                self.classes.add((e["df"], dq))
+        self.kin = kin
+
+    def has(self, o, stage):
+        cf, cq, df, dq = o[0], o[1], o[2], o[3]
+        if (cf, cq, df, dq) in self.exact:
+            return True
+        out = self.by_caller.get((cf, cq), ())
+        if stage >= 2:
+            # Runtime enters `X.__init__`; arbor records a call to the class.
+            for ctor in (".__init__", ".__new__"):
+                if dq.endswith(ctor):
+                    owner = dq[: -len(ctor)]
+                    if (df, owner) in out and (df, owner) in self.classes:
+                        return True
+        if stage >= 3:
+            p = dq.rsplit(".", 1)
+            if len(p) == 2:
+                owner, meth = p
+                for (af, aq) in out:
+                    q = aq.rsplit(".", 1)
+                    if len(q) == 2 and q[1] == meth and q[0] in self.kin.get(owner, ()):
+                        return True
+        return False
+
+
 # ------------------------------------------------------------ codegraph labels
 
 CG_KIND = {"calls": "calls", "instantiates": "calls", "extends": "extends",
@@ -254,22 +299,34 @@ def main():
         # elsewhere; counting it here would be counting it twice.
         known = {(e["sf"], norm_qual(e["sq"])) for e in edges} | \
                 {(e["df"], norm_qual(e["dq"])) for e in edges}
-        have = {(e["sf"], norm_qual(e["sq"]), e["df"], norm_qual(e["dq"])) for e in calls}
+        static = Static(calls, rt.kin)
         obs = [(e["cf"], norm_qual(e["cq"]), e["df"], norm_qual(e["dq"]), e["hops"])
                for e in tedges]
         joinable = [o for o in obs if (o[0], o[1]) in known and (o[2], o[3]) in known]
         direct = [o for o in joinable if o[4] == 0]
-        hit = sum(1 for o in joinable if o[:4] in have)
-        hit_d = sum(1 for o in direct if o[:4] in have)
         print(f"\n  \033[1mrecall against execution\033[0m")
         print(f"    observed edges                     {len(obs):>8,}")
         print(f"    both endpoints are arbor nodes     {len(joinable):>8,}")
-        print(f"    arbor has the edge                 {hit:>8,}   "
-              f"\033[1m{100*hit/max(len(joinable),1):.1f}%\033[0m")
-        print(f"    …counting only direct calls        {hit_d:>8,} / {len(direct):,}   "
-              f"{100*hit_d/max(len(direct),1):.1f}%")
-        print(f"    \033[2m(a call routed through a library — hops>0 — is a weaker "
-              f"claim on both sides)\033[0m")
+        print(f"    {'':<35}{'all':>12}{'direct only':>14}")
+        for stage, label in ((1, "exact match"), (2, "+ constructor rule"),
+                             (3, "+ MRO closure")):
+            a = sum(1 for o in joinable if static.has(o, stage))
+            d = sum(1 for o in direct if static.has(o, stage))
+            bold = "\033[1m" if stage == 3 else ""
+            end = "\033[0m" if stage == 3 else ""
+            print(f"    {label:<35}{bold}{100*a/max(len(joinable),1):>11.1f}%{end}"
+                  f"{100*d/max(len(direct),1):>13.1f}%")
+        # Where the remainder lives. A handful of dispatch sites dominate it,
+        # and a reader who is not told that will read the headline as a uniform
+        # failure rather than as a small number of places no static analysis
+        # can follow.
+        miss = [o for o in direct if not static.has(o, 3)]
+        hubs = Counter((o[0], o[1]) for o in miss).most_common(5)
+        top = sum(n for _, n in hubs)
+        print(f"    \033[2mof {len(miss):,} direct misses, {top:,} "
+              f"({100*top/max(len(miss),1):.0f}%) are calls out of five sites:\033[0m")
+        for (f, q), n in hubs:
+            print(f"      \033[2m{q[:48]:<50}{n:>5}\033[0m")
 
         # Calibration. Eligible = the caller actually ran, so a miss means the
         # edge was available to be observed and was not.

@@ -136,6 +136,49 @@ pub struct Ref {
     pub kind: RefKind,
     pub span: Span,
     pub scope: DefIdx,
+    /// What the call was made through.
+    pub recv: Recv,
+}
+
+/// How a reference reached its name.
+///
+/// The lexical scope chain is evidence about a bare name, and about a name
+/// reached through `self` — both are questions about the text around the call.
+/// It is not evidence about `other.foo()`: nothing in the surrounding scopes
+/// says what `other` is, and binding that to the nearest same-named method is a
+/// guess wearing the confidence of a proof. Measured on django, 1,285 edges at
+/// confidence 100 were a method calling *itself* because `super().x()` and
+/// `x()` were indistinguishable by the time the resolver saw them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum Recv {
+    /// `foo()`
+    #[default]
+    Bare = 0,
+    /// `self.foo()`, `this.foo()` — the enclosing object, so scope still holds
+    SelfObj = 1,
+    /// `super().foo()` — explicitly *not* this class's implementation
+    Super = 2,
+    /// `anything_else.foo()` — the receiver decides, and we do not know it
+    Other = 3,
+}
+
+impl Recv {
+    /// Is the lexical scope chain valid evidence for this reference?
+    #[inline]
+    pub fn lexical(self) -> bool {
+        matches!(self, Recv::Bare | Recv::SelfObj)
+    }
+
+    #[inline]
+    pub fn from_u8(v: u8) -> Recv {
+        match v {
+            1 => Recv::SelfObj,
+            2 => Recv::Super,
+            3 => Recv::Other,
+            _ => Recv::Bare,
+        }
+    }
 }
 
 /// A raw import statement. The module string is interned verbatim; turning it

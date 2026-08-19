@@ -9,7 +9,7 @@
 //! already the thing a config file would describe, so nothing above this module
 //! changes when that lands.
 
-use crate::core::{DefKind, RefKind};
+use crate::core::{DefKind, Recv, RefKind};
 use tree_sitter::{Language, Node};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -82,6 +82,10 @@ pub struct Spec {
     idents: Vec<u16>,
     /// nodes listing base classes / implemented interfaces
     heritage: Vec<u16>,
+    /// dotted access — `a.B`. Only the last segment names anything.
+    dotted: Vec<u16>,
+    /// field ids holding the receiver of a dotted access
+    f_object: Vec<u16>,
 }
 
 fn kinds(l: &Language, names: &[&str]) -> Vec<u16> {
@@ -136,6 +140,8 @@ pub fn spec_for(lang: Lang) -> Spec {
             f_var_name: fields(&l, &["left"]),
             idents: kinds(&l, &["identifier"]),
             heritage: kinds(&l, &["argument_list"]),
+            dotted: kinds(&l, &["attribute"]),
+            f_object: fields(&l, &["object"]),
         },
         Lang::TypeScript | Lang::Tsx => Spec {
             lang,
@@ -179,6 +185,8 @@ pub fn spec_for(lang: Lang) -> Spec {
             f_var_name: fields(&l, &["name"]),
             idents: kinds(&l, &["identifier", "type_identifier"]),
             heritage: kinds(&l, &["class_heritage", "extends_clause", "implements_clause"]),
+            dotted: kinds(&l, &["member_expression", "nested_type_identifier"]),
+            f_object: fields(&l, &["object", "module"]),
         },
     }
 }
@@ -244,6 +252,22 @@ impl Spec {
         self.heritage.contains(&k)
     }
 
+    /// The named segment of a dotted access, and nothing else.
+    ///
+    /// `class Migration(migrations.Migration)` has two identifiers in its
+    /// heritage list and only one of them is a base class. Treating both as
+    /// bases is how a module alias ends up recorded as a superclass — 8,655
+    /// edges in django, 47.4% of every `extends` edge it had.
+    #[inline]
+    pub fn is_dotted(&self, k: u16) -> bool {
+        self.dotted.contains(&k)
+    }
+
+    #[inline]
+    pub fn dotted_member<'t>(&self, node: &Node<'t>) -> Option<Node<'t>> {
+        first_field(node, &self.f_member)
+    }
+
     #[inline]
     pub fn is_import(&self, k: u16) -> bool {
         self.imports.contains(&k)
@@ -269,6 +293,30 @@ impl Spec {
             return Some(seg);
         }
         Some(callee)
+    }
+
+    /// What a call was made through.
+    ///
+    /// This is the piece of evidence the resolver was missing. `ref_name_node`
+    /// already reduces `app_config.get_models()` to `get_models`, which is
+    /// right — but it discards the receiver in doing so, and the receiver is
+    /// the whole reason the surrounding scopes cannot answer the question.
+    pub fn recv_of(&self, call: &Node, src: &[u8]) -> Recv {
+        let Some(callee) = first_field(call, &self.f_callee) else {
+            return Recv::Bare;
+        };
+        if !self.is_dotted(callee.kind_id()) {
+            return Recv::Bare;
+        }
+        let Some(obj) = first_field(&callee, &self.f_object) else {
+            return Recv::Other;
+        };
+        match node_text(&obj, src) {
+            Some("self") | Some("cls") | Some("this") => Recv::SelfObj,
+            // Python spells it `super()`, TypeScript spells it `super`.
+            Some(t) if t == "super" || t.starts_with("super(") => Recv::Super,
+            _ => Recv::Other,
+        }
     }
 
     /// The node holding an import's module path.

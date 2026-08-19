@@ -34,7 +34,14 @@ def harvest(repo, want, min_files=2, max_files=8):
     Too few files and the task is trivial; too many and it is a refactor, where
     'the right files' is not a meaningful target for retrieval.
     """
-    raw = sh(["git", "log", "--no-merges", "-n", "4000",
+    # `--no-renames` is not cosmetic here. On a partial or shallow clone rename
+    # detection compares blob *contents*, fetching them lazily as it goes, and
+    # its answers therefore depend on which blobs happen to be local. That makes
+    # the ground truth itself drift between runs: the same command on the same
+    # repository gave 27.8% and then 24.3% for the keyword baseline — a baseline
+    # that does not use arbor at all — because indexing in between had populated
+    # the object store. Disabling it makes the case list a function of history.
+    raw = sh(["git", "log", "--no-merges", "--no-renames", "-n", "4000",
               "--pretty=format:%x00%H%x01%s%x01%b", "--name-only"], repo)
     cases = []
     for chunk in raw.split("\x00"):
@@ -83,12 +90,26 @@ def keyword_baseline(repo, text, k, tracked):
     makes when it has no structural index.
     """
     counts = Counter()
-    for tok in list(set(tokenize(text)))[:12]:
+    # Deduplicated in order of appearance, not through a set. `set` iteration
+    # order for strings depends on PYTHONHASHSEED, so `list(set(...))[:12]`
+    # drew a different twelve tokens on every run — the baseline moved between
+    # 24.3% and 27.8% on identical input, and arbor was being compared against
+    # a number that was one sample from a distribution. Order of appearance is
+    # also the better rule: the subject line comes before the body.
+    seen, toks = set(), []
+    for t in tokenize(text):
+        if t not in seen:
+            seen.add(t)
+            toks.append(t)
+        if len(toks) == 12:
+            break
+    for tok in toks:
         out = sh(["git", "grep", "-l", "-F", "-w", "--", tok], repo)
         for f in out.splitlines():
             if f.endswith(SRC_EXT) and f in tracked:
                 counts[f] += 1
-    ranked = [f for f, _ in counts.most_common(k)]
+    # Ties broken by name rather than by insertion order, for the same reason.
+    ranked = [f for f, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:k]]
     return ranked, sum(file_tokens(repo, f) for f in ranked)
 
 

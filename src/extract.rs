@@ -5,7 +5,8 @@
 
 use crate::cache::FileMeta;
 use crate::core::{
-    Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, Ref, RefKind, Span, NO_SCOPE,
+    Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, Recv, Ref, RefKind, Span,
+    NO_SCOPE,
 };
 use rustc_hash::FxHashSet;
 use crate::lang::{node_text, Lang, Spec};
@@ -13,7 +14,7 @@ use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
-use tree_sitter::Parser as TsParser;
+use tree_sitter::{Node, Parser as TsParser};
 
 #[derive(Default, Clone, Copy)]
 pub struct Timings {
@@ -78,6 +79,24 @@ fn walk(
             heritage.push(depth);
         }
 
+        // A dotted base class names exactly one thing: the last segment. The
+        // segments before it are a module or a namespace, and recording them
+        // as superclasses is not a near miss — `migrations` is not a class.
+        if !heritage.is_empty() && spec.is_dotted(kind) {
+            if let Some(seg) = spec.dotted_member(&node) {
+                if let Some(txt) = node_text(&seg, src) {
+                    consume_idents(&node, spec, &mut consumed);
+                    unit.refs.push(Ref {
+                        name: interner.get_or_intern(txt),
+                        kind: RefKind::Extends,
+                        span: Span::of(&node),
+                        scope,
+                        recv: Recv::Bare,
+                    });
+                }
+            }
+        }
+
         if let Some(dk) = spec.def_kind_of(&node) {
             if let Some(nn) = spec.def_name_node(&node) {
                 if let Some(txt) = node_text(&nn, src) {
@@ -117,6 +136,7 @@ fn walk(
                         kind: rk,
                         span: Span::of(&node),
                         scope,
+                        recv: spec.recv_of(&node, src),
                     });
                 }
             }
@@ -144,6 +164,7 @@ fn walk(
                     },
                     span: Span::of(&node),
                     scope,
+                    recv: Recv::Bare,
                 });
             }
         }
@@ -169,6 +190,35 @@ fn walk(
 /// it. Python has no separate node kind for this — `def` is `function_definition`
 /// at every level — so the distinction has to come from the enclosing scope.
 #[inline]
+/// Mark every identifier in a subtree as already accounted for.
+///
+/// Used where one node speaks for its whole subtree — a dotted base class —
+/// so the generic identifier branch does not also record the parts.
+fn consume_idents(node: &Node, spec: &Spec, consumed: &mut FxHashSet<usize>) {
+    let mut c = node.walk();
+    let mut depth = 0i32;
+    loop {
+        let n = c.node();
+        if spec.is_ident(n.kind_id()) {
+            consumed.insert(n.id());
+        }
+        if c.goto_first_child() {
+            depth += 1;
+            continue;
+        }
+        loop {
+            if c.goto_next_sibling() {
+                break;
+            }
+            if depth == 0 {
+                return;
+            }
+            c.goto_parent();
+            depth -= 1;
+        }
+    }
+}
+
 fn reclassify(kind: DefKind, defs: &[Def], scope: DefIdx) -> DefKind {
     if kind == DefKind::Function
         && scope != NO_SCOPE

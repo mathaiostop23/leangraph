@@ -12,7 +12,9 @@
 //! live interner and the ids are remapped, so a cache written by one run is
 //! valid for the next even though the interner is rebuilt from scratch.
 
-use crate::core::{Def, DefKind, FileUnit, Import, Interner, Ref, RefKind, Span, SymId};
+use crate::core::{
+    Def, DefKind, FileUnit, Import, Interner, Recv, Ref, RefKind, Span, SymId,
+};
 use crate::lang::Lang;
 use anyhow::{bail, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -22,7 +24,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAGIC: [u8; 8] = *b"ARBORC\x00\x02";
+const MAGIC: [u8; 8] = *b"ARBORC\x00\x03";
 const N_SECTIONS: usize = 10;
 
 const S_FILES: usize = 0;
@@ -83,7 +85,10 @@ struct CRef {
     span_s: u32,
     span_e: u32,
     scope: u32,
-    _pad: u32,
+    /// `Recv`, in the space the padding already occupied. The magic is bumped
+    /// anyway: a cache written before the receiver existed holds refs whose
+    /// meaning has changed, not merely a missing field.
+    recv: u32,
 }
 
 #[repr(C)]
@@ -225,7 +230,7 @@ pub fn write(
                 span_s: r.span.start,
                 span_e: r.span.end,
                 scope: r.scope,
-                _pad: 0,
+                recv: r.recv as u32,
             });
         }
         for m in &u.imports {
@@ -368,6 +373,7 @@ pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>>
                         end: r.span_e,
                     },
                     scope: r.scope,
+                    recv: Recv::from_u8(r.recv as u8),
                 })
                 .collect(),
             imports: imports[cf.imp_at as usize..(cf.imp_at + cf.imp_n) as usize]

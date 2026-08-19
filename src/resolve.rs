@@ -10,7 +10,7 @@
 
 use crate::core::{
     Def, DefIdx, DefKind, Edge, EdgeKind, FileId, FileUnit, Interner, NodeId, NodeKey, Provenance,
-    RefKind, SymId, NO_SCOPE,
+    Recv, RefKind, SymId, NO_SCOPE,
 };
 use crate::idtable::IdTable;
 use lasso::Key;
@@ -364,11 +364,17 @@ pub fn resolve(
     }
 
     // Intern builtin names once so the hot path compares u32s, not strings.
-    let builtins: FxHashSet<SymId> = PY_BUILTINS
-        .iter()
-        .chain(JS_BUILTINS.iter())
-        .filter_map(|n| interner.get(n))
-        .collect();
+    //
+    // Kept apart by language, and consulted *before* the global name index
+    // rather than only when the index misses. The old order meant the filter
+    // was unreachable whenever a repository defined the name anywhere at all:
+    // django ships a minified JavaScript bundle containing a function called
+    // `len`, so every Python `len()` in the tree — 2,878 of them — resolved
+    // into vendored JavaScript.
+    let py_builtins: FxHashSet<SymId> =
+        PY_BUILTINS.iter().filter_map(|n| interner.get(n)).collect();
+    let js_builtins: FxHashSet<SymId> =
+        JS_BUILTINS.iter().filter_map(|n| interner.get(n)).collect();
 
     let dirs: Vec<&Path> = paths.iter().map(|p| p.parent().unwrap_or(root)).collect();
 
@@ -432,31 +438,60 @@ pub fn resolve(
                 }
             }
 
+            // What each class in this file declares as a base. The heritage
+            // list is inside the class node, so its Extends refs carry that
+            // class as their scope — the information is already here, it was
+            // simply never used.
+            let mut bases: FxHashMap<DefIdx, Vec<SymId>> = FxHashMap::default();
             for r in &unit.refs {
-                // tier 1 — lexical scope chain
-                if let Some(hit) = walk_scopes(&unit.defs, &scoped, r.scope, r.name) {
-                    out.push(Edge {
-                        src: enclosing(&space, fid, r.scope),
-                        dst: space.def_node(fid, hit),
-                        kind: r.kind.edge_kind(),
-                        conf: Provenance::Scope.base_conf(),
-                        prov: Provenance::Scope,
-                    });
-                    st.scope += 1;
-                    continue;
+                if r.kind == RefKind::Extends && r.scope != NO_SCOPE {
+                    bases.entry(r.scope).or_default().push(r.name);
                 }
+            }
 
-                // tier 2 — explicit import
-                if let Some(&dst) = imported.get(&r.name) {
-                    out.push(Edge {
-                        src: enclosing(&space, fid, r.scope),
-                        dst,
-                        kind: r.kind.edge_kind(),
-                        conf: Provenance::Import.base_conf(),
-                        prov: Provenance::Import,
-                    });
-                    st.import += 1;
-                    continue;
+            for r in &unit.refs {
+                let src = enclosing(&space, fid, r.scope);
+
+                // Tiers 1 and 2 are both statements about the text around the
+                // reference: which names are in scope, which names were
+                // imported. Neither says anything about `other.foo()` — the
+                // receiver decides that, and we do not know what it is. Binding
+                // it through the scope chain anyway is what made a method call
+                // itself: `super().x()` inside `x` resolved to `x`.
+                if r.recv.lexical() {
+                    // tier 1 — lexical scope chain
+                    if let Some(hit) = walk_scopes(&unit.defs, &scoped, r.scope, r.name) {
+                        // A class is on the scope stack while its own base list
+                        // is being read, so `class Migration(migrations.Migration)`
+                        // finds itself. Recursion makes a self-call legitimate;
+                        // nothing makes a class its own superclass.
+                        if r.kind == RefKind::Extends && space.def_node(fid, hit) == src {
+                            st.too_ambiguous += 1;
+                            continue;
+                        }
+                        out.push(Edge {
+                            src,
+                            dst: space.def_node(fid, hit),
+                            kind: r.kind.edge_kind(),
+                            conf: Provenance::Scope.base_conf(),
+                            prov: Provenance::Scope,
+                        });
+                        st.scope += 1;
+                        continue;
+                    }
+
+                    // tier 2 — explicit import
+                    if let Some(&dst) = imported.get(&r.name) {
+                        out.push(Edge {
+                            src,
+                            dst,
+                            kind: r.kind.edge_kind(),
+                            conf: Provenance::Import.base_conf(),
+                            prov: Provenance::Import,
+                        });
+                        st.import += 1;
+                        continue;
+                    }
                 }
 
                 // tier 3 — global name match, ranked by locality.
@@ -471,24 +506,89 @@ pub fn resolve(
                     st.weak_read += 1;
                     continue;
                 }
+                // The language runtime owns this name. Scope and import have
+                // already had their turn, so anything reaching here that is
+                // called `len` in Python is the builtin.
+                let mine = if langs[fid as usize] == Lang::Python {
+                    &py_builtins
+                } else {
+                    &js_builtins
+                };
+                if mine.contains(&r.name) {
+                    st.builtin += 1;
+                    continue;
+                }
                 let Some(cands) = by_name.get(&r.name) else {
-                    if builtins.contains(&r.name) {
-                        st.builtin += 1;
-                    } else {
-                        // defined nowhere in the repo: third-party dependency
-                        st.external += 1;
-                    }
+                    // defined nowhere in the repo: third-party dependency
+                    st.external += 1;
                     continue;
                 };
+                // A Python function cannot call a JavaScript one. The index is
+                // global and has no idea, so the filter belongs here: 14,533
+                // django edges crossed a language boundary without it.
+                let cands: Vec<&(FileId, DefIdx)> = cands
+                    .iter()
+                    .filter(|&&(cf, _)| same_family(langs[fid as usize], langs[cf as usize]))
+                    .collect();
+                if cands.is_empty() {
+                    st.external += 1;
+                    continue;
+                }
+                // `super().x()` means one of the classes this one declares.
+                // That has to narrow the candidates *before* locality does, or
+                // the answer is thrown away first: `Flask` extends `App`, which
+                // lives in a different directory, so the same-directory bucket
+                // wins and never contains the base at all.
+                let mut cands = cands;
+                if r.recv == Recv::Super {
+                    if let Some(names) = enclosing_class(&unit.defs, r.scope)
+                        .and_then(|c| bases.get(&c))
+                    {
+                        let narrowed: Vec<&(FileId, DefIdx)> = cands
+                            .iter()
+                            .filter(|&&&(cf, cd)| {
+                                let owner = units[cf as usize].defs[cd as usize].parent;
+                                owner != NO_SCOPE
+                                    && names
+                                        .contains(&units[cf as usize].defs[owner as usize].name)
+                            })
+                            .copied()
+                            .collect();
+                        if !narrowed.is_empty() {
+                            cands = narrowed;
+                        }
+                    }
+                }
+
                 let best = cands
                     .iter()
-                    .map(|&(cf, _)| locality(cf, fid, &dirs))
+                    .map(|&&(cf, _)| locality(cf, fid, &dirs))
                     .max()
                     .unwrap_or(0);
-                let top: Vec<_> = cands
+                let mut top: Vec<_> = cands
                     .iter()
-                    .filter(|&&(cf, _)| locality(cf, fid, &dirs) == best)
+                    .filter(|&&&(cf, _)| locality(cf, fid, &dirs) == best)
+                    .copied()
                     .collect();
+
+                // The cap is applied before narrowing for everything except
+                // `super()`, whose narrowing is real evidence and is allowed to
+                // rescue a reference the cap would otherwise have dropped.
+                if top.len() > MAX_AMBIGUITY && r.recv != Recv::Super {
+                    st.too_ambiguous += 1;
+                    continue;
+                }
+
+                // `super().x()` means the base class's implementation, and the
+                // one thing it can never mean is this one.
+                if r.recv == Recv::Super || r.kind == RefKind::Extends {
+                    top.retain(|&&(cf, cd)| space.def_node(cf, cd) != src);
+                    if top.is_empty() {
+                        st.too_ambiguous += 1;
+                        continue;
+                    }
+                }
+
 
                 if top.len() > MAX_AMBIGUITY {
                     st.too_ambiguous += 1;
@@ -506,7 +606,7 @@ pub fn resolve(
                 }
                 for &&(cf, cd) in &top {
                     out.push(Edge {
-                        src: enclosing(&space, fid, r.scope),
+                        src,
                         dst: space.def_node(cf, cd),
                         kind: r.kind.edge_kind(),
                         conf,
@@ -608,6 +708,35 @@ fn walk_scopes(
 /// Same file beats same directory beats anywhere. Cheap, and it meaningfully
 /// improves tier-3 precision on repos that reuse short method names.
 #[inline]
+/// Can a reference in one language name a definition in the other?
+///
+/// TypeScript, TSX and JavaScript share a module system and routinely reference
+/// each other. Python and that family do not, in either direction.
+#[inline]
+fn same_family(a: Lang, b: Lang) -> bool {
+    matches!(
+        (a, b),
+        (Lang::Python, Lang::Python)
+            | (Lang::TypeScript | Lang::Tsx, Lang::TypeScript | Lang::Tsx)
+    )
+}
+
+/// The class a reference sits inside, if any.
+#[inline]
+fn enclosing_class(defs: &[Def], mut scope: DefIdx) -> Option<DefIdx> {
+    for _ in 0..32 {
+        if scope == NO_SCOPE {
+            return None;
+        }
+        let d = defs.get(scope as usize)?;
+        if matches!(d.kind, DefKind::Class | DefKind::Interface) {
+            return Some(scope);
+        }
+        scope = d.parent;
+    }
+    None
+}
+
 fn locality(cand: FileId, from: FileId, dirs: &[&Path]) -> u8 {
     if cand == from {
         3

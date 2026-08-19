@@ -1,0 +1,95 @@
+
+[1mflask[0m — 3,356 semantic edges (5,326 total, 1,970 structural)
+
+  [2mfalsified by rule[0m
+    extends self                                 0   0.00%
+    self-call, no recursion in source           21   0.63%
+    extends a non-class                          8   0.24%
+    crosses a language boundary                  0   0.00%
+    targets a vendored bundle                    0   0.00%
+    —— at least one rule ——                     29   0.86%
+
+  [2mfloor on the error rate, by confidence bucket[0m
+    kind       provenance  conf    edges  falsified   floor
+    calls      scope        100      231          0    0.0%
+    calls      import        95       49          0    0.0%
+    calls      name          80      968         18    1.9%
+    calls      name          60      905          3    0.3%
+    calls      name          45      256          0    0.0%
+    extends    scope        100       33          2    6.1%
+    extends    import        95       30          0    0.0%
+    extends    name          80       16          0    0.0%
+    extends    name          60        2          0    0.0%
+    extends    name          45        6          6  100.0%
+    references scope        100      577          0    0.0%
+    references import        95      283          0    0.0%
+
+  [2mfan-out[0m  2,409 call edges over 1,645 (caller, name) groups  →  indicative precision ceiling 68.3%
+
+[1mdjango[0m — 179,987 semantic edges (253,335 total, 73,348 structural)
+
+  [2mfalsified by rule[0m
+    extends self                                 3   0.00%
+    self-call, no recursion in source          424   0.24%
+    extends a non-class                        146   0.08%
+    crosses a language boundary                  0   0.00%
+    targets a vendored bundle                  918   0.51%
+    —— at least one rule ——                  1,491   0.83%
+
+  [2mfloor on the error rate, by confidence bucket[0m
+    kind       provenance  conf    edges  falsified   floor
+    calls      scope        100   11,110         10    0.1%
+    calls      import        95    9,635          0    0.0%
+    calls      name          80   30,521        332    1.1%
+    calls      name          60   48,336        544    1.1%
+    calls      name          45   36,758        456    1.2%
+    extends    scope        100    2,110         22    1.0%
+    extends    import        95    1,599          1    0.1%
+    extends    name          80    2,693          8    0.3%
+    extends    name          60      615         29    4.7%
+    extends    name          45    2,234         89    4.0%
+    references scope        100   18,325          0    0.0%
+    references import        95   15,189          0    0.0%
+    references co-change     70       54          0    0.0%
+    references co-change     67       12          0    0.0%
+    references co-change     64       32          0    0.0%
+    references co-change     61       52          0    0.0%
+    references co-change     58       70          0    0.0%
+    references co-change     55       84          0    0.0%
+    references co-change     52      187          0    0.0%
+    references co-change     49      371          0    0.0%
+
+  [2mfan-out[0m  136,360 call edges over 75,416 (caller, name) groups  →  indicative precision ceiling 55.3%
+
+[1mexcalidraw[0m — 28,144 semantic edges (39,704 total, 11,560 structural)
+
+  [2mfalsified by rule[0m
+    extends self                                 0   0.00%
+    self-call, no recursion in source           81   0.29%
+    extends a non-class                          0   0.00%
+    crosses a language boundary                  0   0.00%
+    targets a vendored bundle                    0   0.00%
+    —— at least one rule ——                     81   0.29%
+
+  [2mfloor on the error rate, by confidence bucket[0m
+    kind       provenance  conf    edges  falsified   floor
+    calls      scope        100    2,628          5    0.2%
+    calls      import        95    2,017          0    0.0%
+    calls      name          80    5,018         57    1.1%
+    calls      name          60    4,754         11    0.2%
+    calls      name          45    1,949          8    0.4%
+    extends    scope        100       10          0    0.0%
+    extends    import        95        7          0    0.0%
+    extends    name          80        3          0    0.0%
+    references scope        100    4,755          0    0.0%
+    references import        95    7,003          0    0.0%
+
+  [2mfan-out[0m  16,366 call edges over 11,817 (caller, name) groups  →  indicative precision ceiling 72.2%
+
+[1m  floor across corpora[0m
+    flask               29 of     3,356    0.86%
+    django           1,491 of   179,987    0.83%
+    excalidraw          81 of    28,144    0.29%
+
+  A rule that does not fire is not a correct edge. This is a floor.
+
