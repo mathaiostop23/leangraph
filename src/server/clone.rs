@@ -125,11 +125,26 @@ pub fn fetch(
 
 /// Force any lazy object fetches a partial clone deferred. Best effort: a
 /// failure here costs latency later, not correctness.
+///
+/// `--no-renames` matters more than it looks. Rename detection compares blob
+/// contents, and on a blobless clone every comparison is a lazy fetch — one
+/// network round trip per historical blob. Measured on pallets/click: 23.8s
+/// with it, 0.04s without, against a clone that itself took 2.2s. The argument
+/// list here must stay in step with `cochange::edges`, since the point is to
+/// warm exactly what that call will need.
 fn warm_history(dir: &Path, token: Option<&str>) {
     let _ = run(
         Some(dir),
         token,
-        &["log", "--no-merges", "-n", "3000", "--name-only", "--format=%H"],
+        &[
+            "log",
+            "--no-merges",
+            "--no-renames",
+            "-n",
+            "3000",
+            "--name-only",
+            "--format=%H",
+        ],
     );
 }
 

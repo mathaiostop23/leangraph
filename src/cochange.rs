@@ -69,6 +69,12 @@ pub fn edges(
         .args([
             "log",
             "--no-merges",
+            // Rename detection compares blob *contents*, so on a blobless
+            // clone it fetches every historical blob one round trip at a time:
+            // 23.8s where the whole clone took 2.2s. It is also not wanted
+            // here — a rename genuinely touched both paths, and that is what
+            // co-change should record.
+            "--no-renames",
             "-n",
             &opts.commits.to_string(),
             "--pretty=format:%x00",

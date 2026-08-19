@@ -402,6 +402,48 @@ Recall identical, tokens +0.9%. It fires rarely on a large repository, which is
 the intent; the gain is on the small ones, where it is the difference between
 some context and none.
 
+## Docker — the image, and the 24 seconds hiding in it
+
+The image builds and runs: healthcheck green, unprivileged uid 10001, git
+present, one volume holding the database and every clone.
+
+```
+image                289 MB   debian-slim + git + a stripped binary
+clone + index        pallets/click, from the container, over the network
+dashboard            200, 3.7 KB
+healthcheck          healthy
+```
+
+Registering a repository through the API and waiting for `ready` is the first
+thing any user does, and it took **25.8 s** for a 78-file repository. Almost all
+of it was one flag.
+
+```
+git clone --filter=blob:none            2.2 s
+git log --name-only  (warm_history)    23.8 s
+git log --name-only --no-renames        0.04 s      600x
+```
+
+A blobless clone has every tree but no file contents. Rename detection compares
+blob *contents*, so on such a clone each comparison is a lazy fetch — one
+network round trip per historical blob, thousands of them, which is why the cost
+is invisible in CPU time and enormous in wall clock. It is also not wanted here:
+a rename genuinely touched both paths, and that is what co-change should record.
+
+Applied to both `git log` call sites, since warming the wrong argument list
+warms nothing:
+
+```
+clone + index, in the container    25,816 ms  ->  2,087 ms     12.4x
+graph produced                     2,477 nodes / 8,789 edges — identical
+django graph hash                  unchanged; 5/5 invariants still hold
+cost benchmark                     unchanged at every budget
+```
+
+The lesson generalises: the pipeline had been profiled repeatedly and this never
+appeared, because it is not compute. It only shows up when you run the thing a
+user runs, from the state a user starts in.
+
 ## Methodology
 
 - **Startup subtracted from CodeGraph.** Its 0.50 s is real and per-invocation for a CLI, but paid once for a daemon. Subtracting isolates algorithmic work, which is the fair comparison for engine design. Our own startup is not yet measured; Phase 3 will report it, and it is where a static binary with an mmap'd graph should win outright.
