@@ -19,6 +19,16 @@ use tree_sitter::Parser as TsParser;
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024; // matches CodeGraph's skip, for fair comparison
 
+/// What an index run produced, for callers that need the numbers rather than
+/// the printout.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Summary {
+    pub files: usize,
+    pub nodes: u32,
+    pub edges: usize,
+    pub reused: u64,
+}
+
 pub struct Config {
     pub path: PathBuf,
     pub threads: Option<usize>,
@@ -33,6 +43,9 @@ pub struct Config {
     pub since: Option<String>,
     pub out: Option<PathBuf>,
     pub dry_run: bool,
+    /// Suppress the human-facing report. The server wants the numbers, not the
+    /// terminal output.
+    pub quiet: bool,
 }
 
 thread_local! {
@@ -102,7 +115,7 @@ fn out_dir(cfg: &Config, root: &std::path::Path) -> PathBuf {
         .unwrap_or_else(|| root.join(".arbor"))
 }
 
-pub fn run(cfg: &Config) -> Result<()> {
+pub fn run(cfg: &Config) -> Result<Summary> {
 
         let threads = cfg
         .threads
@@ -263,8 +276,10 @@ pub fn run(cfg: &Config) -> Result<()> {
     let d_discover = t0.elapsed();
 
     if found.is_empty() {
-        println!("no Python/TypeScript files found under {}", root.display());
-        return Ok(());
+        if !cfg.quiet {
+            println!("no Python/TypeScript files found under {}", root.display());
+        }
+        return Ok(Summary::default());
     }
 
     // ---- extract (cache-aware) ---------------------------------------------
@@ -466,165 +481,173 @@ pub fn run(cfg: &Config) -> Result<()> {
     let mb = agg.bytes as f64 / 1_048_576.0;
     let n_files = units.len() as u64;
 
-    // ---- report ------------------------------------------------------------
-    println!("\n\x1b[1marbor\x1b[0m  {}", root.display());
-    println!("  threads          {threads}");
-    println!(
-        "  files            {n_files}  ({mb:.1} MB{})",
-        if oversized > 0 {
-            format!(", {oversized} skipped >1MB")
-        } else {
-            String::new()
-        }
-    );
-    if git_listing.is_some() {
+    if !cfg.quiet {
+        // ---- report ------------------------------------------------------------
+        println!("\n\x1b[1marbor\x1b[0m  {}", root.display());
+        println!("  threads          {threads}");
         println!(
-            "  discovery        git tree diff ({} files, {} touched)",
-            found.len(),
-            git_touched.as_ref().map_or(0, |t| t.len())
+            "  files            {n_files}  ({mb:.1} MB{})",
+            if oversized > 0 {
+                format!(", {oversized} skipped >1MB")
+            } else {
+                String::new()
+            }
         );
-    }
-    if reused > 0 {
-        println!(
-            "  \x1b[1mreused           {reused} of {} files from cache\x1b[0m  ({} re-parsed)",
-            units.len(),
-            units.len() as u64 - reused
-        );
-    }
-    println!(
-        "  extracted        {defs} defs · {refs} refs · {imports} imports · {} unique symbols",
-        interner.len()
-    );
-    if errors > 0 {
-        println!(
-            "  parse errors     {errors} ({:.1}%)",
-            100.0 * errors as f64 / n_files as f64
-        );
-    }
-
-    if let Some(r) = &resolved {
-        if r.churn.retired > 0 || (r.churn.added > 0 && r.churn.kept > 0) {
+        if git_listing.is_some() {
             println!(
-                "  node ids         {} kept · {} new · {} retired · {} holes",
-                r.churn.kept, r.churn.added, r.churn.retired, r.churn.holes
+                "  discovery        git tree diff ({} files, {} touched)",
+                found.len(),
+                git_touched.as_ref().map_or(0, |t| t.len())
             );
         }
-        let s = &r.stats;
-        let tot = s.total_refs().max(1) as f64;
-        println!(
-            "\n  \x1b[1mgraph\x1b[0m           {} nodes · {} edges",
-            r.space.total,
-            r.edges.len()
-        );
-        let in_repo = s.in_repo().max(1) as f64;
-        println!(
-            "  resolution       \x1b[1m{:.1}%\x1b[0m of in-repo refs   ({} of {} whose target exists here)",
-            100.0 * s.resolved() as f64 / in_repo,
-            s.resolved(),
-            s.in_repo()
-        );
-        for (label, n, conf) in [
-            ("scope", s.scope, "100"),
-            ("import", s.import, " 95"),
-            ("name (unique)", s.name_unique, " 80"),
-            ("name (ambig)", s.name_ambiguous, "45-60"),
-        ] {
+        if reused > 0 {
             println!(
-                "    {label:<16} {n:>9}  {:>5.1}%   conf {conf}",
-                100.0 * n as f64 / tot
+                "  \x1b[1mreused           {reused} of {} files from cache\x1b[0m  ({} re-parsed)",
+                units.len(),
+                units.len() as u64 - reused
             );
         }
-        for (label, n) in [
-            ("too ambiguous", s.too_ambiguous),
-            ("weak read", s.weak_read),
-            ("builtin (runtime)", s.builtin),
-            ("external (deps)", s.external),
-        ] {
-            println!(
-                "    \x1b[2m{label:<16} {n:>9}  {:>5.1}%\x1b[0m",
-                100.0 * n as f64 / tot
-            );
-        }
-    }
-
-    if cochange_stats.edges > 0 {
-        if cochange_stats.reused {
-            println!("  co-change        {} edges (cached)", cochange_stats.edges);
-        } else {
-            println!(
-                "  co-change        {} edges from {} of {} commits",
-                cochange_stats.edges, cochange_stats.commits_used, cochange_stats.commits_scanned
-            );
-        }
-    }
-
-    println!("\n  \x1b[1mwall clock\x1b[0m");
-    println!("    discover       {:>8.0} ms", d_discover.as_secs_f64() * 1e3);
-    println!("    extract        {:>8.0} ms", d_extract.as_secs_f64() * 1e3);
-    if resolved.is_some() {
-        println!("    resolve        {:>8.0} ms", d_resolve.as_secs_f64() * 1e3);
-    }
-    if cochange_stats.edges > 0 || d_cochange.as_millis() > 0 {
-        println!("    co-change      {:>8.0} ms", d_cochange.as_secs_f64() * 1e3);
-    }
-    if graph_bytes > 0 {
         println!(
-            "    persist        {:>8.0} ms   ({:.1} MB{})",
-            d_persist.as_secs_f64() * 1e3,
-            graph_bytes as f64 / 1_048_576.0,
-            if nothing_changed { ", unchanged — not rewritten" } else { "" }
+            "  extracted        {defs} defs · {refs} refs · {imports} imports · {} unique symbols",
+            interner.len()
         );
-    }
-    println!(
-        "    \x1b[1mtotal          {:>8.0} ms\x1b[0m   ({:.0} files/s, {:.0} MB/s)",
-        wall.as_secs_f64() * 1e3,
-        n_files as f64 / wall.as_secs_f64(),
-        mb / wall.as_secs_f64()
-    );
-
-    println!("\n  \x1b[1mcpu time by stage\x1b[0m (summed over threads)");
-    let cpu = (agg.ns_read + agg.ns_hash + agg.ns_parse + agg.ns_walk) as f64;
-    for (label, ns) in [
-        ("mmap", agg.ns_read),
-        ("blake3", agg.ns_hash),
-        ("parse", agg.ns_parse),
-        ("walk+intern", agg.ns_walk),
-    ] {
-        println!(
-            "    {label:<14} {:>8.0} ms  {:>5.1}%",
-            ns as f64 / 1e6,
-            100.0 * ns as f64 / cpu
-        );
-    }
-
-    if cfg.by_lang {
-        println!("\n  \x1b[1mby language\x1b[0m");
-        let mut rows: Vec<_> = by_lang.iter().collect();
-        rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.0));
-        for (lang, (f, b, d, r)) in rows {
+        if errors > 0 {
             println!(
-                "    {:<12} {f:>6} files  {:>7.1} MB  {d:>8} defs  {r:>8} refs",
-                lang.name(),
-                *b as f64 / 1_048_576.0
+                "  parse errors     {errors} ({:.1}%)",
+                100.0 * errors as f64 / n_files as f64
             );
         }
-    }
 
-    if let Some(n) = cfg.top {
-        let mut counts: FxHashMap<crate::core::SymId, u32> = FxHashMap::default();
-        for unit in &units {
-            for r in &unit.refs {
-                *counts.entry(r.name).or_default() += 1;
+        if let Some(r) = &resolved {
+            if r.churn.retired > 0 || (r.churn.added > 0 && r.churn.kept > 0) {
+                println!(
+                    "  node ids         {} kept · {} new · {} retired · {} holes",
+                    r.churn.kept, r.churn.added, r.churn.retired, r.churn.holes
+                );
+            }
+            let s = &r.stats;
+            let tot = s.total_refs().max(1) as f64;
+            println!(
+                "\n  \x1b[1mgraph\x1b[0m           {} nodes · {} edges",
+                r.space.total,
+                r.edges.len()
+            );
+            let in_repo = s.in_repo().max(1) as f64;
+            println!(
+                "  resolution       \x1b[1m{:.1}%\x1b[0m of in-repo refs   ({} of {} whose target exists here)",
+                100.0 * s.resolved() as f64 / in_repo,
+                s.resolved(),
+                s.in_repo()
+            );
+            for (label, n, conf) in [
+                ("scope", s.scope, "100"),
+                ("import", s.import, " 95"),
+                ("name (unique)", s.name_unique, " 80"),
+                ("name (ambig)", s.name_ambiguous, "45-60"),
+            ] {
+                println!(
+                    "    {label:<16} {n:>9}  {:>5.1}%   conf {conf}",
+                    100.0 * n as f64 / tot
+                );
+            }
+            for (label, n) in [
+                ("too ambiguous", s.too_ambiguous),
+                ("weak read", s.weak_read),
+                ("builtin (runtime)", s.builtin),
+                ("external (deps)", s.external),
+            ] {
+                println!(
+                    "    \x1b[2m{label:<16} {n:>9}  {:>5.1}%\x1b[0m",
+                    100.0 * n as f64 / tot
+                );
             }
         }
-        let mut top: Vec<_> = counts.into_iter().collect();
-        top.sort_unstable_by_key(|(_, c)| std::cmp::Reverse(*c));
-        println!("\n  \x1b[1mtop {n} referenced symbols\x1b[0m");
-        for (sym, c) in top.into_iter().take(n) {
-            println!("    {:>8}  {}", c, interner.resolve(&sym));
-        }
-    }
-    println!();
 
-    Ok(())
+        if cochange_stats.edges > 0 {
+            if cochange_stats.reused {
+                println!("  co-change        {} edges (cached)", cochange_stats.edges);
+            } else {
+                println!(
+                    "  co-change        {} edges from {} of {} commits",
+                    cochange_stats.edges, cochange_stats.commits_used, cochange_stats.commits_scanned
+                );
+            }
+        }
+
+        println!("\n  \x1b[1mwall clock\x1b[0m");
+        println!("    discover       {:>8.0} ms", d_discover.as_secs_f64() * 1e3);
+        println!("    extract        {:>8.0} ms", d_extract.as_secs_f64() * 1e3);
+        if resolved.is_some() {
+            println!("    resolve        {:>8.0} ms", d_resolve.as_secs_f64() * 1e3);
+        }
+        if cochange_stats.edges > 0 || d_cochange.as_millis() > 0 {
+            println!("    co-change      {:>8.0} ms", d_cochange.as_secs_f64() * 1e3);
+        }
+        if graph_bytes > 0 {
+            println!(
+                "    persist        {:>8.0} ms   ({:.1} MB{})",
+                d_persist.as_secs_f64() * 1e3,
+                graph_bytes as f64 / 1_048_576.0,
+                if nothing_changed { ", unchanged — not rewritten" } else { "" }
+            );
+        }
+        println!(
+            "    \x1b[1mtotal          {:>8.0} ms\x1b[0m   ({:.0} files/s, {:.0} MB/s)",
+            wall.as_secs_f64() * 1e3,
+            n_files as f64 / wall.as_secs_f64(),
+            mb / wall.as_secs_f64()
+        );
+
+        println!("\n  \x1b[1mcpu time by stage\x1b[0m (summed over threads)");
+        let cpu = (agg.ns_read + agg.ns_hash + agg.ns_parse + agg.ns_walk) as f64;
+        for (label, ns) in [
+            ("mmap", agg.ns_read),
+            ("blake3", agg.ns_hash),
+            ("parse", agg.ns_parse),
+            ("walk+intern", agg.ns_walk),
+        ] {
+            println!(
+                "    {label:<14} {:>8.0} ms  {:>5.1}%",
+                ns as f64 / 1e6,
+                100.0 * ns as f64 / cpu
+            );
+        }
+
+        if cfg.by_lang {
+            println!("\n  \x1b[1mby language\x1b[0m");
+            let mut rows: Vec<_> = by_lang.iter().collect();
+            rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.0));
+            for (lang, (f, b, d, r)) in rows {
+                println!(
+                    "    {:<12} {f:>6} files  {:>7.1} MB  {d:>8} defs  {r:>8} refs",
+                    lang.name(),
+                    *b as f64 / 1_048_576.0
+                );
+            }
+        }
+
+        if let Some(n) = cfg.top {
+            let mut counts: FxHashMap<crate::core::SymId, u32> = FxHashMap::default();
+            for unit in &units {
+                for r in &unit.refs {
+                    *counts.entry(r.name).or_default() += 1;
+                }
+            }
+            let mut top: Vec<_> = counts.into_iter().collect();
+            top.sort_unstable_by_key(|(_, c)| std::cmp::Reverse(*c));
+            println!("\n  \x1b[1mtop {n} referenced symbols\x1b[0m");
+            for (sym, c) in top.into_iter().take(n) {
+                println!("    {:>8}  {}", c, interner.resolve(&sym));
+            }
+        }
+        println!();
+
+    }
+
+    Ok(Summary {
+        files: units.len(),
+        nodes: resolved.as_ref().map_or(0, |r| r.space.total),
+        edges: resolved.as_ref().map_or(0, |r| r.edges.len()),
+        reused,
+    })
 }

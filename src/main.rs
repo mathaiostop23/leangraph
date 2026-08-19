@@ -12,6 +12,7 @@ mod lang;
 mod mcp;
 mod query;
 mod resolve;
+mod server;
 
 use crate::core::{DefKind, NodeId};
 use crate::graph::{Graph, Neighbor};
@@ -151,6 +152,18 @@ enum Cmd {
         #[arg(long, default_value = "nodes")]
         what: String,
     },
+    /// Run the self-hosted HTTP server
+    Server {
+        /// Address to bind
+        #[arg(long, default_value = "127.0.0.1:7777")]
+        addr: String,
+        /// Where repositories, graphs and the database live
+        #[arg(long, default_value = ".arbor-server")]
+        data: PathBuf,
+        /// Concurrent workers. Indexing already saturates cores.
+        #[arg(long, default_value_t = 2)]
+        workers: usize,
+    },
     /// Graph statistics and load time
     Status {
         #[arg(default_value = ".")]
@@ -182,7 +195,9 @@ fn main() -> Result<()> {
             since,
             out,
             dry_run,
-        }),
+            quiet: false,
+        })
+        .map(|_| ()),
 
         Cmd::Find { symbol, path } => {
             let (g, _) = load(&path)?;
@@ -458,6 +473,22 @@ fn main() -> Result<()> {
                 other => bail!("unknown dump target `{other}` (nodes | edges | semantic)"),
             }
             Ok(())
+        }
+
+        Cmd::Server {
+            addr,
+            data,
+            workers,
+        } => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(server::run(server::Config {
+                addr: addr.parse().context("parsing --addr")?,
+                db_path: data.join("arbor.db"),
+                data_dir: data,
+                workers: workers.max(1),
+            }))
         }
 
         Cmd::Status { path } => {

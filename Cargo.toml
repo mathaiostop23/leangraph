@@ -22,6 +22,15 @@ tree-sitter-python = "0.25.0"
 tree-sitter-typescript = "0.23.2"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 serde_json = "1.0.151"
+axum = "0.8.9"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+hmac = "0.12.1"
+sha2 = "0.10.9"
+hex = "0.4.3"
+subtle = "2.6.1"
+time = "0.3.41"
 
 [profile.release]
 opt-level = 3
