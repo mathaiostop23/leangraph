@@ -8,7 +8,37 @@ Reproduce: `cargo build --release && ./bench/run.sh`
 
 ---
 
-## Current — Phase 1b (extract + resolve, not yet persisted)
+## MCP startup — spawn to `initialize` response
+
+`bench/mcp_startup.py`, median of 5 cold processes:
+
+```
+arbor          3.9 ms
+codegraph    561.7 ms        144x
+```
+
+Structural, not tuning: `Graph::open` is an mmap plus a header check, so there
+is nothing to warm. CodeGraph's own CLAUDE.md names startup as the reason
+agents "dive into Read/grep before codegraph finishes its ~2-3s startup" — the
+561.7 ms measured here is with the npm package already resolved and warm, so it
+is the friendly end of their range.
+
+---
+
+## Full pipeline — Phase 3
+
+| Repo | Files | arbor | CodeGraph | speedup | arbor nodes/edges | CG nodes/edges | resolved |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| flask | 83 | **20 ms** | 0.51 s | 26x | 1,963 / 5,588 | 2,705 / 5,171 | 96.1% |
+| excalidraw | 666 | **140 ms** | 3.06 s | 22x | 9,915 / 38,706 | 11,162 / 48,574 | 99.6% |
+| django | 3,038 | **560 ms** | 7.87 s | 14x | 67,924 / 293,254 | 62,114 / 195,802 | 87.7% |
+
+On disk: flask 168 KB / excalidraw 1.3 MB / **django 7.9 MB** — against CodeGraph's
+5.0 MB / 48 MB / 163 MB.
+
+---
+
+## Earlier — Phase 1b (extract + resolve, before persistence)
 
 Apple M1 Pro (6P + 2E), 16 GB, macOS 14.3. Median of 3 runs, warm page cache.
 CodeGraph timings have its measured 0.50 s process startup subtracted.

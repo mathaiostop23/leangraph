@@ -29,19 +29,29 @@ One linear path. B ships ~week 4, A ships ~week 8.
 |---|---|
 | 0 · Speed premise | ✅ **Done, measured.** Parse+extract is 2–6% of CodeGraph's pipeline |
 | 1 · Extraction | ✅ **Done.** Interned symbols, containment scopes, imports |
-| 1b · Resolution | ⬜ **next** — the phase that can still falsify the plan |
-| 2 · CSR + persistence | ⬜ |
-| 3 · MCP server (**B ships**) | ⬜ |
-| 4 · Incremental + daemon | ⬜ |
+| 1b · Resolution | ✅ **Done.** 3 tiers; 87.7–99.6% of in-repo refs |
+| 2 · CSR + persistence | ✅ **Done.** 7.9 MB vs 163 MB; ~20 µs load |
+| 2b · Context builder | ✅ **Done.** Confidence-ranked, budget-capped |
+| 3 · MCP server (**B ships**) | ✅ **Done.** 3.9 ms startup vs 561.7 ms |
+| 4 · Incremental + daemon | ⬜ **next** |
 | 5 · Server (**A ships**) | ⬜ |
 | 6 · Breadth | ⬜ |
+| — · Edge verification | ⬜ **gating** — no correctness claim until this runs |
+| — · Cost benchmark | ⬜ **gating** — "cheaper" is unproven without it |
 
 **Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:
 
 ```
-44,086 defs · 201,218 refs · 11,898 imports · 32,994 unique symbols   in 480 ms
-CodeGraph, same repo, same machine, full index:                          7.60 s
+                        arbor        CodeGraph
+index (full pipeline)   560 ms       7.87 s        14x
+graph on disk           7.9 MB       163 MB        21x
+graph load              ~20 us       —
+MCP startup             3.9 ms       561.7 ms      144x
+nodes / edges           67,924 / 293,254   62,114 / 195,802
+in-repo refs resolved   87.7%
 ```
+
+Full table and methodology: [BENCH.md](./BENCH.md).
 
 ---
 
