@@ -145,10 +145,13 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("function_declaration", DefKind::Function),
                     ("generator_function_declaration", DefKind::Function),
                     ("class_declaration", DefKind::Class),
+                    ("abstract_class_declaration", DefKind::Class),
                     ("interface_declaration", DefKind::Interface),
                     ("type_alias_declaration", DefKind::Interface),
                     ("enum_declaration", DefKind::Class),
                     ("method_definition", DefKind::Method),
+                    ("method_signature", DefKind::Method),
+                    ("abstract_method_signature", DefKind::Method),
                 ],
             ),
             refs: tagged(
@@ -159,11 +162,14 @@ pub fn spec_for(lang: Lang) -> Spec {
                 ],
             ),
             imports: kinds(&l, &["import_statement"]),
-            f_name: fields(&l, &["name"]),
+            // `key` is for object-literal entries: `{ handleEvent: () => {} }`
+            // is a method by every meaning that matters, and there are hundreds
+            // of them in real React code.
+            f_name: fields(&l, &["name", "key"]),
             f_callee: fields(&l, &["function", "constructor"]),
             f_member: fields(&l, &["property"]),
             f_module: fields(&l, &["source"]),
-            cond_defs: kinds(&l, &["variable_declarator", "public_field_definition"]),
+            cond_defs: kinds(&l, &["variable_declarator", "public_field_definition", "pair"]),
             f_value: fields(&l, &["value"]),
             fn_values: kinds(
                 &l,

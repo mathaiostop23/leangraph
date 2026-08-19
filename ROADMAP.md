@@ -36,7 +36,8 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 4 · Incremental + daemon | ⬜ **next** |
 | 5 · Server (**A ships**) | ⬜ |
 | 6 · Breadth | ⬜ |
-| — · Edge verification | ⬜ **gating** — no correctness claim until this runs |
+| — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |
+| — · Edge verification | ⬜ **gating** — nodes verified, edges not |
 | — · Cost benchmark | ⬜ **gating** — "cheaper" is unproven without it |
 
 **Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:

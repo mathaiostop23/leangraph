@@ -29,6 +29,20 @@ codegraph    561.7 ms        144×
 
 This gap is structural rather than tuning. Loading is not deserialization: `Graph::open` is an `mmap` plus a header check, so a 68,000-node graph is queryable in ~20 µs and there is nothing to warm up. CodeGraph's own `CLAUDE.md` names startup as the reason agents give up and reach for grep before it connects.
 
+### Correctness
+
+Differential verification against CodeGraph as an oracle (`bench/verify.py`) — same repo, both engines, symbol sets diffed:
+
+| Repo | presence recall | kind agreement |
+|---|---:|---:|
+| flask | **100.0%** | 100.0% |
+| excalidraw | 85.1% | 84.4% |
+| django | **100.0%** | 100.0% |
+
+excalidraw's gap is 803 function-local variables, which we skip deliberately — we record named values at module and class scope, where they are API surface, not locals inside function bodies. The real extraction gap is ~1%.
+
+This is agreement, not truth. But it caught a real bug immediately: the first run showed 64.6% recall because Python has no distinct node kind for a method, so all 25,604 of django's were labelled `function`. A speed number published before this ran would have meant nothing.
+
 ### Resolution
 
 Share of references **whose target exists in the repository** that we linked:
@@ -99,7 +113,7 @@ Being explicit, because the gap is large:
 
 - **Two languages.** CodeGraph has 30+, with 17 web frameworks and Swift↔ObjC / React Native bridging. Breadth is cheap at the extraction tier (~1 hour per language via declarative specs) and expensive at the import/scope tier (2–10 days). Neither has been spent yet.
 - **No incremental sync.** Every index is a full index. The delta-overlay design is in [ENGINE.md](./ENGINE.md); blake3 change detection already measures at 0.9% of CPU, so the mechanism is free — it just is not built.
-- **No edge verification.** We count edges; we do not yet check they are *right*. Differential diffing against CodeGraph as an oracle is the next gate, and no correctness claim should be believed until it runs.
+- **Edges are unverified.** Node-level verification runs (95% presence recall above), but we do not yet check that individual *edges* point where they should. That is the next gate.
 - **No cost benchmark.** The claim that matters — *same recall, fewer tokens* — needs recall@k measured against real issue→PR pairs. `bench/cost.sh` does not exist. Until it does, "cheaper" is a design argument, not a result.
 
 ## Documents

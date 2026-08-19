@@ -118,6 +118,14 @@ enum Cmd {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
+    /// Dump nodes and edges as JSONL, for differential verification
+    Dump {
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// nodes | edges
+        #[arg(long, default_value = "nodes")]
+        what: String,
+    },
     /// Graph statistics and load time
     Status {
         #[arg(default_value = ".")]
@@ -293,6 +301,52 @@ fn main() -> Result<()> {
 
         Cmd::Serve { mcp: _, path } => mcp::serve(&path),
 
+        Cmd::Dump { path, what } => {
+            use std::io::Write as _;
+            let (g, _) = load(&path)?;
+            let out = std::io::stdout();
+            let mut w = std::io::BufWriter::new(out.lock());
+            match what.as_str() {
+                "nodes" => {
+                    for i in 0..g.n_nodes() {
+                        let n = NodeId(i);
+                        let (f, _, _) = g.location(n);
+                        if g.node_kind(n) == DefKind::Module as u8 {
+                            continue; // files are compared separately
+                        }
+                        writeln!(
+                            w,
+                            r#"{{"file":{},"name":{},"kind":"{}"}}"#,
+                            json_str(g.path(f)),
+                            json_str(g.name(n)),
+                            kind_name(g.node_kind(n))
+                        )?;
+                    }
+                }
+                "edges" => {
+                    for i in 0..g.n_nodes() {
+                        let src = NodeId(i);
+                        let (sf, _, _) = g.location(src);
+                        for nb in g.callees(src) {
+                            let (df, _, _) = g.location(nb.node);
+                            writeln!(
+                                w,
+                                r#"{{"sf":{},"sn":{},"df":{},"dn":{},"kind":{},"conf":{}}}"#,
+                                json_str(g.path(sf)),
+                                json_str(g.name(src)),
+                                json_str(g.path(df)),
+                                json_str(g.name(nb.node)),
+                                nb.kind,
+                                nb.conf
+                            )?;
+                        }
+                    }
+                }
+                other => bail!("unknown dump target `{other}` (nodes | edges)"),
+            }
+            Ok(())
+        }
+
         Cmd::Status { path } => {
             let (g, load_us) = load(&path)?;
             let bytes = std::fs::metadata(graph_path(&path))
@@ -315,6 +369,26 @@ fn read_span(g: &Graph, n: NodeId) -> Option<String> {
     let bytes = std::fs::read(g.abs_path(file)).ok()?;
     let s = bytes.get(start as usize..end as usize)?;
     Some(String::from_utf8_lossy(s).into_owned())
+}
+
+/// Minimal JSON string escaping — enough for paths and identifiers, and it
+/// keeps `dump` free of a serde dependency in the hot loop.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn graph_path(repo: &Path) -> PathBuf {

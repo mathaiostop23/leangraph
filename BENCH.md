@@ -8,6 +8,45 @@ Reproduce: `cargo build --release && ./bench/run.sh`
 
 ---
 
+## Correctness — differential verification
+
+`bench/verify.py` indexes the same repo with both engines and diffs the symbol
+sets. CodeGraph validates its own extraction as byte-identical against a
+reference engine across 31 repos, which makes it the best ground truth we did
+not have to build. This measures **agreement, not truth** — where we differ,
+either side may be right — but it makes every difference visible.
+
+| Repo | presence recall | kind agreement | we add |
+|---|---:|---:|---:|
+| flask | **100.0%** | 100.0% | 89 |
+| excalidraw | **85.1%** | 84.4% | 2,307 |
+| django | **100.0%** | 100.0% | 9,462 |
+
+**Presence recall across 3 repos: 95.0%.**
+
+Presence and kind are reported separately on purpose. A symbol we extract but
+label `variable` where they say `method` is a taxonomy difference, not a missing
+node, and the fix is completely different.
+
+### What the remaining gap is
+
+excalidraw's 864 missing symbols are **803 function-local variables** plus 51
+methods and 12 functions. The locals are a deliberate choice, not a bug: we
+record named values at module and class scope, where they are part of the API
+surface, and skip locals inside function bodies, where they are noise in a code
+graph. The real extraction gap is ~1% of symbols.
+
+### What this caught
+
+The first run reported 64.6% recall, with 25,604 "missing" methods in django. They
+were not missing — Python has no separate node kind for a method (`def` is
+`function_definition` at every level), so we were labelling every one of them
+`function`. Reclassifying by enclosing scope took django and flask to 100%.
+
+A speed number published before this ran would have been meaningless.
+
+---
+
 ## MCP startup — spawn to `initialize` response
 
 `bench/mcp_startup.py`, median of 5 cold processes:

@@ -84,7 +84,7 @@ fn walk(
                     consumed.insert(nn.id());
                     unit.defs.push(Def {
                         name: interner.get_or_intern(txt),
-                        kind: dk,
+                        kind: reclassify(dk, &unit.defs, scope),
                         span: Span::of(&node),
                         name_span: Span::of(&nn),
                         parent: scope,
@@ -162,6 +162,23 @@ fn walk(
             depth -= 1;
         }
     }
+}
+
+/// A function declared inside a class is a method, whatever the grammar calls
+/// it. Python has no separate node kind for this — `def` is `function_definition`
+/// at every level — so the distinction has to come from the enclosing scope.
+#[inline]
+fn reclassify(kind: DefKind, defs: &[Def], scope: DefIdx) -> DefKind {
+    if kind == DefKind::Function
+        && scope != NO_SCOPE
+        && matches!(
+            defs[scope as usize].kind,
+            DefKind::Class | DefKind::Interface
+        )
+    {
+        return DefKind::Method;
+    }
+    kind
 }
 
 /// True at module level or directly inside a class — the scopes where a named
