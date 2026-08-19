@@ -5,6 +5,7 @@
 //! a 700 ms full index cannot stall the reactor and drop a webhook.
 
 pub mod agent;
+pub mod clone;
 pub mod db;
 pub mod webhook;
 
@@ -56,6 +57,14 @@ impl App {
     /// whole install.
     pub fn trigger_label(&self, _repo: &db::Repo) -> String {
         self.cfg.trigger_label.clone()
+    }
+
+    pub fn repo(&self, id: i64) -> anyhow::Result<db::Repo> {
+        self.db
+            .repos()?
+            .into_iter()
+            .find(|r| r.id == id)
+            .context("repo vanished")
     }
 }
 
@@ -147,11 +156,15 @@ async fn list_repos(State(app): State<App>) -> ApiResult<Json<serde_json::Value>
 
 #[derive(Deserialize)]
 struct AddRepo {
-    /// `owner/name`, used as the identity everywhere.
-    full_name: String,
-    /// Working tree on disk. Cloning is the next phase; for now the repo is
-    /// already somewhere local.
-    path: String,
+    /// https URL to clone. Either this or `path`.
+    #[serde(default)]
+    url: Option<String>,
+    /// Existing working tree, for a repository already on disk.
+    #[serde(default)]
+    path: Option<String>,
+    /// `owner/name`. Derived from the URL when omitted.
+    #[serde(default)]
+    full_name: Option<String>,
     #[serde(default = "default_branch")]
     branch: String,
 }
@@ -164,30 +177,49 @@ async fn add_repo(
     State(app): State<App>,
     Json(req): Json<AddRepo>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let path = PathBuf::from(&req.path);
-    if !path.is_dir() {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            format!("{} is not a directory", req.path),
-        ));
-    }
-    let abs = path
-        .canonicalize()
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let bad = |m: String| ApiError(StatusCode::BAD_REQUEST, m);
+
+    let (path, url, name) = match (&req.url, &req.path) {
+        (Some(url), _) => {
+            clone::check_url(url).map_err(|e| bad(e.to_string()))?;
+            let name = req
+                .full_name
+                .clone()
+                .or_else(|| clone::name_from_url(url))
+                .ok_or_else(|| bad("cannot derive owner/name from that URL".into()))?;
+            let dir = clone::work_dir(&app.cfg.data_dir, &name);
+            (dir, Some(url.clone()), name)
+        }
+        (None, Some(p)) => {
+            let dir = PathBuf::from(p);
+            if !dir.is_dir() {
+                return Err(bad(format!("{p} is not a directory")));
+            }
+            let abs = dir.canonicalize().map_err(|e| bad(e.to_string()))?;
+            let name = req
+                .full_name
+                .clone()
+                .ok_or_else(|| bad("full_name is required with `path`".into()))?;
+            (abs, None, name)
+        }
+        (None, None) => return Err(bad("one of `url` or `path` is required".into())),
+    };
 
     let repo = app
         .db
-        .upsert_repo(&req.full_name, &abs.to_string_lossy(), &req.branch)?;
+        .upsert_repo(&name, &path.to_string_lossy(), &req.branch, url.as_deref())?;
     app.db.set_repo_state(repo.id, "pending", None)?;
+
     // Index at registration, not on the first issue: a cold index at answer
     // time is the difference between a product that feels instant and one that
-    // feels broken.
+    // feels broken. A clone job indexes when it finishes.
+    let kind = if url.is_some() { "clone" } else { "index" };
     app.db
-        .enqueue("index", repo.id, "{}", Some(&format!("index:{}", repo.id)))?;
+        .enqueue(kind, repo.id, "{}", Some(&format!("{kind}:{}", repo.id)))?;
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({ "repo": repo, "queued": "index" })),
+        Json(json!({ "repo": repo, "queued": kind })),
     ))
 }
 
@@ -248,6 +280,7 @@ async fn worker(app: App, id: usize) {
 
 async fn run_job(app: &App, job: &db::Job) -> Result<()> {
     match job.kind.as_str() {
+        "clone" => clone_repo(app, job.repo_id).await,
         "index" => index_repo(app, job.repo_id, true).await,
         "sync" => index_repo(app, job.repo_id, false).await,
         "issue" => answer_issue(app, job).await,
@@ -255,16 +288,54 @@ async fn run_job(app: &App, job: &db::Job) -> Result<()> {
     }
 }
 
+/// Clone or fast-forward, then index. Network-bound, so it goes on the blocking
+/// pool for the same reason indexing does.
+async fn clone_repo(app: &App, repo_id: i64) -> Result<()> {
+    let repo = app.repo(repo_id)?;
+    let url = repo.url.clone().context("repo has no url")?;
+    let dir = PathBuf::from(&repo.path);
+    let branch = repo.default_branch.clone();
+    let name = repo.full_name.clone();
+
+    app.db.set_repo_state(repo_id, "cloning", None)?;
+    let existed = dir.join(".git").is_dir();
+    let t = Instant::now();
+    let res = tokio::task::spawn_blocking(move || clone::fetch(&dir, &url, &branch)).await?;
+    let ms = t.elapsed().as_millis();
+
+    match res {
+        Ok((before, after)) => {
+            tracing_line(
+                "info",
+                &format!(
+                    "{name}: {} at {} in {ms}ms",
+                    if existed { "updated" } else { "cloned" },
+                    &after[..12.min(after.len())]
+                ),
+            );
+            // A fetch that moved HEAD can diff two trees; a fresh clone has
+            // nothing to diff against.
+            let payload = match before {
+                Some(b) if b != after => json!({ "since": b }).to_string(),
+                _ => "{}".into(),
+            };
+            let kind = if existed { "sync" } else { "index" };
+            app.db
+                .enqueue(kind, repo_id, &payload, Some(&format!("{kind}:{repo_id}")))?;
+            Ok(())
+        }
+        Err(e) => {
+            app.db.set_repo_state(repo_id, "error", Some(&e.to_string()))?;
+            Err(e)
+        }
+    }
+}
+
 /// Indexing is CPU-bound and saturates every core. Running it on the reactor
 /// would stall every other task in the process, including whatever webhook
 /// arrives mid-index.
 async fn index_repo(app: &App, repo_id: i64, full: bool) -> Result<()> {
-    let repo = app
-        .db
-        .repos()?
-        .into_iter()
-        .find(|r| r.id == repo_id)
-        .context("repo vanished")?;
+    let repo = app.repo(repo_id)?;
 
     app.db
         .set_repo_state(repo_id, if full { "indexing" } else { "syncing" }, None)?;
@@ -327,12 +398,7 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
         .and_then(serde_json::Value::as_i64)
         .context("issue job without an issue_id")?;
     let issue = app.db.issue(issue_id)?.context("issue vanished")?;
-    let repo = app
-        .db
-        .repos()?
-        .into_iter()
-        .find(|r| r.id == issue.repo_id)
-        .context("repo vanished")?;
+    let repo = app.repo(issue.repo_id)?;
 
     let run_id = app.db.start_run(issue.id, repo.id)?;
     let started = Instant::now();

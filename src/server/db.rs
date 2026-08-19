@@ -16,8 +16,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-/// Schema version. Bump alongside a migration in `migrate`.
-const SCHEMA: u32 = 1;
+/// Schema version. Bump alongside a step in `migrate`.
+const SCHEMA: u32 = 2;
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -53,14 +53,27 @@ impl Db {
         f(&guard)
     }
 
+    /// Forward-only ladder. Each step runs once, in order, and the version is
+    /// bumped after each — so an interrupted upgrade resumes rather than
+    /// replaying steps that already applied.
     fn migrate(&self) -> Result<()> {
         self.with(|c| {
-            let have: u32 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if have >= SCHEMA {
-                return Ok(());
+            let mut have: u32 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if have == 0 {
+                c.execute_batch(DDL)?;
+                have = 1;
+                c.pragma_update(None, "user_version", have)?;
             }
-            c.execute_batch(DDL)?;
-            c.pragma_update(None, "user_version", SCHEMA)?;
+            if have < 2 {
+                // Remote origin, so a repository can be cloned rather than
+                // having to already exist on disk.
+                c.execute_batch(
+                    "ALTER TABLE repos ADD COLUMN url TEXT;
+                     ALTER TABLE repos ADD COLUMN private INTEGER NOT NULL DEFAULT 0;",
+                )?;
+                have = 2;
+                c.pragma_update(None, "user_version", have)?;
+            }
             Ok(())
         })
     }
@@ -178,6 +191,7 @@ pub struct Repo {
     pub id: i64,
     pub full_name: String,
     pub path: String,
+    pub url: Option<String>,
     pub default_branch: String,
     pub state: String,
     pub last_indexed_sha: Option<String>,
@@ -193,6 +207,7 @@ fn repo_from_row(r: &rusqlite::Row) -> rusqlite::Result<Repo> {
         id: r.get("id")?,
         full_name: r.get("full_name")?,
         path: r.get("path")?,
+        url: r.get("url")?,
         default_branch: r.get("default_branch")?,
         state: r.get("state")?,
         last_indexed_sha: r.get("last_indexed_sha")?,
@@ -205,13 +220,20 @@ fn repo_from_row(r: &rusqlite::Row) -> rusqlite::Result<Repo> {
 }
 
 impl Db {
-    pub fn upsert_repo(&self, full_name: &str, path: &str, branch: &str) -> Result<Repo> {
+    pub fn upsert_repo(
+        &self,
+        full_name: &str,
+        path: &str,
+        branch: &str,
+        url: Option<&str>,
+    ) -> Result<Repo> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO repos (full_name, path, default_branch, created_at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(full_name) DO UPDATE SET path = ?2, default_branch = ?3",
-                params![full_name, path, branch, now()],
+                "INSERT INTO repos (full_name, path, default_branch, url, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(full_name) DO UPDATE SET
+                   path = ?2, default_branch = ?3, url = COALESCE(?4, repos.url)",
+                params![full_name, path, branch, url, now()],
             )?;
             let repo = c.query_row(
                 "SELECT * FROM repos WHERE full_name = ?1",

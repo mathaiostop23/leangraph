@@ -1,0 +1,29 @@
+# One service, one volume. There is no database container: SQLite is compiled
+# into the binary, so this is the entire deployment.
+services:
+  arbor:
+    build: .
+    image: arbor:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7777:7777"
+    volumes:
+      - arbor-data:/data
+    environment:
+      # Required. Without it the webhook endpoint refuses everything, which is
+      # the correct failure mode for an unauthenticated door into an agent.
+      ARBOR_WEBHOOK_SECRET: ${ARBOR_WEBHOOK_SECRET:?set this in .env}
+      # Your key. It is spent on your issues; nothing here proxies it anywhere.
+      ARBOR_ANTHROPIC_KEY: ${ARBOR_ANTHROPIC_KEY:?set this in .env}
+      # Only needed for private repos and for posting comments back.
+      ARBOR_GITHUB_TOKEN: ${ARBOR_GITHUB_TOKEN:-}
+      # Encrypts secrets at rest in the database.
+      ARBOR_MASTER_KEY: ${ARBOR_MASTER_KEY:-}
+    # Indexing saturates whatever it is given. Bound it, or a large repository
+    # will starve the reactor that has to answer webhooks.
+    deploy:
+      resources:
+        limits: { cpus: "4", memory: 4G }
+
+volumes:
+  arbor-data:
