@@ -1,12 +1,13 @@
 //! arbor — native code-graph indexer.
 //!
-//! Phase 0 measured the parse+extract floor (see BENCH.md).
-//! Phase 1 (here) turns counting into real symbol extraction: interned names,
-//! containment scopes, and import statements — the inputs resolution needs.
+//! Phase 0 measured the parse+extract floor (BENCH.md).
+//! Phase 1 extracts interned symbols with containment scopes.
+//! Phase 1b resolves references into a graph.
 
 mod core;
 mod extract;
 mod lang;
+mod resolve;
 
 use crate::core::{FileUnit, Interner};
 use crate::extract::{extract_file, Timings};
@@ -37,6 +38,9 @@ struct Cli {
     /// Show the N most-referenced symbols (extraction sanity check)
     #[arg(long, value_name = "N")]
     top: Option<usize>,
+    /// Stop after extraction; skip resolution
+    #[arg(long)]
+    no_resolve: bool,
 }
 
 thread_local! {
@@ -73,7 +77,7 @@ fn main() -> Result<()> {
 
     // ---- discover ----------------------------------------------------------
     let t0 = Instant::now();
-    let mut files: Vec<(PathBuf, Lang)> = Vec::with_capacity(4096);
+    let mut found: Vec<(PathBuf, Lang)> = Vec::with_capacity(4096);
     let mut oversized = 0u64;
 
     for entry in WalkBuilder::new(&root)
@@ -100,11 +104,11 @@ fn main() -> Result<()> {
             oversized += 1;
             continue;
         }
-        files.push((path.to_path_buf(), lang));
+        found.push((path.to_path_buf(), lang));
     }
     let d_discover = t0.elapsed();
 
-    if files.is_empty() {
+    if found.is_empty() {
         println!("no Python/TypeScript files found under {}", root.display());
         return Ok(());
     }
@@ -114,48 +118,61 @@ fn main() -> Result<()> {
     let interner = Interner::new();
 
     let t1 = Instant::now();
-    let results: Vec<(Lang, FileUnit, Timings)> = files
+    let raw: Vec<Option<(FileUnit, Timings)>> = found
         .par_iter()
         .enumerate()
-        .filter_map(|(i, (path, lang))| {
-            with_parser(*lang, |parser| {
-                extract_file(path, i as u32, *lang, &specs[lang], parser, &interner)
-                    .map(|(u, t)| (*lang, u, t))
+        .map(|(i, (path, lang))| {
+            with_parser(*lang, |p| {
+                extract_file(path, i as u32, *lang, &specs[lang], p, &interner)
             })
         })
         .collect();
-    let d_extract = t1.elapsed();
-    let wall = d_discover + d_extract;
 
-    // ---- aggregate ---------------------------------------------------------
+    // Compact into aligned vectors so that vector index == FileId. Files that
+    // failed to open are dropped, so positions must be reassigned.
+    let mut units = Vec::with_capacity(raw.len());
+    let mut paths = Vec::with_capacity(raw.len());
+    let mut langs = Vec::with_capacity(raw.len());
     let mut agg = Timings::default();
-    let mut defs = 0u64;
-    let mut refs = 0u64;
-    let mut imports = 0u64;
     let mut errors = 0u64;
     let mut by_lang: FxHashMap<Lang, (u64, u64, u64, u64)> = FxHashMap::default();
 
-    for (lang, unit, t) in &results {
+    for ((path, lang), slot) in found.iter().zip(raw) {
+        let Some((mut unit, t)) = slot else { continue };
+        unit.file = units.len() as u32;
         agg.ns_read += t.ns_read;
         agg.ns_hash += t.ns_hash;
         agg.ns_parse += t.ns_parse;
         agg.ns_walk += t.ns_walk;
         agg.bytes += t.bytes;
         agg.ast_nodes += t.ast_nodes;
-        defs += unit.defs.len() as u64;
-        refs += unit.refs.len() as u64;
-        imports += unit.imports.len() as u64;
         errors += unit.had_parse_error as u64;
         let e = by_lang.entry(*lang).or_default();
         e.0 += 1;
         e.1 += t.bytes;
         e.2 += unit.defs.len() as u64;
         e.3 += unit.refs.len() as u64;
+        units.push(unit);
+        paths.push(path.clone());
+        langs.push(*lang);
     }
+    let d_extract = t1.elapsed();
 
+    let defs: u64 = units.iter().map(|u| u.defs.len() as u64).sum();
+    let refs: u64 = units.iter().map(|u| u.refs.len() as u64).sum();
+    let imports: u64 = units.iter().map(|u| u.imports.len() as u64).sum();
+
+    // ---- resolve -----------------------------------------------------------
+    let t2 = Instant::now();
+    let resolved = (!cli.no_resolve)
+        .then(|| resolve::resolve(&units, &paths, &langs, &root, &interner));
+    let d_resolve = t2.elapsed();
+
+    let wall = d_discover + d_extract + d_resolve;
     let mb = agg.bytes as f64 / 1_048_576.0;
-    let n_files = results.len() as u64;
+    let n_files = units.len() as u64;
 
+    // ---- report ------------------------------------------------------------
     println!("\n\x1b[1marbor\x1b[0m  {}", root.display());
     println!("  threads          {threads}");
     println!(
@@ -178,9 +195,50 @@ fn main() -> Result<()> {
         );
     }
 
+    if let Some(r) = &resolved {
+        let s = &r.stats;
+        let tot = s.total_refs().max(1) as f64;
+        println!(
+            "\n  \x1b[1mgraph\x1b[0m           {} nodes · {} edges",
+            r.space.total,
+            r.edges.len()
+        );
+        let in_repo = s.in_repo().max(1) as f64;
+        println!(
+            "  resolution       \x1b[1m{:.1}%\x1b[0m of in-repo refs   ({} of {} whose target exists here)",
+            100.0 * s.resolved() as f64 / in_repo,
+            s.resolved(),
+            s.in_repo()
+        );
+        for (label, n, conf) in [
+            ("scope", s.scope, "100"),
+            ("import", s.import, " 95"),
+            ("name (unique)", s.name_unique, " 80"),
+            ("name (ambig)", s.name_ambiguous, "45-60"),
+        ] {
+            println!(
+                "    {label:<16} {n:>9}  {:>5.1}%   conf {conf}",
+                100.0 * n as f64 / tot
+            );
+        }
+        for (label, n) in [
+            ("too ambiguous", s.too_ambiguous),
+            ("builtin (runtime)", s.builtin),
+            ("external (deps)", s.external),
+        ] {
+            println!(
+                "    \x1b[2m{label:<16} {n:>9}  {:>5.1}%\x1b[0m",
+                100.0 * n as f64 / tot
+            );
+        }
+    }
+
     println!("\n  \x1b[1mwall clock\x1b[0m");
     println!("    discover       {:>8.0} ms", d_discover.as_secs_f64() * 1e3);
     println!("    extract        {:>8.0} ms", d_extract.as_secs_f64() * 1e3);
+    if resolved.is_some() {
+        println!("    resolve        {:>8.0} ms", d_resolve.as_secs_f64() * 1e3);
+    }
     println!(
         "    \x1b[1mtotal          {:>8.0} ms\x1b[0m   ({:.0} files/s, {:.0} MB/s)",
         wall.as_secs_f64() * 1e3,
@@ -216,10 +274,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // Sanity check: are the names we interned actually plausible identifiers?
     if let Some(n) = cli.top {
         let mut counts: FxHashMap<core::SymId, u32> = FxHashMap::default();
-        for (_, unit, _) in &results {
+        for unit in &units {
             for r in &unit.refs {
                 *counts.entry(r.name).or_default() += 1;
             }

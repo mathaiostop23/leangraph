@@ -63,6 +63,15 @@ pub struct Spec {
     f_member: Vec<u16>,
     /// field ids holding an import's module path
     f_module: Vec<u16>,
+    /// nodes that are definitions only when they *hold* a function
+    /// (`const foo = () => {}` — the dominant TS idiom, invisible to plain
+    /// node-kind matching because the name lives on the declarator, not the
+    /// function)
+    cond_defs: Vec<u16>,
+    /// field ids holding a conditional definition's value
+    f_value: Vec<u16>,
+    /// value kinds that make a conditional definition count as a function
+    fn_values: Vec<u16>,
 }
 
 fn kinds(l: &Language, names: &[&str]) -> Vec<u16> {
@@ -110,6 +119,9 @@ pub fn spec_for(lang: Lang) -> Spec {
             f_callee: fields(&l, &["function"]),
             f_member: fields(&l, &["attribute"]),
             f_module: fields(&l, &["module_name", "name"]),
+            cond_defs: Vec::new(),
+            f_value: Vec::new(),
+            fn_values: Vec::new(),
         },
         Lang::TypeScript | Lang::Tsx => Spec {
             lang,
@@ -120,6 +132,8 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("generator_function_declaration", DefKind::Function),
                     ("class_declaration", DefKind::Class),
                     ("interface_declaration", DefKind::Interface),
+                    ("type_alias_declaration", DefKind::Interface),
+                    ("enum_declaration", DefKind::Class),
                     ("method_definition", DefKind::Method),
                 ],
             ),
@@ -135,14 +149,36 @@ pub fn spec_for(lang: Lang) -> Spec {
             f_callee: fields(&l, &["function", "constructor"]),
             f_member: fields(&l, &["property"]),
             f_module: fields(&l, &["source"]),
+            cond_defs: kinds(&l, &["variable_declarator", "public_field_definition"]),
+            f_value: fields(&l, &["value"]),
+            fn_values: kinds(
+                &l,
+                &["arrow_function", "function_expression", "function", "class"],
+            ),
         },
     }
 }
 
 impl Spec {
+    /// Definition kind for a node, including the conditional forms.
+    ///
+    /// Plain node-kind matching misses `const Foo = () => {}` entirely: the
+    /// `arrow_function` node has no name, and the `variable_declarator` that
+    /// does have one is not a definition in general. So for those we look at
+    /// what the declarator holds.
     #[inline]
-    pub fn def_kind(&self, k: u16) -> Option<DefKind> {
-        self.defs.iter().find(|(id, _)| *id == k).map(|(_, d)| *d)
+    pub fn def_kind_of(&self, node: &Node) -> Option<DefKind> {
+        let k = node.kind_id();
+        if let Some((_, d)) = self.defs.iter().find(|(id, _)| *id == k) {
+            return Some(*d);
+        }
+        if self.cond_defs.contains(&k) {
+            let v = first_field(node, &self.f_value)?;
+            if self.fn_values.contains(&v.kind_id()) {
+                return Some(DefKind::Function);
+            }
+        }
+        None
     }
 
     #[inline]

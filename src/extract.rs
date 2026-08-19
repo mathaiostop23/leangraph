@@ -53,7 +53,7 @@ fn walk(
         let scope = stack.last().map(|&(i, _)| i).unwrap_or(NO_SCOPE);
         t.ast_nodes += 1;
 
-        if let Some(dk) = spec.def_kind(kind) {
+        if let Some(dk) = spec.def_kind_of(&node) {
             if let Some(nn) = spec.def_name_node(&node) {
                 if let Some(txt) = node_text(&nn, src) {
                     let idx = unit.defs.len() as DefIdx;
