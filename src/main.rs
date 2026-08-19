@@ -5,6 +5,7 @@ mod cochange;
 mod core;
 mod extract;
 mod graph;
+mod idtable;
 mod index;
 mod install;
 mod lang;
@@ -45,6 +46,9 @@ enum Cmd {
         /// Full reindex, ignoring any cached extraction
         #[arg(long)]
         force: bool,
+        /// Diff against this commit instead of walking the tree (server path)
+        #[arg(long, value_name = "SHA")]
+        since: Option<String>,
         #[arg(short, long)]
         out: Option<PathBuf>,
         /// Index only; do not write the graph to disk
@@ -143,7 +147,7 @@ enum Cmd {
     Dump {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
-        /// nodes | edges
+        /// nodes | edges | semantic
         #[arg(long, default_value = "nodes")]
         what: String,
     },
@@ -164,6 +168,7 @@ fn main() -> Result<()> {
             no_resolve,
             no_cochange,
             force,
+            since,
             out,
             dry_run,
         } => index::run(&index::Config {
@@ -174,6 +179,7 @@ fn main() -> Result<()> {
             no_resolve,
             no_cochange,
             incremental: !force,
+            since,
             out,
             dry_run,
         }),
@@ -381,6 +387,9 @@ fn main() -> Result<()> {
                 "nodes" => {
                     for i in 0..g.n_nodes() {
                         let n = NodeId(i);
+                        if g.node_key(n) == 0 {
+                            continue; // hole left by a retired node
+                        }
                         let (f, _, _) = g.location(n);
                         if g.node_kind(n) == DefKind::Module as u8 {
                             continue; // files are compared separately
@@ -392,6 +401,39 @@ fn main() -> Result<()> {
                             json_str(g.name(n)),
                             kind_name(g.node_kind(n))
                         )?;
+                    }
+                }
+                // Identity-keyed, so it is comparable across runs that assigned
+                // different ids — which is exactly what an incremental sync does.
+                "semantic" => {
+                    let mut lines: Vec<String> = Vec::new();
+                    for i in 0..g.n_nodes() {
+                        let n = NodeId(i);
+                        let k = g.node_key(n);
+                        if k == 0 {
+                            continue;
+                        }
+                        let (f, a, b) = g.location(n);
+                        lines.push(format!(
+                            "N {k:016x} {} {} {a} {b} {}",
+                            kind_name(g.node_kind(n)),
+                            g.path(f),
+                            g.name(n)
+                        ));
+                        for nb in g.callees(n) {
+                            let dk = g.node_key(nb.node);
+                            if dk == 0 {
+                                continue;
+                            }
+                            lines.push(format!(
+                                "E {k:016x} {dk:016x} {} {}",
+                                nb.kind, nb.conf
+                            ));
+                        }
+                    }
+                    lines.sort_unstable();
+                    for l in lines {
+                        writeln!(w, "{l}")?;
                     }
                 }
                 "edges" => {
@@ -413,7 +455,7 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                other => bail!("unknown dump target `{other}` (nodes | edges)"),
+                other => bail!("unknown dump target `{other}` (nodes | edges | semantic)"),
             }
             Ok(())
         }

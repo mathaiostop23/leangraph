@@ -22,7 +22,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAGIC: [u8; 8] = *b"ARBORC\x00\x01";
+const MAGIC: [u8; 8] = *b"ARBORC\x00\x02";
 const N_SECTIONS: usize = 10;
 
 const S_FILES: usize = 0;
@@ -33,6 +33,7 @@ const S_SYM_OFF: usize = 4;
 const S_SYM_BLOB: usize = 5;
 const S_PATH_OFF: usize = 6;
 const S_PATH_BLOB: usize = 7;
+const S_HEAD: usize = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -109,6 +110,21 @@ pub struct Entry {
     pub unit: FileUnit,
 }
 
+/// Commit the cache was built at, if any. Lets a sync ask git what changed
+/// instead of walking and stat-ing the whole tree.
+pub fn read_head(path: &Path) -> Option<String> {
+    let buf = std::fs::read(path).ok()?;
+    if buf.len() < std::mem::size_of::<Header>() || buf[..8] != MAGIC {
+        return None;
+    }
+    let h: Header = *bytemuck::from_bytes(&buf[..std::mem::size_of::<Header>()]);
+    let (o, l) = (h.off[S_HEAD] as usize, h.len[S_HEAD] as usize);
+    if l == 0 {
+        return None;
+    }
+    String::from_utf8(buf.get(o..o + l)?.to_vec()).ok()
+}
+
 fn kind_of_def(k: u32) -> DefKind {
     match k {
         1 => DefKind::Method,
@@ -169,6 +185,7 @@ pub fn write(
     metas: &[FileMeta],
     interner: &Interner,
     root: &Path,
+    head: &str,
 ) -> Result<()> {
     let mut files = Vec::with_capacity(units.len());
     let mut defs = Vec::new();
@@ -263,6 +280,7 @@ pub fn write(
     section!(S_SYM_BLOB, &sym_blob[..]);
     section!(S_PATH_OFF, &path_off[..]);
     section!(S_PATH_BLOB, &path_blob[..]);
+    section!(S_HEAD, head.as_bytes());
 
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).ok();

@@ -24,7 +24,7 @@ use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const MAGIC: [u8; 8] = *b"ARBORG\x00\x02";
+const MAGIC: [u8; 8] = *b"ARBORG\x00\x03";
 const N_SECTIONS: usize = 24;
 
 // section ids
@@ -48,6 +48,7 @@ const S_SYM_BLOB: usize = 16;
 const S_PATH_OFF: usize = 17;
 const S_PATH_BLOB: usize = 18;
 const S_ROOT: usize = 19;
+const S_NODE_KEY: usize = 20;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -107,6 +108,7 @@ pub struct Graph {
     path_off: &'static [u32],
     path_blob: &'static [u8],
     root: &'static str,
+    node_key: &'static [u64],
     /// Built on first lookup, not at open time — keeping `open` a pure mmap is
     /// the point of the format, and many callers never search by name.
     name_index: OnceLock<FxHashMap<&'static str, Vec<NodeId>>>,
@@ -164,6 +166,7 @@ pub fn write(
     syms: &[String],
     paths: &[PathBuf],
     root: &Path,
+    node_keys: &[u64],
 ) -> Result<()> {
     // Canonicalise the symbol table before writing. Two things force this:
     //
@@ -284,6 +287,7 @@ pub fn write(
     section!(S_PATH_BLOB, &path_blob[..]);
     let root_bytes = root.to_string_lossy().into_owned();
     section!(S_ROOT, root_bytes.as_bytes());
+    section!(S_NODE_KEY, node_keys);
 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok();
@@ -302,6 +306,26 @@ pub fn write(
 }
 
 // -------------------------------------------------------------------- open
+
+/// Read just the node-key table, without building a whole `Graph`.
+///
+/// A sync needs the previous id assignment before it can resolve anything, and
+/// paying for the full structure to get one array would be wasteful — this is
+/// an mmap and one slice.
+pub fn read_keys(path: &Path) -> Option<Vec<u64>> {
+    let f = File::open(path).ok()?;
+    let mmap = unsafe { Mmap::map(&f) }.ok()?;
+    if mmap.len() < std::mem::size_of::<Header>() {
+        return None;
+    }
+    let h: Header = *bytemuck::from_bytes(&mmap[..std::mem::size_of::<Header>()]);
+    if h.magic != MAGIC {
+        return None; // written by an older format: fall back to a full assignment
+    }
+    let (o, l) = (h.off[S_NODE_KEY] as usize, h.len[S_NODE_KEY] as usize);
+    let slice: &[u64] = bytemuck::try_cast_slice(mmap.get(o..o + l)?).ok()?;
+    Some(slice.to_vec())
+}
 
 impl Graph {
     pub fn open(path: &Path) -> Result<Graph> {
@@ -362,6 +386,14 @@ impl Graph {
             path_off: sec_u32(S_PATH_OFF),
             path_blob: sec_u8(S_PATH_BLOB),
             root: std::str::from_utf8(sec_u8(S_ROOT)).unwrap_or(""),
+            node_key: {
+                let (o, l) = (header.off[S_NODE_KEY] as usize, header.len[S_NODE_KEY] as usize);
+                if l == 0 {
+                    &[]
+                } else {
+                    bytemuck::cast_slice(&base[o..o + l])
+                }
+            },
             name_index: OnceLock::new(),
             _mmap: mmap,
         })
@@ -412,6 +444,13 @@ impl Graph {
     /// Absolute path for a file id.
     pub fn abs_path(&self, f: u32) -> PathBuf {
         Path::new(self.root).join(self.path(f))
+    }
+
+    /// Content-derived identity of a node — stable across syncs, unlike the id,
+    /// which is an allocation detail.
+    #[inline]
+    pub fn node_key(&self, n: NodeId) -> u64 {
+        self.node_key.get(n.0 as usize).copied().unwrap_or(0)
     }
 
     #[inline]

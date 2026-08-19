@@ -9,9 +9,10 @@
 //! consumer cannot discount it.
 
 use crate::core::{
-    Def, DefIdx, DefKind, Edge, EdgeKind, FileId, FileUnit, Interner, NodeId, Provenance, RefKind,
-    SymId, NO_SCOPE,
+    Def, DefIdx, DefKind, Edge, EdgeKind, FileId, FileUnit, Interner, NodeId, NodeKey, Provenance,
+    RefKind, SymId, NO_SCOPE,
 };
+use crate::idtable::IdTable;
 use lasso::Key;
 use crate::lang::Lang;
 use rayon::prelude::*;
@@ -97,39 +98,114 @@ const JS_BUILTINS: &[&str] = &[
     "TextDecoder", "Headers", "Request", "Response", "FormData", "Blob", "File", "Event",
 ];
 
-/// Flat global node id space: files occupy `[0, n_files)`, then each file's
-/// definitions occupy a contiguous run. Keeping it flat is what lets the CSR
-/// in the next phase be a pair of `Vec<u32>` with no indirection.
+/// Mapping from (file, definition) to global node id.
+///
+/// Ids used to be positional — `n_files + running_offset` — which is simpler
+/// and fatal to incremental work: one added definition renumbers everything
+/// after it. They now come from a persistent key table, so a node keeps its id
+/// across syncs and the adjacency structure stays valid.
 pub struct NodeSpace {
     pub n_files: u32,
+    file_ids: Vec<NodeId>,
     def_base: Vec<u32>,
+    def_ids: Vec<NodeId>,
+    /// Size of the id space, holes included.
     pub total: u32,
 }
 
 impl NodeSpace {
-    fn build(units: &[FileUnit]) -> NodeSpace {
-        let n_files = units.len() as u32;
-        let mut def_base = Vec::with_capacity(units.len() + 1);
-        let mut acc = n_files;
-        for u in units {
-            def_base.push(acc);
-            acc += u.defs.len() as u32;
-        }
-        def_base.push(acc);
-        NodeSpace {
-            n_files,
-            def_base,
-            total: acc,
-        }
-    }
     #[inline]
     pub fn file_node(&self, f: FileId) -> NodeId {
-        NodeId(f)
+        self.file_ids
+            .get(f as usize)
+            .copied()
+            .unwrap_or(NodeId(u32::MAX))
     }
     #[inline]
     pub fn def_node(&self, f: FileId, d: DefIdx) -> NodeId {
-        NodeId(self.def_base[f as usize] + d)
+        self.def_ids
+            .get(self.def_base[f as usize] as usize + d as usize)
+            .copied()
+            .unwrap_or(NodeId(u32::MAX))
     }
+}
+
+/// Identity of every node, in a fixed order: files by index, then each file's
+/// definitions in extraction order. Deterministic, so two runs over identical
+/// source assign identical ids.
+fn node_keys(units: &[FileUnit], rel_paths: &[String], interner: &Interner) -> Vec<NodeKey> {
+    let mut keys = Vec::new();
+    for p in rel_paths {
+        keys.push(NodeKey::of_file(p));
+    }
+    for (f, unit) in units.iter().enumerate() {
+        // A qualified name can legitimately repeat within one file — two `if`
+        // branches each defining `handler`, or two same-named classes each with
+        // a `run` method. Counting occurrences keeps their identities distinct.
+        //
+        // The counter must key on exactly what the id keys on. Keying it on the
+        // parent *index* instead let two defs with different parents but the
+        // same qualified name both take occurrence 0, so they collided onto one
+        // id and one of them silently overwrote the other's metadata.
+        // Counter keyed on the identity-without-occurrence, so it costs one
+        // hash rather than a string.
+        let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
+        let mut chain: Vec<&str> = Vec::with_capacity(8);
+        for def in &unit.defs {
+            qualified_into(unit, def, interner, &mut chain);
+            let base = NodeKey::of_parts(
+                &rel_paths[f],
+                chain.iter().copied(),
+                def.kind as u8,
+                u32::MAX,
+            );
+            let n = seen.entry(base.0).or_default();
+            let occ = *n;
+            *n += 1;
+            keys.push(NodeKey::of_parts(
+                &rel_paths[f],
+                chain.iter().copied(),
+                def.kind as u8,
+                occ,
+            ));
+        }
+    }
+    debug_assert_eq!(
+        {
+            let mut u: Vec<u64> = keys.iter().map(|k| k.0).collect();
+            u.sort_unstable();
+            u.dedup();
+            u.len()
+        },
+        keys.len(),
+        "node keys must be unique: a collision silently merges two nodes"
+    );
+    keys
+}
+
+/// `QuerySet.filter` rather than bare `filter`: the enclosing chain is what
+/// makes two same-named methods in one file distinguishable.
+///
+/// Writes into a reused buffer instead of returning a `String`. The guard
+/// bounds a cycle that a malformed parent chain could otherwise turn into a
+/// hang.
+fn qualified_into<'a>(
+    unit: &FileUnit,
+    def: &Def,
+    interner: &'a Interner,
+    out: &mut Vec<&'a str>,
+) {
+    out.clear();
+    out.push(interner.resolve(&def.name));
+    let mut p = def.parent;
+    let mut guard = 0;
+    while p != NO_SCOPE && guard < 32 {
+        let d = &unit.defs[p as usize];
+        out.push(interner.resolve(&d.name));
+        p = d.parent;
+        guard += 1;
+    }
+    out.reverse();
 }
 
 // ------------------------------------------------------------ module naming
@@ -215,9 +291,11 @@ pub struct NodeMeta {
 
 pub struct Resolved {
     pub space: NodeSpace,
+    /// Indexed by node id, so it has holes where nodes were retired.
     pub nodes: Vec<NodeMeta>,
     pub edges: Vec<Edge>,
     pub stats: ResolveStats,
+    pub churn: crate::idtable::Churn,
 }
 
 pub fn resolve(
@@ -226,9 +304,43 @@ pub fn resolve(
     langs: &[Lang],
     root: &Path,
     interner: &Interner,
+    ids: &mut IdTable,
 ) -> Resolved {
-    let space = NodeSpace::build(units);
+    let rel_paths: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
 
+    let t_keys = std::time::Instant::now();
+    let keys = node_keys(units, &rel_paths, interner);
+    let (assigned, churn) = ids.assign(&keys);
+    let ms_keys = t_keys.elapsed().as_secs_f64() * 1e3;
+
+    let n_files = units.len() as u32;
+    let file_ids: Vec<NodeId> = assigned[..n_files as usize].to_vec();
+    let def_ids: Vec<NodeId> = assigned[n_files as usize..].to_vec();
+    let mut def_base = Vec::with_capacity(units.len() + 1);
+    let mut acc = 0u32;
+    for u in units {
+        def_base.push(acc);
+        acc += u.defs.len() as u32;
+    }
+    def_base.push(acc);
+
+    let space = NodeSpace {
+        n_files,
+        file_ids,
+        def_base,
+        def_ids,
+        total: ids.len(),
+    };
+
+    let t_index = std::time::Instant::now();
     // ---- phase A: global index (sequential barrier) ------------------------
     let mut by_name: FxHashMap<SymId, Vec<(FileId, DefIdx)>> = FxHashMap::default();
     let mut by_module: FxHashMap<String, FileId> = FxHashMap::default();
@@ -260,6 +372,8 @@ pub fn resolve(
 
     let dirs: Vec<&Path> = paths.iter().map(|p| p.parent().unwrap_or(root)).collect();
 
+    let ms_index = t_index.elapsed().as_secs_f64() * 1e3;
+    let t_par = std::time::Instant::now();
     // ---- phase B: resolve in parallel (index is read-only from here) -------
     let (edges, stats) = units
         .par_iter()
@@ -411,6 +525,13 @@ pub fn resolve(
             },
         );
 
+    let ms_par = t_par.elapsed().as_secs_f64() * 1e3;
+    if std::env::var_os("ARBOR_PROFILE").is_some() {
+        eprintln!(
+            "      resolve: keys+ids {ms_keys:.0}ms · global index {ms_index:.0}ms · parallel {ms_par:.0}ms"
+        );
+    }
+
     // Collapse duplicates: a function referencing the same target three times
     // is one graph edge. Keep the highest-confidence evidence for it.
     let mut edges = edges;
@@ -421,9 +542,10 @@ pub fn resolve(
     // Files occupy the low ids; their "name" is the interned path so a file
     // node is searchable like any other.
     let mut nodes = vec![NodeMeta::default(); space.total as usize];
-    for (f, path) in paths.iter().enumerate() {
-        let key = interner.get_or_intern(path.to_string_lossy().as_ref());
-        nodes[f] = NodeMeta {
+    for (f, rel) in rel_paths.iter().enumerate() {
+        let key = interner.get_or_intern(rel.as_str());
+        let n = space.file_node(f as FileId).0 as usize;
+        nodes[n] = NodeMeta {
             name: key.into_usize() as u32,
             kind: DefKind::Module as u8,
             file: f as u32,
@@ -449,6 +571,7 @@ pub fn resolve(
         nodes,
         edges,
         stats,
+        churn,
     }
 }
 

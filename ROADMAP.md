@@ -34,7 +34,9 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 2b · Context builder | ✅ **Done.** Confidence-ranked, budget-capped |
 | 3 · MCP server (**B ships**) | ✅ **Done.** 3.9 ms startup vs 561.7 ms |
 | 4 · Incremental sync | ✅ **Done.** 5–8x; byte-identical to a full reindex |
-| 4b · Delta overlay + daemon | ⬜ — needed to get sync under 50 ms |
+| 4b · Stable node ids | ✅ **Done.** Persistent key table; ids survive edits |
+| 4c · Git tree-diff sync | ✅ **Done.** `--since <sha>` for push webhooks |
+| 4d · Per-file edge cache + CSR patching | ⬜ — the rest of the delta overlay |
 | 5 · Server (**A ships**) | ⬜ |
 | 6 · Breadth | ⬜ |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |

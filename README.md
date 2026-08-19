@@ -140,7 +140,7 @@ Four decisions carry the performance:
 Being explicit, because the gap is large:
 
 - **Two languages.** CodeGraph has 30+, with 17 web frameworks and Swift↔ObjC / React Native bridging. Breadth is cheap at the extraction tier (~1 hour per language via declarative specs) and expensive at the import/scope tier (2–10 days). Neither has been spent yet.
-- **Sync is 142 ms, not the 50 ms the design targets.** Resolve and persist are still whole-graph operations; getting below this needs the delta overlay described in [ENGINE.md](./ENGINE.md).
+- **Sync is ~164 ms, not the 50 ms the design targets.** Stable node ids are in place — the prerequisite for a delta overlay — but resolve and persist still rewrite the whole graph. Profiling corrected the design's premise along the way: the sequential barrier it was built to avoid turned out to be 4 ms, and the real cost is rewriting a 7 MB graph and a 25 MB cache for a one-line change.
 - **Edges are unverified.** Node-level verification runs (95% presence recall above), but we do not yet check that individual *edges* point where they should. That is the next gate.
 - **Recall tops out near 51%.** Brute-force keyword search reaches 61% if you let it read 423k tokens. Closing that gap needs better retrieval signals, not a bigger budget.
 - **Cost measured on one repo.** 30 bug-fix commits in django. Directionally strong, not yet a general claim.

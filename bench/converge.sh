@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Invariant: an incremental sync must produce byte-identical output to a full
-# reindex of the same working tree.
+# Invariant: an incremental sync must produce a graph *semantically identical*
+# to a full reindex of the same working tree.
 #
 # This is the property that makes incremental safe. A stale-but-plausible graph
 # is worse than a slow one: it answers confidently and wrongly, and nothing
-# downstream can tell. So the check is byte equality, not "close enough".
+# downstream can tell.
+#
+# The comparison is on content-derived node keys, not raw bytes. Node ids are an
+# allocation detail — an incremental sync deliberately keeps the ids it had,
+# where a full index packs them from zero — so byte equality would report a
+# difference that means nothing. Every node identity, its location, and every
+# edge between identities must match exactly.
 #
 # Usage: bench/converge.sh [repo]
 set -uo pipefail
@@ -17,7 +23,7 @@ GRAPH="$REPO/.arbor/graph.bin"
 
 [[ -x "$ARBOR" ]] || { echo "build first: cargo build --release" >&2; exit 1; }
 
-hash_graph() { shasum -a 256 "$GRAPH" | cut -c1-16; }
+hash_graph() { "$ARBOR" dump -p "$REPO" --what semantic | shasum -a 256 | cut -c1-16; }
 full()  { "$ARBOR" index "$REPO" --force >/dev/null 2>&1; }
 sync()  { "$ARBOR" index "$REPO"         >/dev/null 2>&1; }
 

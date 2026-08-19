@@ -158,9 +158,58 @@ pub struct FileUnit {
     pub had_parse_error: bool,
 }
 
-/// Global node id: (file, definition index) flattened during graph build.
+/// Global node id.
+///
+/// Assigned through a persistent key table rather than by position. Positional
+/// ids are simpler but fatal to incremental work: adding one definition shifts
+/// every id after it, which invalidates the whole adjacency structure and every
+/// cached edge. A stable id survives edits to unrelated files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u32);
+
+/// Content-derived identity of a node, independent of where it happens to sit
+/// in any array: the file it lives in, its qualified name, its kind, and which
+/// occurrence it is when a name repeats at the same scope.
+///
+/// 64 bits over ~10^5 nodes puts collision probability around 10^-10 — far
+/// below the rate at which we would get the semantics wrong by other means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct NodeKey(pub u64);
+
+impl NodeKey {
+    pub fn of(file_path: &str, qualified: &str, kind: u8, occurrence: u32) -> NodeKey {
+        NodeKey::of_parts(file_path, qualified.split('.'), kind, occurrence)
+    }
+
+    /// Same identity, built from the enclosing chain without materialising it.
+    ///
+    /// Joining the chain into a `String` per definition cost one allocation per
+    /// node — 65,000 of them on django, and 16 ms of a sync spent producing
+    /// strings nothing ever reads.
+    pub fn of_parts<'a>(
+        file_path: &str,
+        qualified: impl Iterator<Item = &'a str>,
+        kind: u8,
+        occurrence: u32,
+    ) -> NodeKey {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        file_path.hash(&mut h);
+        0xffu8.hash(&mut h); // separator, so ("a","bc") and ("ab","c") differ
+        for part in qualified {
+            part.hash(&mut h);
+            0xfeu8.hash(&mut h);
+        }
+        kind.hash(&mut h);
+        occurrence.hash(&mut h);
+        NodeKey(h.finish())
+    }
+
+    /// Files are nodes too, and their identity is just the path.
+    pub fn of_file(file_path: &str) -> NodeKey {
+        NodeKey::of(file_path, "", u8::MAX, 0)
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Edge {

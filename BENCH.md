@@ -83,10 +83,51 @@ django, 3,038 files:
 | sync, nothing changed | **90 ms** | 8.0x |
 | sync, one file changed | **142 ms** | 5.1x |
 
-Where the remaining time goes on a one-file sync: discover 37 ms, extract 13 ms,
-resolve 34 ms, co-change 9 ms, persist 47 ms. Getting below this needs a delta
-overlay so resolve and persist stop being whole-graph operations — that is the
-next architectural step, not a tuning one.
+### Where the time actually goes
+
+Profiling the phases (`ARBOR_PROFILE=1`) on a one-file sync corrected the design's
+assumption about what the delta overlay would buy:
+
+```
+discover  26–54 ms
+extract      13 ms
+resolve      45 ms    keys+ids 9 · global index 4 · parallel 23
+co-change     9 ms    (cached)
+persist      60 ms    graph 28 · unit cache 29
+```
+
+**The sequential global-index barrier — the thing the delta overlay was designed
+around — is 4 ms.** It was never the problem. The real costs are the parallel
+resolve pass and, more than anything, persistence: rewriting a 7 MB graph and a
+25 MB extraction cache for a one-line change.
+
+So the remaining work is not "avoid the barrier" but "stop rewriting whole
+files": per-file cached edges to skip the parallel pass, a chunked cache format
+to rewrite only changed slices, and in-place CSR patching. Each is real work with
+a bounded payoff, and none of it was needed to make sync 5x faster.
+
+### Stable node ids
+
+Ids used to be positional — file index plus a running offset — which is simpler
+and fatal to anything incremental: adding one definition renumbers everything
+after it and invalidates the entire adjacency structure. They now come from a
+persistent table keyed by a content-derived `NodeKey` (file, qualified name,
+kind, occurrence), so a node keeps its id across syncs and retired nodes leave
+holes that the next full index reclaims.
+
+That cost 9 ms per sync and is the prerequisite for every remaining optimisation.
+
+### The server path — measured, and narrower than expected
+
+`arbor index --since <sha>` diffs two commits instead of walking the tree, which
+is what a push webhook can supply.
+
+The first attempt applied it to the local case too and made discovery **worse**:
+140 ms against the walk's 37 ms. `git diff --name-only <sha>` compares against
+the *working tree*, so git must stat every tracked file to answer — precisely the
+work we were trying to avoid. Comparing two commits is a tree read and costs
+almost nothing. The flag is therefore opt-in and scoped to the server case;
+everything else walks.
 
 Two costs were found by measuring rather than assuming:
 
