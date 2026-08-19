@@ -20,7 +20,9 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::Write;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const MAGIC: [u8; 8] = *b"ARBORG\x00\x02";
 const N_SECTIONS: usize = 24;
@@ -103,6 +105,9 @@ pub struct Graph {
     sym_blob: &'static [u8],
     path_off: &'static [u32],
     path_blob: &'static [u8],
+    /// Built on first lookup, not at open time — keeping `open` a pure mmap is
+    /// the point of the format, and many callers never search by name.
+    name_index: OnceLock<FxHashMap<&'static str, Vec<NodeId>>>,
 }
 
 // ------------------------------------------------------------------- build
@@ -305,6 +310,7 @@ impl Graph {
             sym_blob: sec_u8(S_SYM_BLOB),
             path_off: sec_u32(S_PATH_OFF),
             path_blob: sec_u8(S_PATH_BLOB),
+            name_index: OnceLock::new(),
             _mmap: mmap,
         })
     }
@@ -422,11 +428,22 @@ impl Graph {
         out
     }
 
-    /// Nodes whose name matches exactly. Linear for now; Phase 3 adds an index.
+    /// Nodes whose name matches exactly.
     pub fn find(&self, name: &str) -> Vec<NodeId> {
-        (0..self.n_nodes)
-            .filter(|&i| self.name(NodeId(i)) == name)
-            .map(NodeId)
-            .collect()
+        self.name_index
+            .get_or_init(|| {
+                let mut m: FxHashMap<&'static str, Vec<NodeId>> = FxHashMap::default();
+                for i in 0..self.n_nodes {
+                    let s = self.name(NodeId(i));
+                    // SAFETY: names are slices of the mmap, which `self` owns
+                    // for its whole lifetime.
+                    let s: &'static str = unsafe { std::mem::transmute::<&str, &'static str>(s) };
+                    m.entry(s).or_default().push(NodeId(i));
+                }
+                m
+            })
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
     }
 }

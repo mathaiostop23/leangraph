@@ -5,6 +5,7 @@ mod extract;
 mod graph;
 mod index;
 mod lang;
+mod query;
 mod resolve;
 
 use crate::core::{DefKind, NodeId};
@@ -81,6 +82,21 @@ enum Cmd {
         /// Follow containment edges too (file <-> its definitions)
         #[arg(long)]
         with_contains: bool,
+    },
+    /// Build agent context for a set of symbols
+    Explore {
+        /// Symbol names; `Class.method` disambiguates an overload
+        #[arg(required = true)]
+        symbols: Vec<String>,
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 25)]
+        max_nodes: usize,
+        #[arg(long, default_value_t = 24_000)]
+        max_bytes: usize,
+        /// Print the source of each selected node
+        #[arg(long)]
+        source: bool,
     },
     /// Graph statistics and load time
     Status {
@@ -165,6 +181,61 @@ fn main() -> Result<()> {
             Ok(())
         }
 
+        Cmd::Explore {
+            symbols,
+            path,
+            max_nodes,
+            max_bytes,
+            source,
+        } => {
+            let (g, load_us) = load(&path)?;
+            let t = Instant::now();
+            let ctx = query::build(
+                &g,
+                &symbols,
+                &query::Budget {
+                    max_nodes,
+                    max_bytes,
+                    ..Default::default()
+                },
+            );
+            let us = t.elapsed().as_micros();
+
+            if !ctx.flow.is_empty() {
+                println!(
+                    "\n\x1b[1mflow\x1b[0m  {} → {}",
+                    if ctx.flow_reversed { &symbols[1] } else { &symbols[0] },
+                    if ctx.flow_reversed { &symbols[0] } else { &symbols[1] }
+                );
+                for (i, n) in ctx.flow.iter().enumerate() {
+                    println!("  {}{}", "  ".repeat(i), describe(&g, *n));
+                }
+            }
+            println!(
+                "\n\x1b[1mcontext\x1b[0m  {} nodes · ~{} tokens · {} dropped   (load {load_us} µs, build {us} µs)\n",
+                ctx.items.len(),
+                ctx.est_tokens,
+                ctx.dropped
+            );
+            for it in &ctx.items {
+                println!(
+                    "  {:<8} {:>4.2}  {}",
+                    it.why.label(),
+                    it.score,
+                    describe(&g, it.node)
+                );
+                if source {
+                    if let Some(txt) = read_span(&g, it.node) {
+                        for line in txt.lines().take(30) {
+                            println!("        │ {line}");
+                        }
+                    }
+                }
+            }
+            println!();
+            Ok(())
+        }
+
         Cmd::Status { path } => {
             let (g, load_us) = load(&path)?;
             let bytes = std::fs::metadata(graph_path(&path))
@@ -178,6 +249,15 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Slice a node's source out of its file. The graph stores byte spans, not
+/// text, so this is the only place that touches the working tree.
+fn read_span(g: &Graph, n: NodeId) -> Option<String> {
+    let (file, start, end) = g.location(n);
+    let bytes = std::fs::read(g.path(file)).ok()?;
+    let s = bytes.get(start as usize..end as usize)?;
+    Some(String::from_utf8_lossy(s).into_owned())
 }
 
 fn graph_path(repo: &Path) -> PathBuf {

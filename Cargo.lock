@@ -98,6 +98,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "rustc-hash",
+ "serde_json",
  "tree-sitter",
  "tree-sitter-python",
  "tree-sitter-typescript",
