@@ -47,6 +47,7 @@ const S_SYM_OFF: usize = 15;
 const S_SYM_BLOB: usize = 16;
 const S_PATH_OFF: usize = 17;
 const S_PATH_BLOB: usize = 18;
+const S_ROOT: usize = 19;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -105,6 +106,7 @@ pub struct Graph {
     sym_blob: &'static [u8],
     path_off: &'static [u32],
     path_blob: &'static [u8],
+    root: &'static str,
     /// Built on first lookup, not at open time — keeping `open` a pure mmap is
     /// the point of the format, and many callers never search by name.
     name_index: OnceLock<FxHashMap<&'static str, Vec<NodeId>>>,
@@ -154,7 +156,13 @@ fn pad_to_8(v: &mut Vec<u8>) {
     }
 }
 
-pub fn write(path: &Path, r: &Resolved, syms: &[String], paths: &[PathBuf]) -> Result<()> {
+pub fn write(
+    path: &Path,
+    r: &Resolved,
+    syms: &[String],
+    paths: &[PathBuf],
+    root: &Path,
+) -> Result<()> {
     let n_nodes = r.space.total;
     let mut fwd_edges = r.edges.clone();
     let mut rev_edges = r.edges.clone();
@@ -187,7 +195,15 @@ pub fn write(path: &Path, r: &Resolved, syms: &[String], paths: &[PathBuf]) -> R
         (off, buf)
     };
     let (sym_off, sym_blob) = blob(syms);
-    let path_strings: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let path_strings: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
     let (path_off, path_blob) = blob(&path_strings);
 
     let mut header = Header {
@@ -233,6 +249,8 @@ pub fn write(path: &Path, r: &Resolved, syms: &[String], paths: &[PathBuf]) -> R
     section!(S_SYM_BLOB, &sym_blob[..]);
     section!(S_PATH_OFF, &path_off[..]);
     section!(S_PATH_BLOB, &path_blob[..]);
+    let root_bytes = root.to_string_lossy().into_owned();
+    section!(S_ROOT, root_bytes.as_bytes());
 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok();
@@ -310,6 +328,7 @@ impl Graph {
             sym_blob: sec_u8(S_SYM_BLOB),
             path_off: sec_u32(S_PATH_OFF),
             path_blob: sec_u8(S_PATH_BLOB),
+            root: std::str::from_utf8(sec_u8(S_ROOT)).unwrap_or(""),
             name_index: OnceLock::new(),
             _mmap: mmap,
         })
@@ -348,6 +367,18 @@ impl Graph {
         }
         let (a, b) = (self.path_off[i] as usize, self.path_off[i + 1] as usize);
         std::str::from_utf8(&self.path_blob[a..b]).unwrap_or("")
+    }
+
+    /// Repository root the graph was built from. Paths are stored relative to
+    /// it; join through here to touch the working tree.
+    #[inline]
+    pub fn root(&self) -> &str {
+        self.root
+    }
+
+    /// Absolute path for a file id.
+    pub fn abs_path(&self, f: u32) -> PathBuf {
+        Path::new(self.root).join(self.path(f))
     }
 
     #[inline]

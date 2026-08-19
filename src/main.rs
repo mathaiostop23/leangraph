@@ -4,7 +4,9 @@ mod core;
 mod extract;
 mod graph;
 mod index;
+mod install;
 mod lang;
+mod mcp;
 mod query;
 mod resolve;
 
@@ -97,6 +99,24 @@ enum Cmd {
         /// Print the source of each selected node
         #[arg(long)]
         source: bool,
+    },
+    /// Wire arbor into your editors as an MCP server
+    Install {
+        /// Targets: claude-code, cursor, codex (default: all)
+        #[arg(value_name = "TARGET")]
+        targets: Vec<String>,
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Remove the wiring instead
+        #[arg(long)]
+        uninstall: bool,
+    },
+    /// Run as an MCP server over stdio (for Claude Code, Cursor, Codex, …)
+    Serve {
+        #[arg(long)]
+        mcp: bool,
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
     },
     /// Graph statistics and load time
     Status {
@@ -236,6 +256,43 @@ fn main() -> Result<()> {
             Ok(())
         }
 
+        Cmd::Install {
+            targets,
+            path,
+            uninstall,
+        } => {
+            let sel: Vec<install::Target> = if targets.is_empty() {
+                install::ALL.to_vec()
+            } else {
+                let mut v = Vec::new();
+                for t in &targets {
+                    match install::Target::parse(t) {
+                        Some(x) => v.push(x),
+                        None => bail!("unknown target `{t}` (claude-code, cursor, codex)"),
+                    }
+                }
+                v
+            };
+            println!();
+            for (t, o) in install::apply(&sel, &path, uninstall)? {
+                let (mark, detail) = match &o {
+                    install::Outcome::Installed(p) => ("\x1b[32m+\x1b[0m", p.display().to_string()),
+                    install::Outcome::Removed(p) => ("\x1b[33m-\x1b[0m", p.display().to_string()),
+                    install::Outcome::Unchanged(p) => ("\x1b[2m=\x1b[0m", p.display().to_string()),
+                    install::Outcome::Skipped(why) => ("\x1b[31m!\x1b[0m", (*why).to_string()),
+                };
+                println!("  {mark} {:<14} {detail}", t.name());
+            }
+            if !uninstall {
+                println!("\n  restart your editor, then ask it to explore a symbol\n");
+            } else {
+                println!();
+            }
+            Ok(())
+        }
+
+        Cmd::Serve { mcp: _, path } => mcp::serve(&path),
+
         Cmd::Status { path } => {
             let (g, load_us) = load(&path)?;
             let bytes = std::fs::metadata(graph_path(&path))
@@ -255,7 +312,7 @@ fn main() -> Result<()> {
 /// text, so this is the only place that touches the working tree.
 fn read_span(g: &Graph, n: NodeId) -> Option<String> {
     let (file, start, end) = g.location(n);
-    let bytes = std::fs::read(g.path(file)).ok()?;
+    let bytes = std::fs::read(g.abs_path(file)).ok()?;
     let s = bytes.get(start as usize..end as usize)?;
     Some(String::from_utf8_lossy(s).into_owned())
 }
@@ -358,8 +415,11 @@ fn kind_name(k: u8) -> &'static str {
 }
 
 fn short_path(path: &str) -> String {
+    if path.len() <= 42 {
+        return path.to_string();
+    }
     let tail: Vec<&str> = path.rsplit('/').take(3).collect();
-    tail.into_iter().rev().collect::<Vec<_>>().join("/")
+    format!("…/{}", tail.into_iter().rev().collect::<Vec<_>>().join("/"))
 }
 
 fn describe(g: &Graph, n: NodeId) -> String {

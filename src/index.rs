@@ -168,7 +168,7 @@ pub fn run(cfg: &Config) -> Result<()> {
                 syms[i] = v.to_string();
             }
         }
-        graph::write(&out_path, r, &syms, &paths).context("writing graph")?;
+        graph::write(&out_path, r, &syms, &paths, &root).context("writing graph")?;
         graph_bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
     }
     let d_persist = t3.elapsed();
