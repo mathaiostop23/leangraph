@@ -29,6 +29,22 @@ codegraph    561.7 ms        144×
 
 This gap is structural rather than tuning. Loading is not deserialization: `Graph::open` is an `mmap` plus a header check, so a 68,000-node graph is queryable in ~20 µs and there is nothing to warm up. CodeGraph's own `CLAUDE.md` names startup as the reason agents give up and reach for grep before it connects.
 
+### Cost — the claim that actually matters
+
+`bench/cost.py`, django, 30 bug-fix commits. Ground truth is the files each fix touched; the query is the commit message. The baseline is keyword search — tokenise, `git grep`, read the top *k* — which is what an agent without a structural index does.
+
+| approach | recall | tokens/query | tokens per recall point |
+|---|---:|---:|---:|
+| arbor n=25 | 31.7% | 2,546 | **80** |
+| **arbor n=100** | **45.1%** | **10,140** | 225 |
+| arbor n=200 | 51.2% | 17,843 | 348 |
+| keyword top-5 | 41.5% | 144,652 | 3,489 |
+| keyword top-10 | 51.2% | 244,223 | 4,768 |
+
+**At matched recall, 13.7× fewer tokens.** At n=100, arbor beats keyword top-5 on recall *and* costs 14× less.
+
+Keyword search does reach 61% by brute force at 423k tokens; arbor tops out near 51%. The files it cannot reach are tests, docs and migrations touched by a fix but never named in its message — that is retrieval work (git co-change edges are the obvious next signal), not budget work.
+
 ### Correctness
 
 Differential verification against CodeGraph as an oracle (`bench/verify.py`) — same repo, both engines, symbol sets diffed:
@@ -114,7 +130,8 @@ Being explicit, because the gap is large:
 - **Two languages.** CodeGraph has 30+, with 17 web frameworks and Swift↔ObjC / React Native bridging. Breadth is cheap at the extraction tier (~1 hour per language via declarative specs) and expensive at the import/scope tier (2–10 days). Neither has been spent yet.
 - **No incremental sync.** Every index is a full index. The delta-overlay design is in [ENGINE.md](./ENGINE.md); blake3 change detection already measures at 0.9% of CPU, so the mechanism is free — it just is not built.
 - **Edges are unverified.** Node-level verification runs (95% presence recall above), but we do not yet check that individual *edges* point where they should. That is the next gate.
-- **No cost benchmark.** The claim that matters — *same recall, fewer tokens* — needs recall@k measured against real issue→PR pairs. `bench/cost.sh` does not exist. Until it does, "cheaper" is a design argument, not a result.
+- **Recall tops out near 51%.** Brute-force keyword search reaches 61% if you let it read 423k tokens. Closing that gap needs better retrieval signals, not a bigger budget.
+- **Cost measured on one repo.** 30 bug-fix commits in django. Directionally strong, not yet a general claim.
 
 ## Documents
 

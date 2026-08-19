@@ -120,6 +120,89 @@ pub fn seeds(g: &Graph, symbols: &[String]) -> Vec<NodeId> {
     out
 }
 
+/// Pull candidate symbol names out of free text — an issue title and body,
+/// a commit message, a stack trace.
+///
+/// This is the entry point the server actually needs: nobody filing a bug
+/// hands you a symbol list. We take every token that *is* a symbol in this
+/// repo, which is precise by construction — a word that names nothing here
+/// contributes nothing — and rank by specificity, because `get` appearing in
+/// an issue is noise while `SQLCompiler` is the whole answer.
+pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
+    let mut hits: Vec<(u8, usize, NodeId)> = Vec::new();
+    let mut seen: FxHashSet<NodeId> = FxHashSet::default();
+
+    for raw in text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.')) {
+        if raw.len() < 3 {
+            continue;
+        }
+        // `models.query.QuerySet` and `QuerySet` should both find the class
+        for tok in raw.split('.').chain(std::iter::once(raw)) {
+            if tok.len() < 3 || is_stopword(tok) {
+                continue;
+            }
+            let shape = identifier_shape(tok);
+            let found = g.find(tok);
+            if found.is_empty() || found.len() > 12 {
+                // a name with dozens of definitions is a common word, not a lead
+                continue;
+            }
+            // A plain lowercase word is only a lead if it is also rare here.
+            // English is full of words that happen to be method names —
+            // `using`, `when`, `raises` all resolve in django and all are noise.
+            if shape == 0 && found.len() > 2 {
+                continue;
+            }
+            let mut ranked = found;
+            ranked.sort_by_key(|&n| candidate_rank(g, n));
+            if let Some(&best) = ranked.first() {
+                if seen.insert(best) {
+                    hits.push((u8::MAX - shape, ranked.len(), best));
+                }
+            }
+        }
+    }
+    // identifier-shaped first, then most specific
+    hits.sort_by_key(|&(shape, spec, _)| (shape, spec));
+    hits.into_iter().map(|(_, _, n)| n).take(max).collect()
+}
+
+/// How much a token looks like it was copied out of source rather than typed
+/// as prose. This is the cheapest reliable signal available in an issue body.
+#[inline]
+fn identifier_shape(tok: &str) -> u8 {
+    let upper = tok.chars().any(char::is_uppercase);
+    let lower = tok.chars().any(char::is_lowercase);
+    if tok.contains('_') {
+        3 // snake_case
+    } else if upper && lower {
+        3 // camelCase / PascalCase
+    } else if upper {
+        2 // CONSTANT
+    } else {
+        0 // plain lowercase word — could be anything
+    }
+}
+
+/// Words that are common in English *and* common as method names. Kept short
+/// on purpose: the real filter is shape plus specificity, and a long list would
+/// start suppressing genuine leads.
+const STOPWORDS: &[&str] = &[
+    "the", "and", "for", "not", "but", "with", "from", "this", "that", "when", "then", "than",
+    "have", "has", "was", "are", "you", "all", "any", "can", "may", "use", "using", "used", "get",
+    "set", "add", "new", "one", "two", "out", "off", "its", "our", "how", "why", "who", "what",
+    "which", "where", "some", "only", "also", "into", "over", "same", "such", "each", "more",
+    "most", "other", "should", "would", "could", "does", "did", "done", "make", "made", "see",
+    "seen", "call", "called", "run", "running", "raise", "raises", "raised", "error", "errors",
+    "issue", "bug", "fix", "fixed", "test", "tests", "code", "file", "files", "line", "lines",
+];
+
+#[inline]
+fn is_stopword(tok: &str) -> bool {
+    let lower = tok.to_ascii_lowercase();
+    STOPWORDS.contains(&lower.as_str())
+}
+
 /// Shortest call path between two nodes, following forward edges.
 ///
 /// This is what an agent asking "how does X reach Y" actually wants, and it is
@@ -167,7 +250,21 @@ fn charged_bytes(g: &Graph, n: NodeId, budget: &Budget) -> u32 {
 }
 
 pub fn build(g: &Graph, symbols: &[String], budget: &Budget) -> Context {
-    let seed_nodes = seeds(g, symbols);
+    build_from(g, seeds(g, symbols), budget)
+}
+
+/// Same ranking, but seeded from free text instead of a symbol list.
+///
+/// Seed count scales with the budget. A fixed cap was silently the binding
+/// constraint: at 200 nodes the expansion had only 8 places to expand from, so
+/// recall flattened while the budget went unused.
+pub fn build_from_text(g: &Graph, text: &str, budget: &Budget) -> Context {
+    let max_seeds = (budget.max_nodes / 3).clamp(4, 32);
+    let s = seeds_from_text(g, text, max_seeds);
+    build_from(g, s, budget)
+}
+
+fn build_from(g: &Graph, seed_nodes: Vec<NodeId>, budget: &Budget) -> Context {
     let mut scored: FxHashMap<NodeId, (Why, f32)> = FxHashMap::default();
 
     for &s in &seed_nodes {
@@ -190,23 +287,35 @@ pub fn build(g: &Graph, symbols: &[String], budget: &Budget) -> Context {
         }
     }
 
-    // One hop out, weighted by the confidence of the edge that got us there.
+    // Expand outward, weighted by the confidence of the edge that got us there.
     // A guessed edge contributes proportionally less than a proven one — this
     // is the whole reason `conf` is a core field rather than a decoration.
-    for &s in &seed_nodes {
-        for nb in g.callers(s) {
-            let w = Why::Caller.weight() * (nb.conf as f32 / 100.0);
-            let e = scored.entry(nb.node).or_insert((Why::Caller, 0.0));
-            if e.1 < w {
-                *e = (Why::Caller, w);
+    //
+    // A second hop only pays for itself once the budget is large enough to hold
+    // it; below that it just crowds out closer, better-supported nodes.
+    let hops = if budget.max_nodes >= 60 { 2 } else { 1 };
+    let mut frontier: Vec<NodeId> = seed_nodes.clone();
+    let mut decay = 1.0f32;
+    for _ in 0..hops {
+        let mut next = Vec::new();
+        for &s in &frontier {
+            for (why, nbs) in [(Why::Caller, g.callers(s)), (Why::Callee, g.callees(s))] {
+                for nb in nbs {
+                    let w = why.weight() * (nb.conf as f32 / 100.0) * decay;
+                    let e = scored.entry(nb.node).or_insert((why, 0.0));
+                    if e.1 < w {
+                        *e = (why, w);
+                        next.push(nb.node);
+                    }
+                }
             }
         }
-        for nb in g.callees(s) {
-            let w = Why::Callee.weight() * (nb.conf as f32 / 100.0);
-            let e = scored.entry(nb.node).or_insert((Why::Callee, 0.0));
-            if e.1 < w {
-                *e = (Why::Callee, w);
-            }
+        // Each hop is weaker evidence than the last; without decay a distant
+        // node with one strong edge outranks a direct neighbour.
+        decay *= 0.45;
+        frontier = next;
+        if frontier.is_empty() {
+            break;
         }
     }
 

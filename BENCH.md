@@ -8,6 +8,56 @@ Reproduce: `cargo build --release && ./bench/run.sh`
 
 ---
 
+## Cost — tokens to reach the files that actually changed
+
+This is the claim that matters and the one nobody in this space publishes.
+"Faster" is a stopwatch; "cheaper" needs ground truth.
+
+`bench/cost.py`, django, 30 bug-fix commits. Ground truth is the set of files
+each fix actually touched; the query is the commit message. Entirely local and
+reproducible — no API token, no curated dataset. The baseline is keyword search
+(tokenise, `git grep`, rank by hit count, read the top *k*), which is what an
+agent without a structural index actually does.
+
+| approach | recall | tokens/query | tokens per recall point |
+|---|---:|---:|---:|
+| arbor n=10 | 19.5% | 1,295 | **66** |
+| arbor n=25 | 31.7% | 2,546 | **80** |
+| arbor n=50 | 34.1% | 3,896 | **114** |
+| **arbor n=100** | **45.1%** | **10,140** | 225 |
+| arbor n=200 | 51.2% | 17,843 | 348 |
+| keyword top-3 | 25.6% | 98,696 | 3,854 |
+| keyword top-5 | 41.5% | 144,652 | 3,489 |
+| keyword top-10 | 51.2% | 244,223 | 4,768 |
+| keyword top-20 | 61.0% | 422,832 | 6,934 |
+
+Two readings, both fair:
+
+- **At matched recall (51.2%): 17,843 tokens against 244,223 — 13.7x fewer.**
+- **arbor at n=100 beats keyword top-5 on recall (45.1% vs 41.5%) while costing
+  14x less.**
+
+The efficiency column is the durable number: a recall point costs arbor 66–348
+tokens and keyword search 3,489–6,934. That gap is the product.
+
+### Where it stops
+
+Keyword search reaches 61% by brute force at 423k tokens; arbor tops out near
+51%. The remaining ground-truth files are ones no seed reaches — tests, docs and
+migrations touched by a fix but not named in its message. Raising that ceiling
+is retrieval work (co-change edges from git history are the obvious next
+signal), not budget work: arbor at n=200 already leaves most of its budget
+unspent on those queries.
+
+### What this measurement changed
+
+The first run flattened at 41.5% no matter how large the budget got. The cause
+was a fixed cap of 8 seeds: at 200 nodes the expansion had only 8 places to
+expand from, so the budget went unused. Scaling seeds with the budget and adding
+a decayed second hop took it to 51.2%.
+
+---
+
 ## Correctness — differential verification
 
 `bench/verify.py` indexes the same repo with both engines and diffs the symbol

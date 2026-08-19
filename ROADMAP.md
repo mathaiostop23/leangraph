@@ -38,7 +38,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 6 · Breadth | ⬜ |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |
 | — · Edge verification | ⬜ **gating** — nodes verified, edges not |
-| — · Cost benchmark | ⬜ **gating** — "cheaper" is unproven without it |
+| — · Cost benchmark | ✅ **Done.** 13.7x fewer tokens at matched recall |
 
 **Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:
 

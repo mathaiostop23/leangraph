@@ -118,6 +118,19 @@ enum Cmd {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
+    /// Build context from free text — an issue, a commit message, a stack trace
+    Context {
+        text: String,
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 25)]
+        max_nodes: usize,
+        #[arg(long, default_value_t = 24_000)]
+        max_bytes: usize,
+        /// Emit the selected file set as JSON, for the cost benchmark
+        #[arg(long)]
+        files_json: bool,
+    },
     /// Dump nodes and edges as JSONL, for differential verification
     Dump {
         #[arg(short, long, default_value = ".")]
@@ -300,6 +313,52 @@ fn main() -> Result<()> {
         }
 
         Cmd::Serve { mcp: _, path } => mcp::serve(&path),
+
+        Cmd::Context {
+            text,
+            path,
+            max_nodes,
+            max_bytes,
+            files_json,
+        } => {
+            let (g, _) = load(&path)?;
+            let ctx = query::build_from_text(
+                &g,
+                &text,
+                &query::Budget {
+                    max_nodes,
+                    max_bytes,
+                    ..Default::default()
+                },
+            );
+            if files_json {
+                let mut files: Vec<&str> = ctx
+                    .items
+                    .iter()
+                    .map(|it| g.path(g.location(it.node).0))
+                    .collect();
+                files.sort_unstable();
+                files.dedup();
+                let quoted: Vec<String> = files.iter().map(|f| json_str(f)).collect();
+                println!(
+                    r#"{{"files":[{}],"nodes":{},"est_tokens":{}}}"#,
+                    quoted.join(","),
+                    ctx.items.len(),
+                    ctx.est_tokens
+                );
+                return Ok(());
+            }
+            println!(
+                "\n\x1b[1mcontext\x1b[0m  {} nodes · ~{} tokens\n",
+                ctx.items.len(),
+                ctx.est_tokens
+            );
+            for it in &ctx.items {
+                println!("  {:<8} {:>4.2}  {}", it.why.label(), it.score, describe(&g, it.node));
+            }
+            println!();
+            Ok(())
+        }
 
         Cmd::Dump { path, what } => {
             use std::io::Write as _;
