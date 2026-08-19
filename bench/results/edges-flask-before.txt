@@ -1,0 +1,69 @@
+
+[1medge correctness — flask[0m
+  5,344 edges, 2,424 of them calls
+
+  [2mruntime oracle: 2,712 observed edges, 1,296 executed functions, python 3.12.6[0m
+
+  [1mrecall against execution[0m
+    observed edges                        2,712
+    both endpoints are arbor nodes        2,682
+    arbor has the edge                      541   [1m20.2%[0m
+    …counting only direct calls             524 / 2,101   24.9%
+    [2m(a call routed through a library — hops>0 — is a weaker claim on both sides)[0m
+
+  [1mruntime-confirmed, exact match — all populations[0m   [2mdenominator: edges whose caller executed[0m
+     conf prov      eligible  confirmed    rate   95% interval
+      100 scope          279        114   40.9%    35.3 –  46.7
+       95 import          50         28   56.0%    42.3 –  68.8
+       80 name           840        310   36.9%    33.7 –  40.2
+       60 name           735         78   10.6%     8.6 –  13.0
+       45 name           154          7    4.5%     2.2 –   9.1
+    [1mtrend[0m  z=+14.25  p=4.2e-46   → confidence orders correctness
+
+  [1mruntime-confirmed, + constructor rule — all populations[0m   [2mdenominator: edges whose caller executed[0m
+     conf prov      eligible  confirmed    rate   95% interval
+      100 scope          279        126   45.2%    39.4 –  51.0
+       95 import          50         48   96.0%    86.5 –  98.9
+       80 name           840        318   37.9%    34.6 –  41.2
+       60 name           735        130   17.7%    15.1 –  20.6
+       45 name           154          7    4.5%     2.2 –   9.1
+    [1mtrend[0m  z=+13.94  p=3.8e-44   → confidence orders correctness
+
+  [1mruntime-confirmed, + MRO closure — all populations[0m   [2mdenominator: edges whose caller executed[0m
+     conf prov      eligible  confirmed    rate   95% interval
+      100 scope          279        134   48.0%    42.2 –  53.9
+       95 import          50         48   96.0%    86.5 –  98.9
+       80 name           840        319   38.0%    34.8 –  41.3
+       60 name           735        140   19.0%    16.4 –  22.0
+       45 name           154          8    5.2%     2.7 –   9.9
+    [1mtrend[0m  z=+13.99  p=1.7e-44   → confidence orders correctness
+
+  [1mruntime-confirmed, + MRO closure — lib→lib only[0m   [2mthe population the ranking claim is about[0m
+     conf prov      eligible  confirmed    rate   95% interval
+      100 scope          183         95   51.9%    44.7 –  59.0
+       95 import           3          1   33.3%     6.1 –  79.2
+       80 name           123         67   54.5%    45.7 –  63.0
+       60 name            97         16   16.5%    10.4 –  25.1
+       45 name            23          8   34.8%    18.8 –  55.1
+    [1mtrend[0m  z=+4.85  p=1.2e-06   → confidence orders correctness
+
+  [1mruntime-confirmed, + MRO closure — test→lib only[0m   [2mthe population the ranking claim is about[0m
+     conf prov      eligible  confirmed    rate   95% interval
+       95 import          44         44  100.0%    92.0 – 100.0
+       80 name           464        230   49.6%    45.0 –  54.1
+       60 name           593        121   20.4%    17.4 –  23.8
+    [1mtrend[0m  z=+12.90  p=4.4e-38   → confidence orders correctness
+
+  [2mcodegraph: 1,814 comparable edges (380 collapsed to our granularity)[0m
+
+  [1magreed with codegraph[0m   [2magreement, not truth — either side may be wrong[0m
+     conf prov      eligible  confirmed    rate   95% interval
+      100 scope          612        424   69.3%    65.5 –  72.8
+       95 import         185         60   32.4%    26.1 –  39.5
+       80 name           886        625   70.5%    67.5 –  73.4
+       60 name           722        240   33.2%    29.9 –  36.8
+       45 name            66          5    7.6%     3.3 –  16.5
+    [1mtrend[0m  z=+13.30  p=2.4e-40   → confidence orders correctness
+
+  [2mNeither labeller measures precision. See bench/edgefacts.py for a floor on the error rate.[0m
+
