@@ -444,6 +444,84 @@ The lesson generalises: the pipeline had been profiled repeatedly and this never
 appeared, because it is not compute. It only shows up when you run the thing a
 user runs, from the state a user starts in.
 
+## Deduplication — the only saving that is total rather than fractional
+
+Every restatement of an already-answered issue is a triage call, an analysis
+call and a context window spent to reach a conclusion sitting in a comment
+thread. Skipping one saves 100%, not 15×.
+
+The obvious design embeds each issue and compares vectors. It would work, and it
+would mean a network round trip and a bill on *every* issue — including the
+overwhelming majority that are not duplicates — in a product whose argument is
+that you should not pay for context you did not need.
+
+So: three local signals, all exact, all free. The measurements are what chose
+them. Four pairs, real issue wording:
+
+```
+                          3-gram   content words
+  reworded                 0.188   0.692
+  pasted, comment added    0.783   0.880
+  unrelated issue          0.000   0.043
+  same file, other bug     0.000   0.026
+```
+
+Word shingles were the obvious first choice and are nearly useless alone: a
+genuine restatement scores **0.19**, because people retype rather than paste.
+Content-word overlap separates the same four pairs by a factor of sixteen. Graph
+seeds — the nodes the context builder would select — are the third signal, and
+the only one that knows whether two issues are about the same *code*.
+
+The rule that came out of it: a near-copy decides on text, unless the seeds
+actively contradict it; anything else needs vocabulary **and** code to agree.
+
+```
+duplicate  =  (shingles >= 0.60 AND seeds >= 0.20)
+              OR (content words >= 0.50 AND seeds >= 0.50)
+```
+
+The asymmetry sets the thresholds. A missed duplicate costs one analysis. A
+false one answers a real report with a link to an unrelated issue, and the
+reporter concludes the bot does not work. The comment always names the issue it
+matched and invites a correction.
+
+### What the tests had to establish
+
+Both directions of the failure, which is why seeds and text are both required:
+
+```
+a different bug in the same file        seeds identical, refused on text
+a template filled in twice              text identical, refused on seeds
+a restatement in the reporter's words   shingles 0.19, matched on vocabulary
+a paste with a comment appended         matched on shingles alone
+a four-word issue                       not judged at all
+                                                                21/21 unit
+```
+
+End to end (`bench/dedup_test.py`), where the point is that the saving is real:
+
+```
+first issue                  reaches the model      2 calls
+reworded restatement         comment posted         0 additional calls
+genuinely different issue    analysed normally      2 more calls
+                                                                10/10
+```
+
+It also caught a fixture: `bench/fix_test.py` had been sending three issues with
+identical text, and dedup correctly refused to analyse the second and third.
+The feature working broke a test that only passed because the test was wrong.
+
+### The upgrade path, which nobody exercises
+
+`config_json` had reached the schema DDL without a migration step. A fresh
+database had the column; one created before fix mode did not, and every read of
+a repository row would have failed on upgrade. Development always starts from an
+empty database, so nothing had ever run the other path.
+
+There is now a migration, an `add_column` helper that is a no-op when DDL
+already supplied the column, and a test that builds a schema-2 database by hand
+and asserts it opens, reads and re-opens.
+
 ## Methodology
 
 - **Startup subtracted from CodeGraph.** Its 0.50 s is real and per-invocation for a CLI, but paid once for a daemon. Subtracting isolates algorithmic work, which is the fair comparison for engine design. Our own startup is not yet measured; Phase 3 will report it, and it is where a static binary with an mmap'd graph should win outright.

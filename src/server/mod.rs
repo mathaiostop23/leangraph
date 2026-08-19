@@ -8,6 +8,7 @@ pub mod agent;
 pub mod clone;
 pub mod crypto;
 pub mod db;
+pub mod dedup;
 pub mod fix;
 pub mod ui;
 pub mod webhook;
@@ -531,6 +532,56 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
     let run_id = app.db.start_run(issue.id, repo.id)?;
     let started = Instant::now();
 
+    // --- stage 0: is this one we have already answered? ----------------------
+    // Before the API client, before triage, before anything is spent. This is
+    // the only saving available that is total rather than fractional.
+    let repo_path = PathBuf::from(&repo.path);
+    let (title, body) = (issue.title.clone(), issue.body.clone());
+    let fp = tokio::task::spawn_blocking(move || fingerprint_of(&repo_path, &title, &body)).await?;
+    let prior: Vec<(i64, dedup::Fingerprint)> = app
+        .db
+        .prior_fingerprints(repo.id, issue.id, dedup::LOOKBACK)?
+        .into_iter()
+        .map(|(n, enc)| (n, dedup::decode(&enc)))
+        .collect();
+
+    if let Some((number, score)) = dedup::best_match(&fp, &prior) {
+        let comment = format!(
+            "This looks like a restatement of #{number} — {:.0}% of the wording and \
+{:.0}% of the code it points at are the same, so I have not re-analysed it.\n\n\
+If that is wrong, say so on the issue and I will look properly.\n",
+            score.text * 100.0,
+            score.seed * 100.0
+        );
+        post_comment(
+            &repo.full_name,
+            issue.number,
+            &comment,
+            app.secret("github_token").as_deref(),
+        )
+        .await
+        .ok();
+        app.db.set_fingerprint(issue.id, &dedup::encode(&fp))?;
+        app.db.finish_run(
+            run_id,
+            "duplicate",
+            Some(&format!("duplicate of #{number}")),
+            "[]",
+            0,
+            0.0,
+            started.elapsed().as_millis() as i64,
+            None,
+        )?;
+        tracing_line(
+            "info",
+            &format!(
+                "{}#{} — duplicate of #{number} · no model call",
+                repo.full_name, issue.number
+            ),
+        );
+        return Ok(());
+    }
+
     let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
         app.db.finish_run(run_id, "skipped", Some("no api key"), "", 0, 0.0,
             started.elapsed().as_millis() as i64, None)?;
@@ -608,6 +659,10 @@ willing to propose from the context available._\n",
         }
     }
 
+    // Stored only once an answer exists, so a later issue can only be matched
+    // against something there is actually a thread to point at.
+    app.db.set_fingerprint(issue.id, &dedup::encode(&fp))?;
+
     comment.push_str(&agent::receipt(nodes, tokens, cached, cost));
 
     let posted = post_comment(
@@ -661,6 +716,13 @@ struct Built {
     preamble: String,
     files_json: String,
     nodes: usize,
+}
+
+/// Fingerprint an issue. Opens the graph so the seed half is real; a repository
+/// without one still gets the text half, which is the stronger signal anyway.
+fn fingerprint_of(repo_path: &std::path::Path, title: &str, body: &str) -> dedup::Fingerprint {
+    let g = crate::graph::Graph::open(&repo_path.join(".arbor").join("graph.bin")).ok();
+    dedup::fingerprint(g.as_ref(), title, body)
 }
 
 /// Graph lookup is synchronous and mmap-backed; it belongs on the blocking pool

@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Schema version. Bump alongside a step in `migrate`.
-const SCHEMA: u32 = 2;
+const SCHEMA: u32 = 3;
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -74,9 +74,36 @@ impl Db {
                 have = 2;
                 c.pragma_update(None, "user_version", have)?;
             }
+            if have < 3 {
+                // `config_json` reached DDL without a migration step, so a
+                // database created before fix mode has the row but not the
+                // column and every read of it fails. Adding it here repairs
+                // those; `add_column` is a no-op where DDL already supplied it.
+                add_column(c, "repos", "config_json", "TEXT NOT NULL DEFAULT '{}'")?;
+                add_column(c, "issues", "fingerprint", "TEXT NOT NULL DEFAULT ''")?;
+                have = 3;
+                c.pragma_update(None, "user_version", have)?;
+            }
             Ok(())
         })
     }
+}
+
+/// `ALTER TABLE ADD COLUMN` errors when the column is already there, and it is
+/// already there whenever DDL was applied fresh. Checking first is what lets a
+/// migration be written for a column that also exists in DDL — the case that
+/// otherwise gets silently skipped and breaks only on upgrade, where nobody is
+/// looking.
+fn add_column(c: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let present: bool = c
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|x| x.ok())
+        .any(|name| name == column);
+    if !present {
+        c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+    }
+    Ok(())
 }
 
 const DDL: &str = r#"
@@ -132,6 +159,10 @@ CREATE TABLE IF NOT EXISTS issues (
   body               TEXT    NOT NULL,
   author_association TEXT    NOT NULL,
   created_at         INTEGER NOT NULL,
+  -- Shingles and graph seeds, filled in when the issue is answered. Empty for
+  -- an issue that was never analysed, which is why the dedup query filters on
+  -- it rather than on the run status.
+  fingerprint        TEXT    NOT NULL DEFAULT '',
   UNIQUE(repo_id, number)
 );
 
@@ -428,6 +459,42 @@ pub struct Issue {
 }
 
 impl Db {
+    /// Fingerprints of issues already analysed for this repository, newest
+    /// first, excluding the one being answered. Only issues that actually got
+    /// an answer are compared — matching against something the bot never looked
+    /// at would point the reporter at a thread with nothing in it.
+    pub fn prior_fingerprints(
+        &self,
+        repo_id: i64,
+        except_issue: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT number, fingerprint FROM issues
+                 WHERE repo_id = ?1 AND id != ?2 AND fingerprint != ''
+                 ORDER BY id DESC LIMIT ?3",
+            )?;
+            let rows = st
+                .query_map(params![repo_id, except_issue, limit as i64], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .filter_map(std::result::Result::ok)
+                .collect();
+            Ok(rows)
+        })
+    }
+
+    pub fn set_fingerprint(&self, issue_id: i64, fp: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE issues SET fingerprint = ?2 WHERE id = ?1",
+                params![issue_id, fp],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn issue(&self, id: i64) -> Result<Option<Issue>> {
         self.with(|c| {
             Ok(c.query_row(
@@ -589,5 +656,63 @@ impl Db {
             )?;
             Ok(n > 0)
         })
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The upgrade path is the one nobody exercises, because development always
+    /// starts from an empty database. `config_json` reached DDL without a
+    /// migration and broke every read on an existing install; this is the test
+    /// that would have caught it.
+    #[test]
+    fn migrating_an_old_database_adds_the_missing_columns() {
+        let dir = std::env::temp_dir().join(format!("arbor-db-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.db");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            // A database as it looked at schema 2: no `config_json`, no
+            // `fingerprint`.
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE repos (id INTEGER PRIMARY KEY, full_name TEXT NOT NULL UNIQUE,
+                   provider TEXT NOT NULL DEFAULT 'github', path TEXT NOT NULL,
+                   default_branch TEXT NOT NULL DEFAULT 'main', state TEXT NOT NULL DEFAULT 'pending',
+                   last_indexed_sha TEXT, last_indexed_at INTEGER,
+                   node_count INTEGER NOT NULL DEFAULT 0, edge_count INTEGER NOT NULL DEFAULT 0,
+                   file_count INTEGER NOT NULL DEFAULT 0, index_ms INTEGER NOT NULL DEFAULT 0,
+                   error TEXT, created_at INTEGER NOT NULL, url TEXT,
+                   private INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE issues (id INTEGER PRIMARY KEY, repo_id INTEGER NOT NULL,
+                   number INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+                   author_association TEXT NOT NULL, created_at INTEGER NOT NULL,
+                   UNIQUE(repo_id, number));",
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO repos (full_name, path, created_at) VALUES ('a/b', '/tmp', 0)",
+                [],
+            )
+            .unwrap();
+            c.pragma_update(None, "user_version", 2u32).unwrap();
+        }
+
+        let db = Db::open(&path).expect("an existing database must still open");
+        let repos = db.repos().expect("reading repos must not fail after upgrade");
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].config_json, "{}");
+        assert!(!repos[0].fix_mode(), "fix mode must default to off on upgrade");
+
+        // Idempotent: opening again re-runs migrate and must not error on a
+        // column that is now present.
+        drop(db);
+        Db::open(&path).expect("second open must be a no-op");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

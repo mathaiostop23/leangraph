@@ -47,12 +47,34 @@ def req(path, data=None, method=None, base=BASE):
         return e.code, json.loads(e.read() or b"{}")
 
 
-def webhook(number, labels, title="add() subtracts instead of adding"):
+# Every issue needs its own wording. Dedup runs before anything else and will
+# correctly refuse to re-analyse the same report twice, so a fixture that reuses
+# one body tests dedup rather than fix mode.
+REPORTS = {
+    1: ("add() subtracts instead of adding",
+        "The helper in src/app.py returns a minus b where it should return the sum."),
+    2: ("run() reports a negative total for two positive inputs",
+        "Calling run with 1 and 2 gives -1. Every caller downstream then treats "
+        "the result as an error code."),
+    3: ("arithmetic helper has its operator reversed",
+        "Whatever is passed in, the second argument is taken away from the first "
+        "rather than combined with it, which breaks the totals on every report page."),
+    4: ("FORBIDDEN the release workflow needs a new step",
+        "Our continuous integration should also publish the wheel, so the pipeline "
+        "definition has to gain a publish stage after the existing build one."),
+    5: ("DECLINE intermittent timeout in the nightly job",
+        "About once a week the scheduled run stops responding partway through and "
+        "there is nothing useful in the output to say where."),
+}
+
+
+def webhook(number, labels, title=None, body=None):
+    t, b = REPORTS.get(number, ("untitled", "no body"))
     payload = {
         "action": "labeled",
         "repository": {"full_name": "test/fixdemo"},
-        "issue": {"number": number, "title": title,
-                  "body": "The helper returns the wrong value.",
+        "issue": {"number": number, "title": title or t,
+                  "body": body or b,
                   "author_association": "OWNER",
                   "labels": [{"name": n} for n in labels]},
     }
@@ -186,7 +208,7 @@ def main():
 
     # --- a forbidden patch is refused, not applied ---------------------------
     before = len([c for c in seen["calls"] if c["path"].endswith("/pulls")])
-    webhook(4, ["arbor", "arbor-fix"], title="FORBIDDEN please update the workflow")
+    webhook(4, ["arbor", "arbor-fix"])
     time.sleep(6)
     _, seen = req("/_seen", base=f"http://127.0.0.1:{STUB_G}")
     after = [c for c in seen["calls"] if c["path"].endswith("/pulls")]
@@ -199,7 +221,7 @@ def main():
           "arbor/issue-4" not in git("branch", "--list", "arbor/issue-4", cwd=origin))
 
     # --- an empty answer is a valid answer -----------------------------------
-    webhook(5, ["arbor", "arbor-fix"], title="DECLINE not enough context here")
+    webhook(5, ["arbor", "arbor-fix"])
     time.sleep(6)
     _, seen = req("/_seen", base=f"http://127.0.0.1:{STUB_G}")
     comments = [c for c in seen["calls"] if c["path"].endswith("/comments")]
