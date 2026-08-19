@@ -14,7 +14,7 @@ mod query;
 mod resolve;
 mod server;
 
-use crate::core::{DefKind, NodeId};
+use crate::core::{DefKind, EdgeKind, NodeId, Provenance};
 use crate::graph::{Graph, Neighbor};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -463,21 +463,39 @@ fn main() -> Result<()> {
                         writeln!(w, "{l}")?;
                     }
                 }
+                // Everything an external oracle needs to join against: a
+                // qualified name and a byte offset on each end, the edge kind by
+                // name, and — the point of the whole exercise — the confidence
+                // and the provenance that produced it. Without provenance you
+                // cannot ask whether confidence predicts correctness, which is
+                // the claim the ranking rests on.
                 "edges" => {
                     for i in 0..g.n_nodes() {
                         let src = NodeId(i);
-                        let (sf, _, _) = g.location(src);
+                        if g.node_key(src) == 0 {
+                            continue;
+                        }
+                        let (sf, sb, _) = g.location(src);
+                        let sq = g.qualified(src);
                         for nb in g.callees(src) {
-                            let (df, _, _) = g.location(nb.node);
+                            if g.node_key(nb.node) == 0 {
+                                continue;
+                            }
+                            let (df, db, _) = g.location(nb.node);
                             writeln!(
                                 w,
-                                r#"{{"sf":{},"sn":{},"df":{},"dn":{},"kind":{},"conf":{}}}"#,
+                                r#"{{"sq":{},"sf":{},"sb":{},"sk":"{}","dq":{},"df":{},"db":{},"dk":"{}","ek":"{}","conf":{},"prov":"{}"}}"#,
+                                json_str(&sq),
                                 json_str(g.path(sf)),
-                                json_str(g.name(src)),
+                                sb,
+                                kind_name(g.node_kind(src)),
+                                json_str(&g.qualified(nb.node)),
                                 json_str(g.path(df)),
-                                json_str(g.name(nb.node)),
-                                nb.kind,
-                                nb.conf
+                                db,
+                                kind_name(g.node_kind(nb.node)),
+                                edge_kind_name(nb.kind),
+                                nb.conf,
+                                prov_name(nb.prov)
                             )?;
                         }
                     }
@@ -650,13 +668,27 @@ fn neighbors(repo: &Path, symbol: &str, limit: usize, min_conf: u8, inbound: boo
     Ok(())
 }
 
+/// Matched on the enum rather than on literals: these values are also the
+/// on-disk encoding, and a reordered discriminant would silently relabel every
+/// edge in the dump the benchmark reads.
 fn prov_name(p: u8) -> &'static str {
     match p {
-        0 => "scope",
-        1 => "import",
-        2 => "name",
-        3 => "co-change",
-        4 => "framework",
+        x if x == Provenance::Scope as u8 => "scope",
+        x if x == Provenance::Import as u8 => "import",
+        x if x == Provenance::NameMatch as u8 => "name",
+        x if x == Provenance::CoChange as u8 => "co-change",
+        x if x == Provenance::Framework as u8 => "framework",
+        _ => "?",
+    }
+}
+
+fn edge_kind_name(k: u8) -> &'static str {
+    match k {
+        x if x == EdgeKind::Contains as u8 => "contains",
+        x if x == EdgeKind::Calls as u8 => "calls",
+        x if x == EdgeKind::Imports as u8 => "imports",
+        x if x == EdgeKind::Extends as u8 => "extends",
+        x if x == EdgeKind::References as u8 => "references",
         _ => "?",
     }
 }

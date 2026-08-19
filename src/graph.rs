@@ -584,6 +584,40 @@ The files below carry most of the graph, ordered by how much of it they hold.\n\
         out
     }
 
+    /// Dotted path from the enclosing file down to this node — `Flask.send_file`.
+    ///
+    /// Reconstructed from `Contains` edges rather than stored, because the
+    /// containment tree is already in the graph and a second copy of the same
+    /// fact is a second thing that can be wrong. Walking upward means following
+    /// the reverse direction, which is the one CSR stores for exactly this kind
+    /// of question.
+    ///
+    /// This is what makes a graph node comparable to a Python `co_qualname` or a
+    /// stack frame, so it is the join key for any external oracle.
+    pub fn qualified(&self, n: NodeId) -> String {
+        let mut parts: Vec<&str> = vec![self.name(n)];
+        let mut cur = n;
+        // Bounded: a cycle in the containment tree would otherwise hang the
+        // dump, and nothing guarantees the tree is acyclic after a bad merge.
+        for _ in 0..32 {
+            let Some(parent) = self
+                .callers(cur)
+                .into_iter()
+                .find(|nb| nb.kind == EdgeKind::Contains as u8)
+                .map(|nb| nb.node)
+            else {
+                break;
+            };
+            if parent == cur || self.node_kind(parent) == 4 {
+                break; // reached the file node; the path is carried separately
+            }
+            parts.push(self.name(parent));
+            cur = parent;
+        }
+        parts.reverse();
+        parts.join(".")
+    }
+
     /// Nodes whose name matches exactly.
     pub fn find(&self, name: &str) -> Vec<NodeId> {
         self.name_index
