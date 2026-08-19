@@ -18,6 +18,16 @@ Against [CodeGraph](https://github.com/colbymchenry/codegraph) v1.5.0 — same r
 
 On-disk size for django: **7.9 MB** against 163 MB. Row-based storage with a full-text index costs about 2.6 KB per node; CSR costs about 120 bytes.
 
+### Incremental sync
+
+| | django, 3,038 files | vs full |
+|---|---:|---:|
+| full index | 721 ms | — |
+| sync, nothing changed | **90 ms** | 8.0× |
+| sync, one file changed | **142 ms** | 5.1× |
+
+`bench/converge.sh` asserts that an incremental sync produces a **byte-identical** graph to a full reindex across modify, revert, add and delete. It found that the graph was not reproducible at all — two full indexes of identical source differed, from concurrent symbol interning, an unstable sort on a partial key, hash-map iteration deciding import shadowing, and unsorted co-change edges. All fixed; five invariants hold.
+
 ### Startup — the number that decides whether an agent uses you at all
 
 Time from process spawn to MCP `initialize` response (`bench/mcp_startup.py`, median of 5):
@@ -130,7 +140,7 @@ Four decisions carry the performance:
 Being explicit, because the gap is large:
 
 - **Two languages.** CodeGraph has 30+, with 17 web frameworks and Swift↔ObjC / React Native bridging. Breadth is cheap at the extraction tier (~1 hour per language via declarative specs) and expensive at the import/scope tier (2–10 days). Neither has been spent yet.
-- **No incremental sync.** Every index is a full index. The delta-overlay design is in [ENGINE.md](./ENGINE.md); blake3 change detection already measures at 0.9% of CPU, so the mechanism is free — it just is not built.
+- **Sync is 142 ms, not the 50 ms the design targets.** Resolve and persist are still whole-graph operations; getting below this needs the delta overlay described in [ENGINE.md](./ENGINE.md).
 - **Edges are unverified.** Node-level verification runs (95% presence recall above), but we do not yet check that individual *edges* point where they should. That is the next gate.
 - **Recall tops out near 51%.** Brute-force keyword search reaches 61% if you let it read 423k tokens. Closing that gap needs better retrieval signals, not a bigger budget.
 - **Cost measured on one repo.** 30 bug-fix commits in django. Directionally strong, not yet a general claim.

@@ -307,7 +307,12 @@ pub fn resolve(
                         conf: Provenance::Import.base_conf(),
                         prov: Provenance::Import,
                     });
-                    for (name, didx) in &exports[tf as usize] {
+                    // `or_insert` means the first writer wins, so iterating a
+                    // hash map here let thread-dependent ordering decide which
+                    // import shadows another. Sort first.
+                    let mut names: Vec<(&SymId, &DefIdx)> = exports[tf as usize].iter().collect();
+                    names.sort_unstable_by_key(|(n, _)| n.into_usize());
+                    for (name, didx) in names {
                         imported.entry(*name).or_insert(space.def_node(tf, *didx));
                     }
                 }

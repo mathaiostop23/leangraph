@@ -33,7 +33,8 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 2 · CSR + persistence | ✅ **Done.** 7.9 MB vs 163 MB; ~20 µs load |
 | 2b · Context builder | ✅ **Done.** Confidence-ranked, budget-capped |
 | 3 · MCP server (**B ships**) | ✅ **Done.** 3.9 ms startup vs 561.7 ms |
-| 4 · Incremental + daemon | ⬜ **next** |
+| 4 · Incremental sync | ✅ **Done.** 5–8x; byte-identical to a full reindex |
+| 4b · Delta overlay + daemon | ⬜ — needed to get sync under 50 ms |
 | 5 · Server (**A ships**) | ⬜ |
 | 6 · Breadth | ⬜ |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |

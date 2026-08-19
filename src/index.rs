@@ -2,7 +2,9 @@
 
 use crate::core::{FileUnit, Interner};
 use crate::extract::{extract_file, Timings};
+use crate::cache;
 use crate::cochange;
+use crate::extract;
 use crate::graph;
 use crate::lang::{spec_for, Lang, Spec, ALL_LANGS};
 use crate::resolve;
@@ -24,6 +26,8 @@ pub struct Config {
     pub top: Option<usize>,
     pub no_resolve: bool,
     pub no_cochange: bool,
+    /// Reuse cached extraction for files whose size and mtime are unchanged.
+    pub incremental: bool,
     pub out: Option<PathBuf>,
     pub dry_run: bool,
 }
@@ -45,6 +49,17 @@ fn with_parser<R>(lang: Lang, f: impl FnOnce(&mut TsParser) -> R) -> R {
     })
 }
 
+fn out_path_exists(cfg: &Config, root: &std::path::Path) -> bool {
+    out_dir(cfg, root).join("graph.bin").exists()
+}
+
+fn out_dir(cfg: &Config, root: &std::path::Path) -> PathBuf {
+    cfg.out
+        .as_ref()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| root.join(".arbor"))
+}
+
 pub fn run(cfg: &Config) -> Result<()> {
 
         let threads = cfg
@@ -61,36 +76,67 @@ pub fn run(cfg: &Config) -> Result<()> {
         .with_context(|| format!("cannot resolve {}", cfg.path.display()))?;
 
     // ---- discover ----------------------------------------------------------
+    // Parallel walk, and size+mtime captured in the same `stat` the walker
+    // already performs. Doing it twice — once for the size limit, once for the
+    // cache check — was costing 3,000 extra syscalls on django.
     let t0 = Instant::now();
-    let mut found: Vec<(PathBuf, Lang)> = Vec::with_capacity(4096);
-    let mut oversized = 0u64;
+    let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, Lang, u64, i64)>();
+    let oversized = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    for entry in WalkBuilder::new(&root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .follow_links(false)
-        .build()
-        .flatten()
     {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Some(lang) = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .and_then(Lang::from_ext)
-        else {
-            continue;
-        };
-        if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
-            oversized += 1;
-            continue;
-        }
-        found.push((path.to_path_buf(), lang));
+        let oversized = oversized.clone();
+        WalkBuilder::new(&root)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .follow_links(false)
+            .threads(threads)
+            .build_parallel()
+            .run(|| {
+                let tx = tx.clone();
+                let oversized = oversized.clone();
+                Box::new(move |res| {
+                    use ignore::WalkState;
+                    let Ok(entry) = res else {
+                        return WalkState::Continue;
+                    };
+                    if !entry.file_type().is_some_and(|t| t.is_file()) {
+                        return WalkState::Continue;
+                    }
+                    let path = entry.path();
+                    let Some(lang) = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .and_then(Lang::from_ext)
+                    else {
+                        return WalkState::Continue;
+                    };
+                    let Ok(md) = entry.metadata() else {
+                        return WalkState::Continue;
+                    };
+                    if md.len() > MAX_FILE_BYTES {
+                        oversized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return WalkState::Continue;
+                    }
+                    let mtime = md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let _ = tx.send((path.to_path_buf(), lang, md.len(), mtime));
+                    WalkState::Continue
+                })
+            });
     }
+    drop(tx);
+
+    let mut found: Vec<(PathBuf, Lang, u64, i64)> = rx.into_iter().collect();
+    // The parallel walker yields in completion order; sort so a given repo
+    // always produces the same FileIds and therefore a byte-identical graph.
+    found.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let oversized = oversized.load(std::sync::atomic::Ordering::Relaxed);
     let d_discover = t0.elapsed();
 
     if found.is_empty() {
@@ -98,15 +144,38 @@ pub fn run(cfg: &Config) -> Result<()> {
         return Ok(());
     }
 
-    // ---- extract -----------------------------------------------------------
+    // ---- extract (cache-aware) ---------------------------------------------
     let specs: FxHashMap<Lang, Spec> = ALL_LANGS.into_iter().map(|l| (l, spec_for(l))).collect();
     let interner = Interner::new();
+    let cache_path = out_dir(cfg, &root).join("units.bin");
+
+    // Prior extraction, keyed by path. Anything whose size and mtime still
+    // match is reused without touching the parser — which is 75-82% of our CPU.
+    let mut prior: FxHashMap<PathBuf, cache::Entry> = FxHashMap::default();
+    if cfg.incremental {
+        if let Ok(entries) = cache::read(&cache_path, &interner, &root) {
+            prior = entries.into_iter().map(|e| (e.path.clone(), e)).collect();
+        }
+    }
 
     let t1 = Instant::now();
-    let raw: Vec<Option<(FileUnit, Timings)>> = found
+    // No extra syscall: size and mtime came back with the walk.
+    let reused_flag: Vec<bool> = found
+        .iter()
+        .map(|(path, _, size, mtime)| {
+            prior
+                .get(path)
+                .is_some_and(|e| e.meta.size == *size && e.meta.mtime == *mtime)
+        })
+        .collect();
+
+    let raw: Vec<Option<(FileUnit, Timings, cache::FileMeta)>> = found
         .par_iter()
         .enumerate()
-        .map(|(i, (path, lang))| {
+        .map(|(i, (path, lang, _, _))| {
+            if reused_flag[i] {
+                return None; // filled from cache below
+            }
             with_parser(*lang, |p| {
                 extract_file(path, i as u32, *lang, &specs[lang], p, &interner)
             })
@@ -118,28 +187,38 @@ pub fn run(cfg: &Config) -> Result<()> {
     let mut units = Vec::with_capacity(raw.len());
     let mut paths = Vec::with_capacity(raw.len());
     let mut langs = Vec::with_capacity(raw.len());
+    let mut metas: Vec<cache::FileMeta> = Vec::with_capacity(raw.len());
     let mut agg = Timings::default();
     let mut errors = 0u64;
+    let mut reused = 0u64;
     let mut by_lang: FxHashMap<Lang, (u64, u64, u64, u64)> = FxHashMap::default();
 
-    for ((path, lang), slot) in found.iter().zip(raw) {
-        let Some((mut unit, t)) = slot else { continue };
+    for (i, ((path, lang, _, _), slot)) in found.iter().zip(raw).enumerate() {
+        let (mut unit, bytes, meta) = if reused_flag[i] {
+            let e = prior.remove(path).expect("checked above");
+            reused += 1;
+            (e.unit, e.meta.size, e.meta)
+        } else {
+            let Some((unit, t, meta)) = slot else { continue };
+            agg.ns_read += t.ns_read;
+            agg.ns_hash += t.ns_hash;
+            agg.ns_parse += t.ns_parse;
+            agg.ns_walk += t.ns_walk;
+            agg.ast_nodes += t.ast_nodes;
+            (unit, t.bytes, meta)
+        };
+        agg.bytes += bytes;
         unit.file = units.len() as u32;
-        agg.ns_read += t.ns_read;
-        agg.ns_hash += t.ns_hash;
-        agg.ns_parse += t.ns_parse;
-        agg.ns_walk += t.ns_walk;
-        agg.bytes += t.bytes;
-        agg.ast_nodes += t.ast_nodes;
         errors += unit.had_parse_error as u64;
         let e = by_lang.entry(*lang).or_default();
         e.0 += 1;
-        e.1 += t.bytes;
+        e.1 += bytes;
         e.2 += unit.defs.len() as u64;
         e.3 += unit.refs.len() as u64;
         units.push(unit);
         paths.push(path.clone());
         langs.push(*lang);
+        metas.push(meta);
     }
     let d_extract = t1.elapsed();
 
@@ -157,6 +236,7 @@ pub fn run(cfg: &Config) -> Result<()> {
     // Correlation from git history, tagged as such. This is the signal the cost
     // benchmark identified as the recall ceiling: files a fix touches but never
     // names.
+    let t_cc = Instant::now();
     let mut cochange_stats = cochange::Stats::default();
     if let Some(r) = resolved.as_mut() {
         if !cfg.no_cochange {
@@ -173,21 +253,51 @@ pub fn run(cfg: &Config) -> Result<()> {
                     )
                 })
                 .collect();
-            let (extra, st) =
-                cochange::edges(&root, &by_path, &r.space, &cochange::Opts::default());
-            cochange_stats = st;
+            let cc_path = out_dir(cfg, &root).join("cochange.bin");
+            let cached = cfg
+                .incremental
+                .then(|| cochange::load(&cc_path))
+                .flatten()
+                .filter(|(head, _)| {
+                    // Reuse while HEAD has not moved far. `drift` returns None
+                    // on a diverged history — force-push or branch switch —
+                    // where the cache is not stale but wrong.
+                    cochange::drift(&root, head).is_some_and(|d| d <= cochange::MAX_DRIFT)
+                });
+
+            let extra = match cached {
+                Some((_, pairs)) => {
+                    cochange_stats.edges = pairs.len();
+                    cochange_stats.reused = true;
+                    cochange::pairs_to_edges(&pairs, &by_path, &r.space)
+                }
+                None => {
+                    let (extra, pairs, st) =
+                        cochange::edges(&root, &by_path, &r.space, &cochange::Opts::default());
+                    cochange_stats = st;
+                    if let Some(h) = cochange::head(&root) {
+                        cochange::save(&cc_path, &h, &pairs).ok();
+                    }
+                    extra
+                }
+            };
             r.edges.extend(extra);
         }
     }
+    let d_cochange = t_cc.elapsed();
 
     // ---- persist -----------------------------------------------------------
+    // Nothing changed and a graph already exists: the bytes on disk are already
+    // correct, and rewriting 7.7 MB to say so is pure cost.
+    let nothing_changed = cfg.incremental
+        && reused == units.len() as u64
+        && prior.is_empty()
+        && out_path_exists(cfg, &root);
+
     let t3 = Instant::now();
     let mut graph_bytes = 0u64;
-    let out_path = cfg
-        .out
-        .clone()
-        .unwrap_or_else(|| root.join(".arbor").join("graph.bin"));
-    if let (Some(r), false) = (&resolved, cfg.dry_run) {
+    let out_path = out_dir(cfg, &root).join("graph.bin");
+    if let (Some(r), false, false) = (&resolved, cfg.dry_run, nothing_changed) {
         // Symbol table indexed by SymId, so the on-disk graph is self-contained
         // and a reader needs no interner.
         let mut syms = vec![String::new(); interner.len()];
@@ -199,10 +309,15 @@ pub fn run(cfg: &Config) -> Result<()> {
         }
         graph::write(&out_path, r, &syms, &paths, &root).context("writing graph")?;
         graph_bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+        cache::write(&cache_path, &units, &paths, &langs, &metas, &interner, &root)
+            .context("writing extraction cache")?;
     }
     let d_persist = t3.elapsed();
+    if nothing_changed {
+        graph_bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+    }
 
-    let wall = d_discover + d_extract + d_resolve + d_persist;
+    let wall = d_discover + d_extract + d_resolve + d_cochange + d_persist;
     let mb = agg.bytes as f64 / 1_048_576.0;
     let n_files = units.len() as u64;
 
@@ -217,7 +332,13 @@ pub fn run(cfg: &Config) -> Result<()> {
             String::new()
         }
     );
-    println!("  ast nodes        {}", agg.ast_nodes);
+    if reused > 0 {
+        println!(
+            "  \x1b[1mreused           {reused} of {} files from cache\x1b[0m  ({} re-parsed)",
+            units.len(),
+            units.len() as u64 - reused
+        );
+    }
     println!(
         "  extracted        {defs} defs · {refs} refs · {imports} imports · {} unique symbols",
         interner.len()
@@ -269,10 +390,14 @@ pub fn run(cfg: &Config) -> Result<()> {
     }
 
     if cochange_stats.edges > 0 {
-        println!(
-            "  co-change        {} edges from {} of {} commits",
-            cochange_stats.edges, cochange_stats.commits_used, cochange_stats.commits_scanned
-        );
+        if cochange_stats.reused {
+            println!("  co-change        {} edges (cached)", cochange_stats.edges);
+        } else {
+            println!(
+                "  co-change        {} edges from {} of {} commits",
+                cochange_stats.edges, cochange_stats.commits_used, cochange_stats.commits_scanned
+            );
+        }
     }
 
     println!("\n  \x1b[1mwall clock\x1b[0m");
@@ -281,12 +406,15 @@ pub fn run(cfg: &Config) -> Result<()> {
     if resolved.is_some() {
         println!("    resolve        {:>8.0} ms", d_resolve.as_secs_f64() * 1e3);
     }
+    if cochange_stats.edges > 0 || d_cochange.as_millis() > 0 {
+        println!("    co-change      {:>8.0} ms", d_cochange.as_secs_f64() * 1e3);
+    }
     if graph_bytes > 0 {
         println!(
-            "    persist        {:>8.0} ms   ({:.1} MB -> {})",
+            "    persist        {:>8.0} ms   ({:.1} MB{})",
             d_persist.as_secs_f64() * 1e3,
             graph_bytes as f64 / 1_048_576.0,
-            out_path.display()
+            if nothing_changed { ", unchanged — not rewritten" } else { "" }
         );
     }
     println!(

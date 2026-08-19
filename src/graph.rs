@@ -118,10 +118,12 @@ pub struct Graph {
 /// thousand edges is a handful of milliseconds; the resulting arrays are the
 /// on-disk format verbatim, so there is no separate serialization step.
 fn build_dir(edges: &mut [Edge], n_nodes: u32, by_src: bool) -> (Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    // Total order, not just by the CSR key: an unstable sort leaves ties in
+    // arbitrary order, which would make the file differ run to run.
     if by_src {
-        edges.par_sort_unstable_by_key(|e| e.src.0);
+        edges.par_sort_unstable_by_key(|e| (e.src.0, e.dst.0, e.kind as u8, e.conf));
     } else {
-        edges.par_sort_unstable_by_key(|e| e.dst.0);
+        edges.par_sort_unstable_by_key(|e| (e.dst.0, e.src.0, e.kind as u8, e.conf));
     }
 
     let m = edges.len();
@@ -163,6 +165,37 @@ pub fn write(
     paths: &[PathBuf],
     root: &Path,
 ) -> Result<()> {
+    // Canonicalise the symbol table before writing. Two things force this:
+    //
+    //   * the interner is concurrent, so ids are assigned in whatever order
+    //     threads happen to reach a string;
+    //   * on an incremental sync the interner also holds strings revived from
+    //     the cache for files that have since been deleted.
+    //
+    // Either one makes two indexes of identical source produce different bytes.
+    // Emitting only the symbols the graph actually references, in sorted order,
+    // makes the file a pure function of the graph — which is what lets a cache
+    // be trusted and a divergence be a real signal rather than noise.
+    let mut used: Vec<u32> = r.nodes.iter().map(|m| m.name).collect();
+    used.sort_unstable();
+    used.dedup();
+    used.sort_unstable_by(|&a, &b| {
+        syms.get(a as usize)
+            .map(String::as_str)
+            .unwrap_or("")
+            .cmp(syms.get(b as usize).map(String::as_str).unwrap_or(""))
+    });
+    let mut remap: FxHashMap<u32, u32> = FxHashMap::default();
+    for (new, &old) in used.iter().enumerate() {
+        remap.insert(old, new as u32);
+    }
+    let syms: Vec<String> = used
+        .iter()
+        .map(|&i| syms.get(i as usize).cloned().unwrap_or_default())
+        .collect();
+    let syms = &syms[..];
+    let remap_sym = |id: u32| remap.get(&id).copied().unwrap_or(0);
+
     let n_nodes = r.space.total;
     let mut fwd_edges = r.edges.clone();
     let mut rev_edges = r.edges.clone();
@@ -176,7 +209,7 @@ pub fn write(
     let mut node_start = vec![0u32; n_nodes as usize];
     let mut node_end = vec![0u32; n_nodes as usize];
     for (i, m) in r.nodes.iter().enumerate() {
-        node_name[i] = m.name;
+        node_name[i] = remap_sym(m.name);
         node_kind[i] = m.kind;
         node_file[i] = m.file;
         node_start[i] = m.start;

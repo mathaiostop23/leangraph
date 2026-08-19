@@ -1,5 +1,6 @@
 //! arbor — native code-graph indexer and query engine.
 
+mod cache;
 mod cochange;
 mod core;
 mod extract;
@@ -41,6 +42,9 @@ enum Cmd {
         /// Skip git co-change edges
         #[arg(long)]
         no_cochange: bool,
+        /// Full reindex, ignoring any cached extraction
+        #[arg(long)]
+        force: bool,
         #[arg(short, long)]
         out: Option<PathBuf>,
         /// Index only; do not write the graph to disk
@@ -159,6 +163,7 @@ fn main() -> Result<()> {
             top,
             no_resolve,
             no_cochange,
+            force,
             out,
             dry_run,
         } => index::run(&index::Config {
@@ -168,6 +173,7 @@ fn main() -> Result<()> {
             top,
             no_resolve,
             no_cochange,
+            incremental: !force,
             out,
             dry_run,
         }),

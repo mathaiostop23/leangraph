@@ -3,6 +3,7 @@
 //! Pure with respect to shared state (the interner is internally concurrent),
 //! so this parallelises across files with no coordination.
 
+use crate::cache::FileMeta;
 use crate::core::{
     Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, Ref, RefKind, Span, NO_SCOPE,
 };
@@ -195,7 +196,7 @@ pub fn extract_file(
     spec: &Spec,
     parser: &mut TsParser,
     interner: &Interner,
-) -> Option<(FileUnit, Timings)> {
+) -> Option<(FileUnit, Timings, FileMeta)> {
     let mut t = Timings::default();
     let mut unit = FileUnit {
         file,
@@ -213,8 +214,19 @@ pub fn extract_file(
     t.bytes = src.len() as u64;
 
     let clock = Instant::now();
-    let _digest = blake3::hash(src);
+    let digest = blake3::hash(src);
     t.ns_hash = clock.elapsed().as_nanos() as u64;
+
+    let md = f.metadata().ok();
+    let meta = FileMeta {
+        hash: *digest.as_bytes(),
+        size: src.len() as u64,
+        mtime: md
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
 
     let clock = Instant::now();
     let tree = parser.parse(src, None);
@@ -222,7 +234,7 @@ pub fn extract_file(
 
     let Some(tree) = tree else {
         unit.had_parse_error = true;
-        return Some((unit, t));
+        return Some((unit, t, meta));
     };
     unit.had_parse_error = tree.root_node().has_error();
 
@@ -230,5 +242,19 @@ pub fn extract_file(
     walk(&tree, src, spec, interner, &mut unit, &mut t);
     t.ns_walk = clock.elapsed().as_nanos() as u64;
 
-    Some((unit, t))
+    Some((unit, t, meta))
+}
+
+/// Identity of a file without parsing it: the cheap half of change detection.
+/// `stat` is a syscall; hashing needs the bytes. Compare size and mtime first
+/// and only hash what looks suspect.
+pub fn quick_meta(path: &Path) -> Option<(u64, i64)> {
+    let md = std::fs::metadata(path).ok()?;
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Some((md.len(), mtime))
 }

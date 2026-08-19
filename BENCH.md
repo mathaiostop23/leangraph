@@ -68,6 +68,63 @@ a decayed second hop took it to 51.2%.
 
 ---
 
+## Incremental sync
+
+Parsing is 75–82% of our CPU, and re-parsing 3,000 unchanged files to discover
+that nothing changed is the expensive part of a sync. Extracted units are
+persisted beside the graph, keyed by size and mtime captured during the walk, so
+only what actually changed is re-parsed.
+
+django, 3,038 files:
+
+| | time | vs full |
+|---|---:|---:|
+| full index (`--force`) | 721 ms | — |
+| sync, nothing changed | **90 ms** | 8.0x |
+| sync, one file changed | **142 ms** | 5.1x |
+
+Where the remaining time goes on a one-file sync: discover 37 ms, extract 13 ms,
+resolve 34 ms, co-change 9 ms, persist 47 ms. Getting below this needs a delta
+overlay so resolve and persist stop being whole-graph operations — that is the
+next architectural step, not a tuning one.
+
+Two costs were found by measuring rather than assuming:
+
+- **Discovery was doing two `stat` calls per file** — one for the size limit,
+  one for the cache check. Merging them and parallelising the walk took discovery
+  from 76 ms to 37 ms.
+- **Co-change was 147 ms and invisible**, because its time was never added to the
+  reported total. It is now cached against the HEAD it was computed at and reused
+  until HEAD drifts more than 25 commits: coupling over 3,000 commits does not
+  change because one more landed. 147 ms → 9 ms.
+
+### The invariant that makes it safe
+
+`bench/converge.sh` asserts that an incremental sync produces a **byte-identical**
+graph to a full reindex, across modify, revert, add and delete. A
+stale-but-plausible graph is worse than a slow one — it answers confidently and
+wrongly, and nothing downstream can tell.
+
+The first run failed, and failed in a more interesting way than expected: **two
+full indexes of identical source produced different bytes.** The graph was not
+reproducible at all. Four causes, all fixed:
+
+1. The concurrent interner assigns symbol ids in thread-arrival order.
+2. The CSR sort keyed only on the source node, so an unstable sort left ties in
+   arbitrary order.
+3. `or_insert` over a hash map let iteration order decide which import shadowed
+   another on a name collision.
+4. Co-change edges were appended after the resolver's sort, unordered.
+
+And one that only appeared on delete: the cache revives symbols belonging to
+files that no longer exist. The symbol table is now emitted from the symbols the
+graph actually references, making it a pure function of the graph rather than of
+interner history — which also took the django graph from 7.7 MB to 6.6 MB.
+
+All five invariants now hold.
+
+---
+
 ## Correctness — differential verification
 
 `bench/verify.py` indexes the same repo with both engines and diffs the symbol
