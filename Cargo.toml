@@ -1,0 +1,28 @@
+[package]
+name = "arbor"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+
+[[bin]]
+name = "arbor"
+path = "src/main.rs"
+
+[dependencies]
+ignore = "0.4"
+rayon = "1.10"
+memmap2 = "0.9"
+lasso = { version = "0.7", features = ["multi-threaded"] }
+rustc-hash = "2"
+blake3 = "1.5"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tree-sitter = "0.26.12"
+tree-sitter-python = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
