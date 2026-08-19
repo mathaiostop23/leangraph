@@ -292,15 +292,11 @@ pub async fn analyse(
         "model": model,
         "max_tokens": 4096,
         "output_config": { "effort": "high" },
+        // 1h rather than the 5m default: issues arrive in bursts hours apart,
+        // and the write premium pays back after three reads.
         "system": [
             { "type": "text", "text": SYSTEM },
-            {
-                "type": "text",
-                "text": preamble,
-                // 1h rather than the 5m default: issues arrive in bursts hours
-                // apart, and the write premium pays back after three reads.
-                "cache_control": { "type": "ephemeral", "ttl": "1h" }
-            }
+            preamble_block(preamble)
         ],
         "messages": [{ "role": "user", "content": format!(
             "## Code selected for this issue\n\n{context}\n\n{}\n\nUsing only the code \
@@ -309,6 +305,105 @@ and symbols. If what you were given is insufficient, say what else you would nee
             wrap_issue(title, body)) }]
     });
     c.call(req, model).await
+}
+
+/// Stage 3, only in fix mode. Produce a unified diff and nothing else.
+///
+/// A diff rather than whole files: it applies with `git apply --check`, which
+/// means a patch built against stale code is *detected* instead of silently
+/// overwriting whatever moved. Whole-file output has no such check.
+/// The repo preamble, marked for caching only where caching can happen.
+fn preamble_block(preamble: &str) -> serde_json::Value {
+    if cacheable(preamble) {
+        json!({ "type": "text", "text": preamble,
+                "cache_control": { "type": "ephemeral", "ttl": "1h" } })
+    } else {
+        json!({ "type": "text", "text": preamble })
+    }
+}
+
+pub async fn propose_fix(
+    c: &Client,
+    preamble: &str,
+    context: &str,
+    title: &str,
+    body: &str,
+) -> Result<Reply> {
+    let model = "claude-sonnet-5";
+    let req = json!({
+        "model": model,
+        "max_tokens": 8192,
+        "output_config": { "effort": "high" },
+        "system": [
+            { "type": "text", "text": SYSTEM },
+            preamble_block(preamble),
+            { "type": "text", "text": FIX_RULES }
+        ],
+        "messages": [{ "role": "user", "content": format!(
+            "## Code selected for this issue\n\n{context}\n\n{}\n\nProduce a minimal \
+unified diff that fixes this. Output the diff and nothing else — no prose, no fences.",
+            wrap_issue(title, body)) }]
+    });
+    c.call(req, model).await
+}
+
+/// Roughly the smallest prefix worth a cache breakpoint.
+///
+/// The API will not cache a block below about 1024 tokens; source-flavoured
+/// markdown runs near 4 characters to the token, and the margin is deliberate
+/// because falling just short means the breakpoint is silently ignored — the
+/// failure mode is invisible in the response and shows up only as a bill.
+pub const CACHE_MIN_CHARS: usize = 5_000;
+
+/// Whether a prefix of this size will actually be cached. Attaching the marker
+/// anyway is not harmful, but claiming a saving that cannot happen is.
+pub fn cacheable(preamble: &str) -> bool {
+    SYSTEM.len() + preamble.len() >= CACHE_MIN_CHARS
+}
+
+/// Stated to the model as well as enforced in code. Enforcement is what makes
+/// it true; saying it makes compliant output likelier, so the enforcement
+/// rejects less often.
+const FIX_RULES: &str = "Output a unified diff only: `--- a/path`, `+++ b/path`, `@@` hunks. No prose before or after, no markdown fences.
+
+Use paths exactly as they appear in the context, relative to the repository root.
+
+Change as little as possible. Do not reformat, rename, or tidy code you are not fixing.
+
+Never edit CI configuration, dependency manifests, lockfiles, Dockerfiles or Makefiles. A patch touching any of those is rejected before it is applied.
+
+If the context does not contain enough to write a correct fix, output nothing at all. An empty response is a correct answer; a guess is not.";
+
+/// A model asked for a diff will sometimes wrap it in a fence anyway.
+///
+/// Trailing whitespace is load-bearing here. A context line in a unified diff
+/// is a space followed by the source line, so a blank line of context is a
+/// lone space — and trimming it changes how many lines the hunk supplies
+/// without changing what its header claims, which makes `git apply` reject a
+/// patch that was correct when the model wrote it.
+pub fn clean_patch(raw: &str) -> String {
+    let t = raw.trim_start();
+    let t = t
+        .strip_prefix("```diff")
+        .or_else(|| t.strip_prefix("```patch"))
+        .or_else(|| t.strip_prefix("```"))
+        .unwrap_or(t);
+    let t = t.trim_end_matches(|c: char| c == '\n' || c == '\r');
+    let t = t.trim_end_matches("```");
+    // Drop anything before the first file header, which is where stray
+    // commentary lands.
+    let Some(i) = t.find("--- ") else {
+        return t.trim().to_string();
+    };
+    // Drop wholly empty trailing lines — those are fence padding, not diff
+    // content — but keep a line that is a single space.
+    let mut lines: Vec<&str> = t[i..].split('\n').collect();
+    while lines.last().is_some_and(|l| l.trim_end_matches('\r').is_empty()) {
+        lines.pop();
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 // --------------------------------------------------------------------- ledger

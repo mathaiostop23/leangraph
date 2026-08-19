@@ -188,18 +188,43 @@ fn on_issue(app: &App, p: &Value) -> ApiResult<Value> {
         );
     }
 
+    // --- gate 3: fix mode ----------------------------------------------------
+    // Three switches, all required. A repository that opted in, an issue
+    // labelled for it specifically, and a token to push with. Asking for an
+    // explanation and asking for a change to your code are different decisions,
+    // so they are different labels.
+    let fix_label = app.fix_label().to_string();
+    let wants_fix = issue
+        .get("labels")
+        .and_then(Value::as_array)
+        .is_some_and(|ls| {
+            ls.iter()
+                .filter_map(|l| l.get("name").and_then(Value::as_str))
+                .any(|n| n.eq_ignore_ascii_case(&fix_label))
+        });
+    let fix = wants_fix && repo.fix_mode();
+    if wants_fix && !fix {
+        tracing_line(
+            "info",
+            &format!(
+                "{}#{number}: `{fix_label}` requested but fix mode is off for this repo",
+                repo.full_name
+            ),
+        );
+    }
+
     let title = issue.get("title").and_then(Value::as_str).unwrap_or("");
     let body = issue.get("body").and_then(Value::as_str).unwrap_or("");
     let issue_id = app.db.upsert_issue(repo.id, number, title, body, assoc)?;
 
-    let payload = json!({ "issue_id": issue_id, "number": number }).to_string();
+    let payload = json!({ "issue_id": issue_id, "number": number, "fix": fix }).to_string();
     let fresh = app.db.enqueue(
         "issue",
         repo.id,
         &payload,
         Some(&format!("issue:{}:{number}", repo.id)),
     )?;
-    Ok(json!({ "status": "queued", "issue": number, "collapsed": !fresh }))
+    Ok(json!({ "status": "queued", "issue": number, "collapsed": !fresh, "fix": fix }))
 }
 
 /// Timestamp freshness, applied by the caller when a provider supplies one.

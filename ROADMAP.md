@@ -37,7 +37,8 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 4b · Stable node ids | ✅ **Done.** Persistent key table; ids survive edits |
 | 4c · Git tree-diff sync | ✅ **Done.** `--since <sha>` for push webhooks |
 | 4d · Per-file edge cache + CSR patching | ⬜ — the rest of the delta overlay |
-| 5 · Server (**A ships**) | ⬜ |
+| 5 · Server (**A ships**) | ✅ **Done.** SQLite, webhooks, agent, dashboard, Docker |
+| 5b · Fix mode | ✅ **Done, opt-in.** Three independent switches; draft PRs only |
 | 6 · Breadth | ⬜ |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |
 | — · Edge verification | ⬜ **gating** — nodes verified, edges not |

@@ -200,6 +200,7 @@ pub struct Repo {
     pub file_count: i64,
     pub index_ms: i64,
     pub error: Option<String>,
+    pub config_json: String,
 }
 
 fn repo_from_row(r: &rusqlite::Row) -> rusqlite::Result<Repo> {
@@ -216,6 +217,7 @@ fn repo_from_row(r: &rusqlite::Row) -> rusqlite::Result<Repo> {
         file_count: r.get("file_count")?,
         index_ms: r.get("index_ms")?,
         error: r.get("error")?,
+        config_json: r.get("config_json")?,
     })
 }
 
@@ -361,6 +363,27 @@ impl Db {
             let run: i64 = c.query_row("SELECT COUNT(*) FROM jobs WHERE state='running'", [], |r| r.get(0))?;
             Ok((q, run))
         })
+    }
+}
+
+impl Db {
+    pub fn set_repo_config(&self, id: i64, json: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("UPDATE repos SET config_json = ?2 WHERE id = ?1", params![id, json])?;
+            Ok(())
+        })
+    }
+}
+
+impl Repo {
+    /// Fix mode is off unless the stored config says otherwise. Anything
+    /// unparseable is treated as off — a corrupt config must not be a way to
+    /// turn on the one feature that writes to someone's repository.
+    pub fn fix_mode(&self) -> bool {
+        serde_json::from_str::<serde_json::Value>(&self.config_json)
+            .ok()
+            .and_then(|v| v.get("fix_mode").and_then(|b| b.as_bool()))
+            .unwrap_or(false)
     }
 }
 

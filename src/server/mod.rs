@@ -8,6 +8,7 @@ pub mod agent;
 pub mod clone;
 pub mod crypto;
 pub mod db;
+pub mod fix;
 pub mod ui;
 pub mod webhook;
 
@@ -30,6 +31,10 @@ use std::time::Instant;
 
 pub struct Config {
     pub addr: SocketAddr,
+    /// Label that additionally requests a patch. Distinct from the analysis
+    /// label on purpose: asking for an explanation and asking for a change to
+    /// your repository are different decisions.
+    pub fix_label: String,
     /// Shared secret for webhook signatures. Absent means the endpoint refuses
     /// everything — failing closed, because an unverified webhook is an open
     /// door to whatever the agent can do.
@@ -60,6 +65,10 @@ impl App {
     /// whole install.
     pub fn trigger_label(&self, _repo: &db::Repo) -> String {
         self.cfg.trigger_label.clone()
+    }
+
+    pub fn fix_label(&self) -> &str {
+        &self.cfg.fix_label
     }
 
     /// Stored secret first, environment second.
@@ -108,6 +117,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .route("/repos", get(list_repos).post(add_repo))
         .route("/repos/{name}", get(get_repo))
         .route("/repos/{name}/sync", post(sync_repo))
+        .route("/repos/{name}/config", post(set_config))
         .route("/webhook/github", post(webhook::github))
         .route("/secrets", get(list_secrets))
         .route("/secrets/{name}", post(put_secret).delete(delete_secret))
@@ -118,7 +128,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .with_context(|| format!("bind {}", app.cfg.addr))?;
 
     println!(
-        "\n  \x1b[1marbor server\x1b[0m  http://{}\n  data      {}\n  workers   {}\n  webhook   {}\n  trigger   `{}` label\n",
+        "\n  \x1b[1marbor server\x1b[0m  http://{}\n  data      {}\n  workers   {}\n  webhook   {}\n  trigger   `{}` label\n  fix       `{}` label, and only where the repo has opted in\n",
         app.cfg.addr,
         app.cfg.data_dir.display(),
         app.cfg.workers,
@@ -127,7 +137,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         } else {
             "\x1b[33mdisabled — set ARBOR_WEBHOOK_SECRET\x1b[0m"
         },
-        app.cfg.trigger_label
+        app.cfg.trigger_label,
+        app.cfg.fix_label
     );
     if key_on_disk {
         tracing_line(
@@ -310,6 +321,41 @@ async fn get_repo(
         Some(r) => Ok(Json(json!({ "repo": r }))),
         None => Err(ApiError(StatusCode::NOT_FOUND, "no such repo".into())),
     }
+}
+
+#[derive(Deserialize)]
+struct SetConfig {
+    /// Opt in to proposing patches. Off by default, and one of three
+    /// independent switches — the issue still needs the fix label and the
+    /// server still needs a write token.
+    fix_mode: bool,
+}
+
+async fn set_config(
+    State(app): State<App>,
+    AxPath(name): AxPath<String>,
+    Json(req): Json<SetConfig>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(repo) = app.db.repo_by_name(&name)? else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such repo".into()));
+    };
+    let mut cfg: serde_json::Value =
+        serde_json::from_str(&repo.config_json).unwrap_or_else(|_| json!({}));
+    cfg["fix_mode"] = json!(req.fix_mode);
+    app.db.set_repo_config(repo.id, &cfg.to_string())?;
+    tracing_line(
+        if req.fix_mode { "warn" } else { "info" },
+        &format!(
+            "{}: fix mode {}",
+            repo.full_name,
+            if req.fix_mode {
+                "ENABLED — patches will be pushed as draft pull requests"
+            } else {
+                "disabled"
+            }
+        ),
+    );
+    Ok(Json(json!({ "repo": repo.full_name, "fix_mode": req.fix_mode })))
 }
 
 async fn sync_repo(
@@ -501,6 +547,7 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
     let mut nodes = 0usize;
     let mut files_json = String::from("[]");
     let mut comment;
+    let mut built_for_fix: Option<Built> = None;
 
     if !triage.worth_analysing() {
         comment = agent::kind_note(&triage);
@@ -514,7 +561,7 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
         let built = tokio::task::spawn_blocking(move || build_context(&repo_path, &seed_text))
             .await??;
         nodes = built.nodes;
-        files_json = built.files_json;
+        files_json = built.files_json.clone();
 
         let r2 = agent::analyse(
             &client,
@@ -528,6 +575,37 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
         cached += r2.usage.cache_read;
         cost += agent::record(&app.db, run_id, repo.id, "analyse", &r2)?;
         comment = r2.text;
+        built_for_fix = Some(built);
+    }
+
+    // --- stage 3: patch, only where all three switches are open --------------
+    let want_fix = payload
+        .get("fix")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if want_fix && triage.worth_analysing() {
+        match propose_fix(app, &client, &repo, &issue, &built_for_fix).await {
+            Ok(Some((url, files, r3))) => {
+                tokens += r3.usage.total();
+                cached += r3.usage.cache_read;
+                cost += agent::record(&app.db, run_id, repo.id, "fix", &r3)?;
+                comment.push_str(&format!(
+                    "\n\n---\n\n**Proposed patch:** {url}\n\nTouches {}. Opened as a draft — \
+it has not been run or tested.\n",
+                    files.join(", ")
+                ));
+            }
+            Ok(None) => comment.push_str(
+                "\n\n---\n\n_A patch was requested, but I could not produce one I was \
+willing to propose from the context available._\n",
+            ),
+            Err(e) => {
+                tracing_line("warn", &format!("{}#{}: fix failed: {e}", repo.full_name, issue.number));
+                comment.push_str(&format!(
+                    "\n\n---\n\n_A patch was requested but could not be applied: {e}_\n"
+                ));
+            }
+        }
     }
 
     comment.push_str(&agent::receipt(nodes, tokens, cached, cost));
@@ -576,6 +654,7 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
 struct Built {
     text: String,
     /// Stable across issues, so it can sit before the cache breakpoint.
@@ -591,7 +670,7 @@ fn build_context(repo_path: &std::path::Path, text: &str) -> Result<Built> {
     let g = Graph::open(&repo_path.join(".arbor").join("graph.bin"))
         .context("repository has no graph yet")?;
     let ctx = query::build_from_text(&g, text, &query::Budget::default());
-    let preamble = g.preamble(60);
+    let preamble = g.preamble_at_least(agent::CACHE_MIN_CHARS, 60);
 
     let mut out = String::new();
     let mut files: Vec<&str> = Vec::new();
@@ -625,6 +704,61 @@ fn build_context(repo_path: &std::path::Path, text: &str) -> Result<Built> {
     })
 }
 
+/// Ask for a patch, vet it, push it, open a draft pull request.
+///
+/// `Ok(None)` means the model declined to produce one, which the prompt
+/// explicitly permits — an empty answer is correct when the context is not
+/// enough, and a guess that edits someone's repository is not.
+async fn propose_fix(
+    app: &App,
+    client: &agent::Client,
+    repo: &db::Repo,
+    issue: &db::Issue,
+    built: &Option<Built>,
+) -> Result<Option<(String, Vec<String>, agent::Reply)>> {
+    let built = built.as_ref().context("no context was built")?;
+    let token = app
+        .secret("github_token")
+        .context("fix mode needs a token with write access")?;
+
+    let reply = agent::propose_fix(
+        client,
+        &built.preamble,
+        &built.text,
+        &issue.title,
+        &issue.body,
+    )
+    .await?;
+    let patch = agent::clean_patch(&reply.text);
+    if patch.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let dir = PathBuf::from(&repo.path);
+    let branch_base = repo.default_branch.clone();
+    let number = issue.number;
+    let name = repo.full_name.clone();
+    let tok = token.clone();
+    let proposal = tokio::task::spawn_blocking(move || {
+        fix::propose(&dir, &branch_base, number, &patch, Some(&tok), &name)
+    })
+    .await??;
+
+    let url = fix::open_pr(
+        &repo.full_name,
+        &proposal.branch,
+        &repo.default_branch,
+        issue.number,
+        &token,
+    )
+    .await?;
+    tracing_line(
+        "warn",
+        &format!("{}#{}: opened draft PR {url}", repo.full_name, issue.number),
+    );
+    Ok(Some((url, proposal.files, reply)))
+}
+
 /// Returns false when no token is configured — a deliberate dry run rather than
 /// an error, so the whole pipeline can be exercised without write access.
 async fn post_comment(
@@ -636,7 +770,10 @@ async fn post_comment(
     let Some(token) = token.filter(|t| !t.is_empty()) else {
         return Ok(false);
     };
-    let url = format!("https://api.github.com/repos/{full_name}/issues/{number}/comments");
+    let url = format!(
+        "{}/repos/{full_name}/issues/{number}/comments",
+        fix::api_base()
+    );
     let res = reqwest::Client::new()
         .post(&url)
         .header("authorization", format!("Bearer {token}"))

@@ -73,14 +73,27 @@ if len(analyse) >= 2:
                 break
         return "\n".join(out)
 
-    a, b = prefix(analyse[0]), prefix(analyse[1])
-    check("cached prefix is identical across two different issues", a == b,
-          f"({len(a)} vs {len(b)} chars)")
+    def issue_line(c):
+        for line in user_text(c).splitlines():
+            if line.startswith("title: "):
+                return line[:70]
+        return "(no issue wrapper)"
+
+    # Across every analyse call, not just the first two: which call lands first
+    # depends on worker scheduling, and an assertion that depends on that is an
+    # assertion that passes for the wrong reason half the time.
+    prefixes = {prefix(c) for c in analyse}
+    titles = {issue_line(c) for c in analyse}
+    a = prefix(analyse[0])
+
+    check("cached prefix is identical across every analyse call", len(prefixes) == 1,
+          f"({len(prefixes)} distinct prefixes over {len(analyse)} calls)")
     check("cached prefix is long enough to cache at all (>1024 tokens)",
           len(a) > 4096, f"({len(a)} chars ~= {len(a)//4} tokens)")
-
+    check("more than one distinct issue was actually exercised", len(titles) > 1,
+          f"({sorted(titles)})")
     check("issue-specific content sits after the breakpoint",
-          user_text(analyse[0]) != user_text(analyse[1]))
+          len(titles) > 1 and len(prefixes) == 1)
 elif len(analyse) == 1:
     print("  \033[33m!\033[0m only one analyse call — send a second issue to test caching")
 

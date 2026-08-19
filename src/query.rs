@@ -134,6 +134,12 @@ pub fn seeds(g: &Graph, symbols: &[String]) -> Vec<NodeId> {
 /// an issue is noise while `SQLCompiler` is the whole answer.
 pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
     let mut hits: Vec<(u8, usize, NodeId)> = Vec::new();
+    // Tokens rejected only for being stopwords, kept in case nothing else
+    // survives. The stopword list is a proxy for "too common to be a lead";
+    // where the repository disagrees — one definition of `add` in the whole
+    // tree — the repository is the better authority. These are used only when
+    // the ordinary path finds nothing, so a large codebase never sees them.
+    let mut fallback: Vec<(usize, NodeId)> = Vec::new();
     let mut seen: FxHashSet<NodeId> = FxHashSet::default();
 
     for raw in text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.')) {
@@ -142,7 +148,18 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
         }
         // `models.query.QuerySet` and `QuerySet` should both find the class
         for tok in raw.split('.').chain(std::iter::once(raw)) {
-            if tok.len() < 3 || is_stopword(tok) {
+            if tok.len() < 3 {
+                continue;
+            }
+            if is_stopword(tok) {
+                let found = g.find(tok);
+                if !found.is_empty() && found.len() <= 2 {
+                    let mut ranked = found;
+                    ranked.sort_by_key(|&n| candidate_rank(g, n));
+                    if let Some(&best) = ranked.first() {
+                        fallback.push((ranked.len(), best));
+                    }
+                }
                 continue;
             }
             let shape = identifier_shape(tok);
@@ -165,6 +182,13 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
                 }
             }
         }
+    }
+    if hits.is_empty() {
+        // Nothing but common words, and some of them name something that
+        // exists exactly once here. Better a narrow lead than no context.
+        fallback.sort_by_key(|&(spec, n)| (spec, n));
+        fallback.dedup_by_key(|&mut (_, n)| n);
+        return fallback.into_iter().map(|(_, n)| n).take(max).collect();
     }
     // identifier-shaped first, then most specific
     hits.sort_by_key(|&(shape, spec, _)| (shape, spec));

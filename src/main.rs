@@ -166,6 +166,9 @@ enum Cmd {
         /// Label an issue must carry before the bot acts
         #[arg(long, default_value = "arbor")]
         trigger_label: String,
+        /// Additional label that requests a patch, where fix mode is enabled
+        #[arg(long, default_value = "arbor-fix")]
+        fix_label: String,
     },
     /// Probe a running server. Exits non-zero when it is not serving, so it
     /// works as a container healthcheck.
@@ -489,6 +492,7 @@ fn main() -> Result<()> {
             data,
             workers,
             trigger_label,
+            fix_label,
         } => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -504,6 +508,7 @@ fn main() -> Result<()> {
                     .ok()
                     .filter(|s| !s.is_empty()),
                 trigger_label,
+                fix_label,
             }))
         }
 

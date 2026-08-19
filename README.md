@@ -113,6 +113,34 @@ Config edits merge rather than overwrite — these files hold your other MCP ser
 
 Agents reliably call the first tool offered and under-pick the rest; CodeGraph *removed* two of its own tools after measuring this. There is no third tool here on purpose.
 
+### As a self-hosted issue agent
+
+```bash
+docker compose up -d
+
+curl -X POST localhost:7777/repos -H 'content-type: application/json' \
+  -d '{"url":"https://github.com/owner/name"}'
+```
+
+One binary, one volume, no database container. Point a GitHub webhook at
+`/webhook/github`, label an issue `arbor`, and the answer is posted as a comment
+with what it cost. The dashboard is at `/`.
+
+The label is the point: nothing happens on an unlabelled issue, and nothing
+happens on an issue from someone outside the repository. An issue body is
+attacker-controlled text that ends up in front of a model, so it is wrapped and
+declared as data, the agent is given no tools, and the webhook signature is
+verified over the raw bytes. `bench/server_test.sh` asserts all of it — 12
+webhook gates, 30 agent assertions.
+
+**Fix mode** proposes a patch as a draft pull request. It is off by default in
+three independent ways — the repository must opt in, the issue needs a *second*
+label (`arbor-fix`), and a write token must exist — and it will not push to the
+default branch, force-push, merge, or touch CI configuration, dependency
+manifests or lockfiles. Those refusals are enforced before `git apply` runs, and
+tested: 10 unit tests over the vetting rules, 23 end-to-end against a real git
+remote.
+
 ---
 
 ## How it works
@@ -143,7 +171,8 @@ Being explicit, because the gap is large:
 - **Sync is ~164 ms, not the 50 ms the design targets.** Stable node ids are in place — the prerequisite for a delta overlay — but resolve and persist still rewrite the whole graph. Profiling corrected the design's premise along the way: the sequential barrier it was built to avoid turned out to be 4 ms, and the real cost is rewriting a 7 MB graph and a 25 MB cache for a one-line change.
 - **Edges are unverified.** Node-level verification runs (95% presence recall above), but we do not yet check that individual *edges* point where they should. That is the next gate.
 - **Recall tops out near 51%.** Brute-force keyword search reaches 61% if you let it read 423k tokens. Closing that gap needs better retrieval signals, not a bigger budget.
-- **Cost measured on one repo.** 30 bug-fix commits in django. Directionally strong, not yet a general claim.
+- **Cost measured on one repo.** 40 bug-fix commits in django. Directionally strong, not yet a general claim.
+- **Fix mode does not run the tests.** The graph can tell you which tests import a changed file; running them safely needs a sandbox that is not built. Every pull request it opens says so.
 
 ## Documents
 

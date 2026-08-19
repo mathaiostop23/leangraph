@@ -537,6 +537,23 @@ impl Graph {
     /// Ranked by how much of the graph each file carries — definition count and
     /// inbound edges — which is a reasonable proxy for "where the important code
     /// lives" and costs one pass.
+    /// Grow the file list until the text is worth caching.
+    ///
+    /// Prompt caching has a minimum block size — below it the breakpoint is
+    /// ignored and the whole cost argument quietly stops applying. A short
+    /// preamble is not a saving, it is a cache that never engages, so where
+    /// there is more of the repository to describe, describe more of it.
+    pub fn preamble_at_least(&self, min_chars: usize, from_files: usize) -> String {
+        let mut n = from_files;
+        loop {
+            let out = self.preamble(n);
+            if out.len() >= min_chars || n >= self.n_files as usize {
+                return out;
+            }
+            n = (n * 2).min(self.n_files as usize);
+        }
+    }
+
     pub fn preamble(&self, max_files: usize) -> String {
         let mut per_file: FxHashMap<u32, (u32, u32)> = FxHashMap::default();
         for i in 0..self.n_nodes {

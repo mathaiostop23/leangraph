@@ -360,19 +360,52 @@ Anyone can open an issue on a public repo. That text goes into the agent's promp
 
 Envelope encryption. Per-tenant DEK, wrapped by a KEK from `IG_MASTER_KEY` env (or a KMS in Phase 5). AES-256-GCM. Decrypt only in the worker, only into memory, never logged. Redact keys from all log lines and error traces.
 
-### 4.5 Fix mode (Phase 4, opt-in)
+### 4.5 Fix mode — **built, opt-in** (`src/server/fix.rs`)
+
+Posting a comment and changing someone's repository are different decisions, so
+they are gated differently. Fix mode is off in three independent ways, and all
+three must be open before a single line is written:
+
+1. the repository has `fix_mode` set — `POST /repos/{owner/name}/config`;
+2. the issue carries `arbor-fix`, a **second** label distinct from the `arbor`
+   one that triggers analysis;
+3. a token with write access exists.
+
+Any one missing and the analysis still posts, but nothing is pushed. The refusal
+is logged with the reason so an operator is never left guessing why.
+
+What it does:
 
 ```
-ephemeral container, no credentials mounted
-  → checkout branch from a fresh worktree
-  → agent edits + runs `codegraph affected <changed files>` to find impacted tests
-  → run only those tests
-  → push branch via a short-lived scoped token injected AFTER the agent loop ends
-  → open PR
-  → NEVER push to a default branch. NEVER force-push. NEVER merge.
+clean the model's diff (fences, stray prose)
+  → vet the paths before applying anything
+  → git worktree add --force -B arbor/issue-N  (isolated; never the indexed checkout)
+  → git apply --check, then apply
+  → stage only the vetted paths — never `git add -A`
+  → push a fresh branch, no --force
+  → open a DRAFT pull request
+  → remove the worktree, success or failure
 ```
 
-`codegraph affected` traces import dependencies to find affected test files — it is exactly right for this and is already built.
+What it will never do: push to the default branch, force-push, merge, mark a PR
+auto-mergeable, or touch CI configuration, dependency manifests, lockfiles,
+Dockerfiles or Makefiles. That last list is the important one — a patch editing
+`.github/workflows` or `package.json` is a privilege escalation wearing a bug
+fix, and it is the first thing a hostile issue would reach for. The rule is
+enforced in code before `git apply` runs, not merely requested in the prompt;
+the prompt states it too, so that enforcement has to reject less often.
+
+A patch is also refused for touching more than 12 files, exceeding 60 KB,
+naming no files, or reaching outside the worktree.
+
+The context the patch is written from is the graph selection — the same one the
+analysis used, and the reason a fix can be attempted at all without reading the
+repository.
+
+**Not yet built:** running the affected tests before opening the PR. The graph
+knows which tests import the changed files, so the selection is cheap; executing
+untrusted code in the server's container is the part that needs its own sandbox
+first. Until then the PR body says plainly that nothing was run.
 
 ---
 

@@ -308,6 +308,100 @@ Even with per-node metadata in SQLite for the cold path, we expect 15–25 MB ag
 
 ---
 
+## Fix mode — the gates, end to end
+
+Fix mode writes to someone's repository, so the tests are about what it
+*refuses*, not what it produces. Two layers:
+
+**Unit** (`cargo test`) — the vetting rules, which are a pure function and so
+can be tested exhaustively rather than sampled:
+
+```
+accepts an ordinary source patch
+rejects CI configuration        .github/workflows, .gitlab-ci, .circleci, Jenkinsfile
+rejects manifests and lockfiles package.json, Cargo.toml, requirements, poetry.lock, …
+rejects build and container     Dockerfile, docker-compose, Makefile, .env
+rejects escapes                 /etc/passwd, ../.., src/../../outside.py
+rejects git internals           .git/config, sub/.git/hooks/pre-commit
+rejects the empty and the enormous   >12 files, >60 KB, no file headers
+keeps a blank line of context   (see below)
+                                                            10/10
+```
+
+**End to end** (`bench/fix_test.py`) — a real git repository with a real bare
+remote, stubs only for the two HTTP APIs. What is asserted is the behaviour that
+cannot be checked from the pure functions: 23 assertions, including that the
+pull request is a **draft**, that its head is `arbor/issue-N` and never the
+default branch, that the remote branch contains the fix and *nothing else*, that
+the indexed checkout is untouched, that no worktree is left behind, that a
+forbidden patch opens no pull request and pushes no branch, that declining to
+patch still posts the analysis, and that the token never appears in a comment.
+
+```
+23/23
+```
+
+### What this caught
+
+`clean_patch` called `trim_end()` on the model's diff. A context line in a
+unified diff is a space followed by the source line, so a **blank** line of
+context is a lone space — and trimming it left the hunk header promising three
+lines while the body supplied two. `git apply` rejected every such patch.
+
+The failure was invisible from the inside: the model produced a correct diff,
+the vetting passed, and the only symptom was a comment saying the patch could
+not be applied. It would have read as the model being unreliable. Fix mode
+would have been shipped mostly broken, and the fault would have been blamed on
+the wrong component.
+
+Only the end-to-end test could find it. Every unit test of `clean_patch` was
+written against what the function was *for* — stripping fences — and passed.
+
+## Prompt caching — the minimum that is not documented in the response
+
+The agent puts a cache breakpoint after a repo preamble that is identical
+across issues; that is the whole cost argument, and `bench/agent_test.py`
+asserts the prefix is byte-identical across every analyse call.
+
+It now also asserts the prefix is **large enough to be cached at all**. The API
+will not cache a block below roughly 1024 tokens, and on a small repository the
+preamble came to ~950 — under the floor. Nothing in the response says so: there
+is no error, no warning, and `cache_read_input_tokens` is simply always zero.
+The breakpoint was decorative and the saving never happened.
+
+The preamble now grows its file list until it clears the threshold, and the
+marker is attached only when it does — claiming a saving that cannot occur is
+worse than not claiming one.
+
+```
+before   3,809 chars ~=   952 tokens   breakpoint silently ignored
+after    5,000+ chars > 1,024 tokens   cached
+```
+
+## Seeds — a fallback for repositories the stopword list was not written for
+
+Seed selection drops common English words, because `using`, `when` and `raises`
+all resolve in django and all are noise. On a small repository that filter can
+remove *every* seed: an issue reading "add() subtracts instead of adding" found
+nothing at all, and the agent was sent the preamble and no code.
+
+The stopword list is a proxy for "too common to be a lead", and where the
+repository disagrees the repository is the better authority. A stopword is now
+admitted as a seed if it names something defined once or twice in this tree —
+but only when nothing else survived, so a large codebase never reaches it.
+
+A/B on django, 40 bug-fix commits:
+
+```
+                recall            tokens/query
+  before        13.9 / 42.6 %     1,199 / 8,831     (n=10 / n=100)
+  after         13.9 / 42.6 %     1,234 / 8,907
+```
+
+Recall identical, tokens +0.9%. It fires rarely on a large repository, which is
+the intent; the gain is on the small ones, where it is the difference between
+some context and none.
+
 ## Methodology
 
 - **Startup subtracted from CodeGraph.** Its 0.50 s is real and per-invocation for a CLI, but paid once for a daemon. Subtracting isolates algorithmic work, which is the fair comparison for engine design. Our own startup is not yet measured; Phase 3 will report it, and it is where a static binary with an mmap'd graph should win outright.
@@ -318,8 +412,10 @@ Even with per-node metadata in SQLite for the cold path, we expect 15–25 MB ag
 
 ## What is still unmeasured
 
-- **Persistence** — arbor has none yet.
-- **Query latency** — the CSR-vs-SQLite claim is a design argument until `arbor query` exists.
-- **Incremental sync** — the delta-overlay design is unbuilt.
-- **Edge correctness** — we count edges, we do not yet verify them. Differential node/edge diffing against CodeGraph as an oracle is the Phase 2 gate.
-- **Cost** — `bench/cost.sh` does not exist. Recall@k per token, on real issue→PR pairs, is the claim that actually matters and it has not been attempted.
+- **Edge correctness** — nodes are verified against an oracle at 95.0% presence recall; edges are counted, not verified. This is the largest remaining gap and it gates the resolution claims.
+- **Cost against real issue→PR pairs.** The ground truth is bug-fix commits from git history, which is honest and reproducible but not the same distribution as issues people actually file.
+- **The agent against the real API.** Every agent assertion runs against a stub. Shape, safety and caching structure are checked; answer quality is not.
+- **Fix mode against a real provider.** The git half is real; GitHub is a stub, so nothing here says how often a proposed patch is *correct* — only that a wrong one cannot escalate.
+- **Tests are not run before a PR is opened.** The graph can select which tests import the changed files; executing them needs a sandbox that does not exist yet.
+- **Languages beyond Python and TypeScript.** Tier 0 is measured; the rest is a plan.
+- **Anything other than one machine.** M1 Pro, macOS, three repositories.
