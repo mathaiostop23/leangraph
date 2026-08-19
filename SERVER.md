@@ -360,6 +360,35 @@ Anyone can open an issue on a public repo. That text goes into the agent's promp
 
 Envelope encryption. Per-tenant DEK, wrapped by a KEK from `IG_MASTER_KEY` env (or a KMS in Phase 5). AES-256-GCM. Decrypt only in the worker, only into memory, never logged. Redact keys from all log lines and error traces.
 
+### 4.4b Egress — where a repository URL can point
+
+A repository URL is the only user-supplied value in this product that causes an
+outbound connection to a host of the caller's choosing. `https://` alone is
+satisfied by `https://169.254.169.254/latest/meta-data/iam/security-credentials/`
+— the cloud metadata endpoint, which answers with the container's credentials to
+anything that can reach it — and by every private address on whatever network
+the server can see. That is server-side request forgery, and it is enforced here
+rather than assumed away.
+
+`check_url` now resolves the host and refuses **every** answer that is not
+public: loopback, private, link-local, unique-local, CGNAT, multicast,
+unspecified, and IPv4-mapped forms of all of them. Every address is checked, not
+the first — a name returning one public and one private answer is precisely how
+this gets bypassed.
+
+`ARBOR_ALLOWED_HOSTS` pins cloning to named hosts. An entry covers the host and
+its subdomains (`github.com` allows `codeload.github.com`) and nothing that
+merely looks like it (`evil-github.com` is refused). Setting it is also how you
+deliberately permit an internal host — a GitHub Enterprise install — since an
+explicit allowlist is a statement about where this install may reach and
+overrides the address check rather than stacking with it.
+
+**What this is not.** The check resolves now; git resolves again when it
+connects, so a name whose answer changes in between would slip past. Closing
+that needs a resolver the connection itself is pinned to, which git does not
+offer. `ARBOR_ALLOWED_HOSTS` is the airtight in-process control, and a network
+policy on the container is the real one — the compose file says where to put it.
+
 ### 4.5 Fix mode — **built, opt-in** (`src/server/fix.rs`)
 
 Posting a comment and changing someone's repository are different decisions, so

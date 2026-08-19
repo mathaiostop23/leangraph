@@ -19,11 +19,28 @@ services:
       ARBOR_GITHUB_TOKEN: ${ARBOR_GITHUB_TOKEN:-}
       # Encrypts secrets at rest in the database.
       ARBOR_MASTER_KEY: ${ARBOR_MASTER_KEY:-}
+      # Optional egress allowlist for repository URLs. Unset, arbor still
+      # refuses any URL resolving to a private, loopback or link-local address
+      # — including 169.254.169.254, the metadata endpoint that hands out this
+      # container's cloud credentials. Set it to pin cloning to named hosts, or
+      # to permit an internal one deliberately (GitHub Enterprise):
+      #   ARBOR_ALLOWED_HOSTS: github.com,ghe.internal.example
+      ARBOR_ALLOWED_HOSTS: ${ARBOR_ALLOWED_HOSTS:-}
+      # GitHub Enterprise: the API root to post comments and pull requests to.
+      ARBOR_GITHUB_API: ${ARBOR_GITHUB_API:-}
     # Indexing saturates whatever it is given. Bound it, or a large repository
     # will starve the reactor that has to answer webhooks.
     deploy:
       resources:
         limits: { cpus: "4", memory: 4G }
+    # Outbound, this process reaches exactly three kinds of host: the Anthropic
+    # API, the provider API, and whatever git remote you registered. The first
+    # two are set by you and are trusted; the third is the only one an API
+    # caller chooses, which is why the address check above is in-process rather
+    # than left to the network. If you want a hard boundary as well, put this
+    # service on an internal network with an egress proxy — the in-process
+    # check is a policy, not a firewall, and DNS can change between the check
+    # and the connection.
 
 volumes:
   arbor-data:

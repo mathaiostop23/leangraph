@@ -522,6 +522,57 @@ There is now a migration, an `add_column` helper that is a no-op when DDL
 already supplied the column, and a test that builds a schema-2 database by hand
 and asserts it opens, reads and re-opens.
 
+## Egress — where a repository URL is allowed to point
+
+A repository URL is the only user-supplied value in this product that causes an
+outbound connection to a host of the caller's choosing. Requiring `https://` is
+satisfied by:
+
+```
+https://169.254.169.254/latest/meta-data/iam/security-credentials/
+```
+
+— the cloud metadata endpoint, which answers with the container's credentials to
+anything that can reach it. Every private address on the host's network is
+equally reachable. That is server-side request forgery, and until now the only
+check was on the scheme.
+
+`check_url` resolves the host and refuses every answer that is not public:
+loopback, private, link-local, unique-local, CGNAT, multicast, unspecified, and
+the IPv4-mapped IPv6 forms of all of them. *Every* address, not the first — a
+name that returns one public and one private answer is exactly how this gets
+bypassed.
+
+```
+https://169.254.169.254/latest/meta-data/     refused
+https://192.168.1.1/repo.git                  refused
+https://localhost/x/y                         refused  (resolves to ::1)
+https://metadata.google.internal/...          refused
+https://github.com/pallets/click              queued
+```
+
+`ARBOR_ALLOWED_HOSTS` pins cloning to named hosts, and is also how an internal
+one is permitted deliberately — a GitHub Enterprise install:
+
+```
+ARBOR_ALLOWED_HOSTS=ghe.internal.test,github.com
+
+https://codeload.github.com/o/n     queued    (subdomains are covered)
+https://evil-github.com/o/n         refused   (a suffix match would allow this)
+https://gitlab.com/o/n              refused
+https://169.254.169.254/x/y         refused
+```
+
+**What it is not.** The check resolves now; git resolves again when it connects,
+so a name whose answer changes in between slips past. Closing that needs a
+resolver the connection is pinned to, which git does not offer. The allowlist is
+the airtight in-process control; a network policy on the container is the real
+one, and the compose file says where to put it.
+
+```
+27/27 unit — scheme rules, address classification, host parsing, allowlist matching
+```
+
 ## Methodology
 
 - **Startup subtracted from CodeGraph.** Its 0.50 s is real and per-invocation for a CLI, but paid once for a daemon. Subtracting isolates algorithmic work, which is the fair comparison for engine design. Our own startup is not yet measured; Phase 3 will report it, and it is where a static binary with an mmap'd graph should win outright.

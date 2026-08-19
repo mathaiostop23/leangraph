@@ -26,13 +26,38 @@ pub fn work_dir(data_dir: &Path, full_name: &str) -> PathBuf {
     data_dir.join("repos").join(safe)
 }
 
-/// Reject anything that is not a plain https git URL.
+/// Reject anything that is not a plain https git URL, and anything pointing
+/// inside the network the server is running on.
 ///
 /// `file://` would read the host filesystem, `ssh://` and the scp-like
 /// `git@host:path` form would use ambient key material, and `ext::` runs an
 /// arbitrary command. A URL arrives over the API, so none of those may be
 /// reachable from it.
+///
+/// The address check is the part that matters in a container. `https://` alone
+/// is satisfied by `https://169.254.169.254/latest/meta-data/iam/...`, the cloud
+/// metadata endpoint that hands out the instance's credentials, and by every
+/// private address on whatever network the server can see. A repository URL is
+/// the one user-supplied value in this product that causes an outbound
+/// connection to a host of the caller's choosing, which is the definition of
+/// server-side request forgery, so it is where the egress policy is enforced.
 pub fn check_url(url: &str) -> Result<()> {
+    let host = check_shape(url)?;
+    if let Some(allowed) = allowlist() {
+        if !allowed.iter().any(|a| host_matches(&host, a)) {
+            bail!("{host} is not in ARBOR_ALLOWED_HOSTS");
+        }
+        // An explicit allowlist is a deliberate statement about where this
+        // install may reach, including somewhere private. It overrides the
+        // address check rather than stacking with it.
+        return Ok(());
+    }
+    check_public(&host)
+}
+
+/// The syntactic half, separated so it can be tested without a resolver.
+/// Returns the host, since the caller needs it next either way.
+fn check_shape(url: &str) -> Result<String> {
     let u = url.trim();
     if !u.starts_with("https://") {
         bail!("only https:// URLs are accepted");
@@ -43,7 +68,96 @@ pub fn check_url(url: &str) -> Result<()> {
     if u.contains("..") || u.contains('\n') || u.contains('\r') {
         bail!("malformed URL");
     }
+    host_of(u).context("cannot read a host from that URL")
+}
+
+/// Host part of an https URL, lowercased, port stripped.
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let host = host.rsplit_once(':').map_or(host, |(h, p)| {
+        if p.chars().all(|c| c.is_ascii_digit()) { h } else { host }
+    });
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// `example.com` matches itself and any subdomain of it. Written out rather
+/// than done with `ends_with`, which would let `evil-example.com` through.
+fn host_matches(host: &str, pattern: &str) -> bool {
+    let p = pattern.trim().to_ascii_lowercase();
+    host == p || host.ends_with(&format!(".{p}"))
+}
+
+fn allowlist() -> Option<Vec<String>> {
+    let raw = std::env::var("ARBOR_ALLOWED_HOSTS").ok()?;
+    let hosts: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!hosts.is_empty()).then_some(hosts)
+}
+
+/// Refuse a host that resolves anywhere but the public internet.
+///
+/// This resolves now and git resolves again when it connects, so a name whose
+/// answer changes in between would slip past — DNS rebinding. Closing that
+/// needs a resolver the connection itself is pinned to, which git does not
+/// offer. Stated rather than papered over; `ARBOR_ALLOWED_HOSTS` is the
+/// airtight control, and a network policy on the container is the real one.
+fn check_public(host: &str) -> Result<()> {
+    use std::net::{IpAddr, ToSocketAddrs};
+
+    let addrs: Vec<IpAddr> = format!("{host}:443")
+        .to_socket_addrs()
+        .with_context(|| format!("cannot resolve {host}"))?
+        .map(|s| s.ip())
+        .collect();
+    if addrs.is_empty() {
+        bail!("{host} resolves to nothing");
+    }
+    // Every address, not the first: a name that returns one public and one
+    // private answer is exactly how this check gets bypassed.
+    for ip in &addrs {
+        if !is_public(*ip) {
+            bail!(
+                "{host} resolves to {ip}, which is not a public address; set ARBOR_ALLOWED_HOSTS to permit an internal host deliberately"
+            );
+        }
+    }
     Ok(())
+}
+
+pub fn is_public(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            // 169.254.0.0/16 is the one that matters most: it carries the cloud
+            // metadata endpoint and therefore the instance's credentials.
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 0
+                || v4.octets()[0] == 127
+                || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])) // CGNAT
+                || v4.octets()[0] >= 224) // multicast and reserved
+        }
+        IpAddr::V6(v6) => {
+            if let Some(m) = v6.to_ipv4_mapped() {
+                return is_public(IpAddr::V4(m));
+            }
+            let seg = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || (seg & 0xfe00) == 0xfc00 // unique local
+                || (seg & 0xffc0) == 0xfe80 // link local
+                || (seg & 0xff00) == 0xff00) // multicast
+        }
+    }
 }
 
 fn run(dir: Option<&Path>, token: Option<&str>, args: &[&str]) -> Result<String> {
@@ -161,4 +275,82 @@ pub fn name_from_url(url: &str) -> Option<String> {
     let _host = parts.next()?;
     let path = parts.next()?.trim_end_matches(".git");
     (path.matches('/').count() == 1 && !path.is_empty()).then(|| path.to_string())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn the_scheme_rules_still_hold() {
+        // The shape half only — asserting on `check_url` here would make the
+        // test need a working resolver, and a test that fails on a train is a
+        // test people learn to ignore.
+        assert_eq!(check_shape("https://github.com/owner/name").unwrap(), "github.com");
+        for u in [
+            "http://github.com/o/n",
+            "file:///etc/passwd",
+            "ssh://git@github.com/o/n",
+            "git@github.com:o/n",
+            "ext::sh -c whoami",
+            "https://user:token@github.com/o/n",
+            "https://github.com/../../etc",
+        ] {
+            assert!(check_shape(u).is_err(), "{u} should be rejected");
+        }
+    }
+
+    #[test]
+    fn the_metadata_endpoint_is_not_a_git_host() {
+        // The single most valuable target in any container: it answers with the
+        // instance's credentials to anything that can make an outbound request.
+        assert!(!is_public(ip("169.254.169.254")));
+        // A literal address needs no resolver, so this one stays end to end.
+        assert!(check_url("https://169.254.169.254/latest/meta-data/").is_err());
+        assert!(!is_public(ip("fd00:ec2::254")));
+    }
+
+    #[test]
+    fn private_and_local_addresses_are_refused() {
+        for a in [
+            "127.0.0.1", "10.0.0.5", "172.16.0.1", "172.31.255.255", "192.168.1.1",
+            "0.0.0.0", "100.64.0.1", "224.0.0.1", "255.255.255.255",
+            "::1", "::", "fc00::1", "fd12:3456::1", "fe80::1", "ff02::1",
+            "::ffff:127.0.0.1", "::ffff:10.0.0.1",
+        ] {
+            assert!(!is_public(ip(a)), "{a} should not count as public");
+        }
+    }
+
+    #[test]
+    fn public_addresses_are_allowed() {
+        for a in ["140.82.121.4", "1.1.1.1", "8.8.8.8", "2606:4700::1111", "2001:4860::8888"] {
+            assert!(is_public(ip(a)), "{a} should count as public");
+        }
+    }
+
+    #[test]
+    fn the_host_is_parsed_the_way_a_client_would() {
+        assert_eq!(host_of("https://github.com/o/n").as_deref(), Some("github.com"));
+        assert_eq!(host_of("https://GitHub.COM/o/n").as_deref(), Some("github.com"));
+        assert_eq!(host_of("https://ghe.example.com:8443/o/n").as_deref(), Some("ghe.example.com"));
+        assert_eq!(host_of("https://[::1]/o/n").as_deref(), Some("::1"));
+        assert_eq!(host_of("https://github.com").as_deref(), Some("github.com"));
+        assert_eq!(host_of("https://"), None);
+    }
+
+    #[test]
+    fn an_allowlist_entry_covers_subdomains_but_not_lookalikes() {
+        assert!(host_matches("github.com", "github.com"));
+        assert!(host_matches("codeload.github.com", "github.com"));
+        assert!(!host_matches("evil-github.com", "github.com"));
+        assert!(!host_matches("github.com.evil.test", "github.com"));
+        assert!(!host_matches("notgithub.com", "github.com"));
+    }
 }

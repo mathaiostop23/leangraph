@@ -40,6 +40,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 5 · Server (**A ships**) | ✅ **Done.** SQLite, webhooks, agent, dashboard, Docker |
 | 5b · Fix mode | ✅ **Done, opt-in.** Three independent switches; draft PRs only |
 | 5c · Issue dedup | ✅ **Done.** Local signals, no embedding API; a duplicate costs zero |
+| 5d · Egress policy | ✅ **Done.** SSRF closed on clone URLs; optional host allowlist |
 | 6 · Breadth | ⬜ |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |
 | — · Edge verification | ⬜ **gating** — nodes verified, edges not |
