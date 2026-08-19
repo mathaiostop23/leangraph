@@ -531,6 +531,42 @@ impl Graph {
         out
     }
 
+    /// Stable orientation for a repository: the same bytes for every issue, so
+    /// it can sit before a cache breakpoint and be paid for once.
+    ///
+    /// Ranked by how much of the graph each file carries — definition count and
+    /// inbound edges — which is a reasonable proxy for "where the important code
+    /// lives" and costs one pass.
+    pub fn preamble(&self, max_files: usize) -> String {
+        let mut per_file: FxHashMap<u32, (u32, u32)> = FxHashMap::default();
+        for i in 0..self.n_nodes {
+            let n = NodeId(i);
+            if self.node_key(n) == 0 || self.node_kind(n) == 4 {
+                continue; // hole, or the file node itself
+            }
+            let (f, _, _) = self.location(n);
+            let e = per_file.entry(f).or_default();
+            e.0 += 1;
+            e.1 += self.rev.range(n).len() as u32;
+        }
+        let mut ranked: Vec<(u32, u32, u32)> =
+            per_file.into_iter().map(|(f, (d, r))| (d + r / 4, f, d)).collect();
+        ranked.sort_unstable_by_key(|&(score, f, _)| (std::cmp::Reverse(score), f));
+
+        let mut out = String::with_capacity(8192);
+        out.push_str(&format!(
+            "# Repository structure\n\n{} files · {} definitions · {} relationships.\n\n\
+The files below carry most of the graph, ordered by how much of it they hold.\n\n",
+            self.n_files,
+            self.n_nodes as usize - self.n_files as usize,
+            self.n_edges()
+        ));
+        for &(_, f, defs) in ranked.iter().take(max_files) {
+            out.push_str(&format!("- `{}` — {defs} definitions\n", self.path(f)));
+        }
+        out
+    }
+
     /// Nodes whose name matches exactly.
     pub fn find(&self, name: &str) -> Vec<NodeId> {
         self.name_index

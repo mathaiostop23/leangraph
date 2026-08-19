@@ -4,6 +4,7 @@
 //! task drains the queue. Indexing is CPU-bound and runs on the blocking pool so
 //! a 700 ms full index cannot stall the reactor and drop a webhook.
 
+pub mod agent;
 pub mod db;
 pub mod webhook;
 
@@ -249,10 +250,7 @@ async fn run_job(app: &App, job: &db::Job) -> Result<()> {
     match job.kind.as_str() {
         "index" => index_repo(app, job.repo_id, true).await,
         "sync" => index_repo(app, job.repo_id, false).await,
-        "issue" => {
-            tracing_line("info", &format!("issue job {} — agent not wired yet", job.id));
-            Ok(())
-        }
+        "issue" => answer_issue(app, job).await,
         other => anyhow::bail!("unknown job kind `{other}`"),
     }
 }
@@ -315,6 +313,186 @@ async fn index_repo(app: &App, repo_id: i64, full: bool) -> Result<()> {
             Err(e)
         }
     }
+}
+
+/// Issue in, comment out.
+///
+/// Every exit path records a run: a job that silently did nothing is
+/// indistinguishable from one that never ran, and the cost ledger is only
+/// trustworthy if it accounts for the cheap outcomes too.
+async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
+    let payload: serde_json::Value = serde_json::from_str(&job.payload).unwrap_or_default();
+    let issue_id = payload
+        .get("issue_id")
+        .and_then(serde_json::Value::as_i64)
+        .context("issue job without an issue_id")?;
+    let issue = app.db.issue(issue_id)?.context("issue vanished")?;
+    let repo = app
+        .db
+        .repos()?
+        .into_iter()
+        .find(|r| r.id == issue.repo_id)
+        .context("repo vanished")?;
+
+    let run_id = app.db.start_run(issue.id, repo.id)?;
+    let started = Instant::now();
+
+    let Some(client) = agent::Client::from_env() else {
+        app.db.finish_run(run_id, "skipped", Some("no api key"), "", 0, 0.0,
+            started.elapsed().as_millis() as i64, None)?;
+        tracing_line("warn", "no ARBOR_ANTHROPIC_KEY — issue skipped");
+        return Ok(());
+    };
+
+    // --- stage 1: triage -----------------------------------------------------
+    let (triage, r1) = agent::triage(&client, &issue.title, &issue.body).await?;
+    let mut tokens = r1.usage.total();
+    let mut cached = r1.usage.cache_read;
+    let mut cost = agent::record(&app.db, run_id, repo.id, "triage", &r1)?;
+
+    let mut nodes = 0usize;
+    let mut files_json = String::from("[]");
+    let mut comment;
+
+    if !triage.worth_analysing() {
+        comment = agent::kind_note(&triage);
+    } else {
+        // --- stage 2: analyse ------------------------------------------------
+        // Seeds come from both the triage extraction and the raw text: the model
+        // is better at spotting names in prose, the graph is better at knowing
+        // which of them exist.
+        let seed_text = format!("{} {} {}", issue.title, triage.symbols.join(" "), issue.body);
+        let repo_path = PathBuf::from(&repo.path);
+        let built = tokio::task::spawn_blocking(move || build_context(&repo_path, &seed_text))
+            .await??;
+        nodes = built.nodes;
+        files_json = built.files_json;
+
+        let r2 = agent::analyse(
+            &client,
+            &built.preamble,
+            &built.text,
+            &issue.title,
+            &issue.body,
+        )
+        .await?;
+        tokens += r2.usage.total();
+        cached += r2.usage.cache_read;
+        cost += agent::record(&app.db, run_id, repo.id, "analyse", &r2)?;
+        comment = r2.text;
+    }
+
+    comment.push_str(&agent::receipt(nodes, tokens, cached, cost));
+
+    let posted = post_comment(&repo.full_name, issue.number, &comment).await;
+    let status = match &posted {
+        Ok(true) => "posted",
+        Ok(false) => "dry-run",
+        Err(_) => "post-failed",
+    };
+    if let Ok(false) = posted {
+        tracing_line(
+            "info",
+            &format!(
+                "{}#{} — no ARBOR_GITHUB_TOKEN, comment not posted:\n{comment}",
+                repo.full_name, issue.number
+            ),
+        );
+    }
+
+    app.db.finish_run(
+        run_id,
+        status,
+        Some(triage.kind.as_str()),
+        &files_json,
+        tokens,
+        cost,
+        started.elapsed().as_millis() as i64,
+        posted.as_ref().err().map(|e| e.to_string()).as_deref(),
+    )?;
+    tracing_line(
+        "info",
+        &format!(
+            "{}#{} — {} · {nodes} nodes · {tokens} tokens · ${cost:.4} · {status}",
+            repo.full_name,
+            issue.number,
+            triage.kind.as_str()
+        ),
+    );
+    Ok(())
+}
+
+struct Built {
+    text: String,
+    /// Stable across issues, so it can sit before the cache breakpoint.
+    preamble: String,
+    files_json: String,
+    nodes: usize,
+}
+
+/// Graph lookup is synchronous and mmap-backed; it belongs on the blocking pool
+/// like indexing does.
+fn build_context(repo_path: &std::path::Path, text: &str) -> Result<Built> {
+    use crate::{graph::Graph, query};
+    let g = Graph::open(&repo_path.join(".arbor").join("graph.bin"))
+        .context("repository has no graph yet")?;
+    let ctx = query::build_from_text(&g, text, &query::Budget::default());
+    let preamble = g.preamble(60);
+
+    let mut out = String::new();
+    let mut files: Vec<&str> = Vec::new();
+    for it in &ctx.items {
+        let (f, a, b) = g.location(it.node);
+        let path = g.path(f);
+        files.push(path);
+        out.push_str(&format!(
+            "## {} [{}]\n{}@{}\n",
+            g.name(it.node),
+            it.why.label(),
+            path,
+            a
+        ));
+        if let Ok(bytes) = std::fs::read(g.abs_path(f)) {
+            let end = (b as usize).min(bytes.len());
+            let start = (a as usize).min(end);
+            let src = String::from_utf8_lossy(&bytes[start..end]);
+            out.push_str("```\n");
+            out.push_str(src.chars().take(2400).collect::<String>().as_str());
+            out.push_str("\n```\n\n");
+        }
+    }
+    files.sort_unstable();
+    files.dedup();
+    Ok(Built {
+        text: out,
+        preamble,
+        files_json: serde_json::to_string(&files).unwrap_or_else(|_| "[]".into()),
+        nodes: ctx.items.len(),
+    })
+}
+
+/// Returns false when no token is configured — a deliberate dry run rather than
+/// an error, so the whole pipeline can be exercised without write access.
+async fn post_comment(full_name: &str, number: i64, body: &str) -> Result<bool> {
+    let Ok(token) = std::env::var("ARBOR_GITHUB_TOKEN") else {
+        return Ok(false);
+    };
+    if token.is_empty() {
+        return Ok(false);
+    }
+    let url = format!("https://api.github.com/repos/{full_name}/issues/{number}/comments");
+    let res = reqwest::Client::new()
+        .post(&url)
+        .header("authorization", format!("Bearer {token}"))
+        .header("accept", "application/vnd.github+json")
+        .header("user-agent", "arbor")
+        .json(&serde_json::json!({ "body": body }))
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        anyhow::bail!("github returned {}", res.status());
+    }
+    Ok(true)
 }
 
 fn git_head(root: &std::path::Path) -> Option<String> {

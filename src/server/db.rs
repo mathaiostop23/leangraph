@@ -373,6 +373,80 @@ impl Db {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Issue {
+    pub id: i64,
+    pub repo_id: i64,
+    pub number: i64,
+    pub title: String,
+    pub body: String,
+}
+
+impl Db {
+    pub fn issue(&self, id: i64) -> Result<Option<Issue>> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT id, repo_id, number, title, body FROM issues WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok(Issue {
+                        id: r.get(0)?,
+                        repo_id: r.get(1)?,
+                        number: r.get(2)?,
+                        title: r.get(3)?,
+                        body: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+        })
+    }
+
+    pub fn start_run(&self, issue_id: i64, repo_id: i64) -> Result<i64> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO runs (issue_id, repo_id, status, created_at) VALUES (?1,?2,'running',?3)",
+                params![issue_id, repo_id, now()],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+    }
+
+    pub fn finish_run(
+        &self,
+        id: i64,
+        status: &str,
+        outcome: Option<&str>,
+        files: &str,
+        tokens: i64,
+        cost: f64,
+        ms: i64,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE runs SET status=?2, outcome=?3, context_files=?4, total_tokens=?5,
+                        cost_usd=?6, duration_ms=?7, error=?8 WHERE id=?1",
+                params![id, status, outcome, files, tokens, cost, ms, error],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Rolling spend, for the dashboard and for a future per-repo ceiling.
+    pub fn spend(&self, repo_id: i64, since: i64) -> Result<(i64, f64)> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                        COALESCE(SUM(cost_usd),0)
+                 FROM cost_ledger WHERE repo_id=?1 AND created_at>=?2",
+                params![repo_id, since],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+    }
+}
+
 // ---------------------------------------------------------------- deliveries
 
 impl Db {
