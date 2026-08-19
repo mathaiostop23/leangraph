@@ -469,6 +469,48 @@ impl Db {
     }
 }
 
+/// One answered issue, joined with enough of its repository and issue to be
+/// readable without three more queries.
+#[derive(Debug, Clone)]
+pub struct RunRow {
+    pub repo: String,
+    pub number: i64,
+    pub status: String,
+    pub outcome: Option<String>,
+    pub total_tokens: i64,
+    pub cost_usd: f64,
+    pub duration_ms: i64,
+    pub created_at: i64,
+}
+
+impl Db {
+    pub fn recent_runs(&self, limit: i64) -> Result<Vec<RunRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT p.full_name, i.number, r.status, r.outcome, r.total_tokens,
+                        r.cost_usd, r.duration_ms, r.created_at
+                 FROM runs r
+                 JOIN issues i ON i.id = r.issue_id
+                 JOIN repos  p ON p.id = r.repo_id
+                 ORDER BY r.id DESC LIMIT ?1",
+            )?;
+            let rows = st.query_map(params![limit], |r| {
+                Ok(RunRow {
+                    repo: r.get(0)?,
+                    number: r.get(1)?,
+                    status: r.get(2)?,
+                    outcome: r.get(3)?,
+                    total_tokens: r.get(4)?,
+                    cost_usd: r.get(5)?,
+                    duration_ms: r.get(6)?,
+                    created_at: r.get(7)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+}
+
 // -------------------------------------------------------------------- secrets
 
 impl Db {

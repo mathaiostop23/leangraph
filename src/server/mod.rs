@@ -8,6 +8,7 @@ pub mod agent;
 pub mod clone;
 pub mod crypto;
 pub mod db;
+pub mod ui;
 pub mod webhook;
 
 use crate::index;
@@ -102,6 +103,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
 
     let router = Router::new()
+        .route("/", get(ui::page))
         .route("/health", get(health))
         .route("/repos", get(list_repos).post(add_repo))
         .route("/repos/{name}", get(get_repo))
