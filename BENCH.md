@@ -573,6 +573,155 @@ one, and the compose file says where to put it.
 27/27 unit — scheme rules, address classification, host parsing, allowlist matching
 ```
 
+## Edge correctness — does confidence predict it?
+
+Nodes were verified against an oracle at 95% presence recall. Edges were counted
+and never checked, which mattered more than it sounds: **69% of django's semantic
+edges and 83.5% of its call edges were name matches** — a name found somewhere in
+the repository, with no scope and no import behind it. If those were mostly
+wrong, the graph was mostly noise and every claim resting on it was worthless.
+
+Worse, the confidence score itself was untested. arbor puts a confidence and a
+provenance on every edge and argues that ranking by them is *why* it returns
+fewer tokens at equal recall. Nobody had ever asked whether a confidence-100
+edge is right more often than a confidence-45 one.
+
+### Three labellers, in order of how much they can be argued with
+
+**`bench/edgefacts.py` — falsifiable without an oracle.** Rules that state a
+property the edge violates. No dependencies, all three corpora, under a second.
+The self-call rule reads the caller's source before firing, because recursion is
+real and a rule that merely counted self-loops would overclaim; it fires only
+where the body never names itself.
+
+**`bench/edgetrace.py` — what the code actually does.** flask's own test suite
+under `sys.monitoring`, recording every call that happened. An observed edge
+exists; no amount of agreement between two static tools changes that. 2,712
+distinct in-repo edges over 485 passing tests, deterministic across runs
+(symmetric difference 0), 1.6× wall clock. This gives recall, and a confirmation
+rate over edges whose caller ran. It says nothing about precision.
+
+**CodeGraph agreement** — covers everything, proves nothing. Where we differ,
+either side may be right.
+
+### The answer
+
+Both independent labellers, same direction, overwhelming:
+
+```
+flask, runtime-confirmed, callers that executed     all populations
+  conf 100  scope     60.0%   (53.3 – 66.4)
+  conf  95  import    94.3%   (81.4 – 98.4)
+  conf  80  name      36.8%   (33.6 – 40.1)
+  conf  60  name      20.3%   (17.6 – 23.2)
+  conf  45  name       5.2%   ( 2.7 –  9.9)
+  Cochran-Armitage   z=+15.1   p=8.6e-52
+```
+
+Confidence orders correctness. That is the claim the ranking rests on, and it is
+now measured rather than asserted.
+
+### What it found first, though, was that we were wrong
+
+Before the fixes below, the same measurement said something uncomfortable. On
+`lib→lib` — the population the ranking claim is actually about, rather than test
+code calling library code — the *proven* tier lost to the guess:
+
+```
+                      before      after
+  conf 100 scope      51.9%      65.2%
+  conf  80 name       54.5%      46.6%
+  trend             z=+4.85    z=+7.07
+```
+
+And the falsification floor at confidence 100 was the highest of any bucket on
+two of three corpora. 12.9% of flask's scope-resolved call edges were provably
+false, and every sampled one was the same shape: `super().x()` inside `x`,
+resolved to itself.
+
+### Four defects, four different kinds of mistake
+
+| | before | after |
+|---|---|---|
+| `extends` into a non-class (django) | 8,655 | 146 |
+| edges crossing a language boundary | 14,533 | 0 |
+| calls into a vendored bundle | 13,718 | 918 |
+| self-calls with no recursion in the source | 1,285 | 425 |
+| **falsification floor, django** | **12.41%** | **0.83%** |
+| **edges, django** | **293,254** | **253,335** |
+
+**Dotted heritage.** `class X(a.B)` has two identifiers in its base list and only
+one is a base class. Both were tagged, so `a` — a module — was recorded as a
+superclass. 47.4% of every `extends` edge django had.
+
+**No language partition.** One global name index for the whole repository, so a
+name defined in both a Python and a JavaScript tree could bind across them.
+
+**The builtin filter was unreachable.** It ran only when a name was absent from
+the index entirely, so it was disabled the moment a repository defined that name
+anywhere. django ships a minified bundle containing a function called `len`, so
+2,878 Python `len()` calls resolved into it.
+
+**The receiver was discarded.** `app_config.get_models()` was reduced to
+`get_models` — correct — and the receiver thrown away, after which a call through
+another object was indistinguishable from a bare one and the scope chain bound it
+to the nearest same-named method at confidence 100. References now carry how they
+reached their name.
+
+Node presence recall is unchanged at 95.0%, convergence still holds 5/5, and a
+full django index is 757 ms against 742 ms.
+
+### Recall against execution
+
+```
+observed edges                          2,712
+both endpoints are arbor nodes          2,682
+                                     all      direct only
+  exact match                       19.9%           24.8%
+  + constructor rule                23.3%           29.1%
+  + MRO closure                     23.7%           29.7%
+```
+
+The staged ladder is printed rather than summarised: each rule makes matching
+easier, and a reader who sees only the last number cannot tell how much is arbor
+being right and how much is the comparison being generous.
+
+A quarter of the direct misses come out of five call sites. `Flask.dispatch_request`
+alone accounts for 258 of them, and it does `self.view_functions[rule.endpoint](...)`
+— a dictionary lookup, then a call. No static analysis follows that.
+
+### What this does not measure
+
+Neither labeller measures **precision**. `edgefacts` bounds the error rate from
+below; runtime confirms edges that ran and is silent on the rest. A rule that
+does not fire is not a correct edge.
+
+Recall is measured on **one repository, in one language**. django's test suite
+needs dependencies this machine does not have offline; excalidraw has no Python
+at all.
+
+Runtime only reaches code the tests exercise, and well-tested code may differ
+systematically from the rest.
+
+## Reproducibility of the benchmarks themselves
+
+Two defects found while re-running everything after the fixes, both of which had
+been silently moving published numbers.
+
+**The keyword baseline was a random draw.** `bench/cost.py` picked its search
+terms with `list(set(tokenize(text)))[:12]`. Set iteration order for strings
+depends on `PYTHONHASHSEED`, so every run selected a different twelve tokens —
+the same command on the same repository gave keyword top-3 at 24.3% and then
+27.8%. arbor was being compared against one sample from a distribution.
+
+**The ground truth moved.** The case list is harvested with `git log --name-only`
+and rename detection was on. django's corpus is a shallow clone; rename detection
+compares blob *contents* and fetches them lazily, so its answers depend on which
+blobs happen to be local. Running the indexer in between changed the object store
+and therefore changed which commits qualified.
+
+Three consecutive runs now agree on every row.
+
 ## Methodology
 
 - **Startup subtracted from CodeGraph.** Its 0.50 s is real and per-invocation for a CLI, but paid once for a daemon. Subtracting isolates algorithmic work, which is the fair comparison for engine design. Our own startup is not yet measured; Phase 3 will report it, and it is where a static binary with an mmap'd graph should win outright.
@@ -583,7 +732,8 @@ one, and the compose file says where to put it.
 
 ## What is still unmeasured
 
-- **Edge correctness** — nodes are verified against an oracle at 95.0% presence recall; edges are counted, not verified. This is the largest remaining gap and it gates the resolution claims.
+- **Edge precision.** Bounded from below by `edgefacts` and confirmed-where-observed by the runtime oracle; never measured directly. That needs blind hand adjudication of a stratified sample, which is human time nobody has spent yet.
+- **Edge recall outside flask.** django's suite needs dependencies this machine cannot fetch offline; excalidraw has no Python. One repository, one language.
 - **Cost against real issue→PR pairs.** The ground truth is bug-fix commits from git history, which is honest and reproducible but not the same distribution as issues people actually file.
 - **The agent against the real API.** Every agent assertion runs against a stub. Shape, safety and caching structure are checked; answer quality is not.
 - **Fix mode against a real provider.** The git half is real; GitHub is a stub, so nothing here says how often a proposed patch is *correct* — only that a wrong one cannot escalate.

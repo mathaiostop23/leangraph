@@ -41,17 +41,19 @@ This gap is structural rather than tuning. Loading is not deserialization: `Grap
 
 ### Cost — the claim that actually matters
 
-`bench/cost.py`, django, 30 bug-fix commits. Ground truth is the files each fix touched; the query is the commit message. The baseline is keyword search — tokenise, `git grep`, read the top *k* — which is what an agent without a structural index does.
+`bench/cost.py`, django, 40 bug-fix commits. Ground truth is the files each fix touched; the query is the commit message. The baseline is keyword search — tokenise, `git grep`, read the top *k* — which is what an agent without a structural index does.
 
 | approach | recall | tokens/query | tokens per recall point |
 |---|---:|---:|---:|
-| arbor n=25 | 30.5% | 2,500 | **82** |
-| **arbor n=100** | **50.0%** | **9,479** | 190 |
-| arbor n=200 | 52.4% | 17,520 | 334 |
-| keyword top-5 | 40.2% | 146,296 | 3,635 |
-| keyword top-10 | 52.4% | 261,812 | 4,993 |
+| arbor n=25 | 23.5% | 2,334 | **99** |
+| **arbor n=100** | **40.9%** | **9,671** | 237 |
+| arbor n=200 | 44.3% | 17,866 | 403 |
+| keyword top-5 | 35.7% | 158,685 | 4,451 |
+| keyword top-10 | 45.2% | 259,328 | 5,735 |
 
-**At matched recall, 14.9× fewer tokens.** At n=100, arbor beats keyword top-5 on recall (50.0% vs 40.2%) *and* costs 15× less.
+**At matched recall, 24× fewer tokens.** At n=100, arbor beats keyword top-5 on recall (40.9% vs 35.7%) *and* costs 16× less.
+
+These numbers are lower than the ones this table carried before, and the reason is worth stating: the baseline used to pick its search terms through a Python `set`, whose iteration order depends on `PYTHONHASHSEED`. Every run drew a different twelve tokens, and the figure published was one sample from a distribution. The harvest also ran `git log` with rename detection against a shallow clone, where the answer depends on which blobs happen to be local — so the ground truth itself moved. Both are fixed; three consecutive runs now agree on every row.
 
 Git co-change edges close part of the gap — files a fix touches but never names. They earned it the hard way: mixed into the normal ranking they made recall *worse*, because they arrive at the second hop with lower confidence than any AST edge and never survived the cut while still displacing better candidates. Given a reserved fifth of the budget instead, n=100 went from 45.1% to 50.0% at fewer tokens.
 
@@ -70,6 +72,26 @@ Differential verification against CodeGraph as an oracle (`bench/verify.py`) —
 excalidraw's gap is 803 function-local variables, which we skip deliberately — we record named values at module and class scope, where they are API surface, not locals inside function bodies. The real extraction gap is ~1%.
 
 This is agreement, not truth. But it caught a real bug immediately: the first run showed 64.6% recall because Python has no distinct node kind for a method, so all 25,604 of django's were labelled `function`. A speed number published before this ran would have meant nothing.
+
+### Edges — does confidence predict correctness?
+
+Nodes being right does not make edges right, and 83.5% of django's call edges are name matches: a name found somewhere in the repo, with no scope or import behind it. arbor claims that ranking by confidence is what buys the token saving. That had never been tested.
+
+`bench/edgetrace.py` runs flask's own test suite under `sys.monitoring` and records every call that actually happened. An observed edge exists — no argument.
+
+| confidence | provenance | runtime-confirmed | 95% interval |
+|---:|---|---:|---|
+| 100 | scope | **60.0%** | 53.3 – 66.4 |
+| 95 | import | **94.3%** | 81.4 – 98.4 |
+| 80 | name | 36.8% | 33.6 – 40.1 |
+| 60 | name | 20.3% | 17.6 – 23.2 |
+| 45 | name | 5.2% | 2.7 – 9.9 |
+
+Cochran-Armitage trend `z=+15.1`, `p=8.6e-52`. CodeGraph agreement, an entirely independent labeller, orders them the same way.
+
+The first run of this said something else. On library-internal edges the *proven* tier scored 51.9% against the guess's 54.5% — confidence 100 was losing. Four defects came out of that: a dotted base class recorded its module as a superclass (47.4% of django's `extends` edges), the name index had no language partition (14,533 edges crossing one), the builtin filter was unreachable whenever a repo defined the name anywhere (2,878 Python `len()` calls landing in a minified JS bundle), and the receiver was discarded before resolution, so `super().x()` inside `x` resolved to itself. django's graph lost 39,919 edges and kept every measured property.
+
+Neither labeller measures precision — `bench/edgefacts.py` bounds it from below without an oracle, and a rule that does not fire is not a correct edge.
 
 ### Resolution
 
@@ -169,7 +191,7 @@ Being explicit, because the gap is large:
 
 - **Two languages.** CodeGraph has 30+, with 17 web frameworks and Swift↔ObjC / React Native bridging. Breadth is cheap at the extraction tier (~1 hour per language via declarative specs) and expensive at the import/scope tier (2–10 days). Neither has been spent yet.
 - **Sync is ~164 ms, not the 50 ms the design targets.** Stable node ids are in place — the prerequisite for a delta overlay — but resolve and persist still rewrite the whole graph. Profiling corrected the design's premise along the way: the sequential barrier it was built to avoid turned out to be 4 ms, and the real cost is rewriting a 7 MB graph and a 25 MB cache for a one-line change.
-- **Edges are unverified.** Node-level verification runs (95% presence recall above), but we do not yet check that individual *edges* point where they should. That is the next gate.
+- **Edge precision is bounded, not measured.** Edges are now verified two ways — against what flask's test suite actually executes, and against rules that falsify them without an oracle — and confidence demonstrably orders correctness. But a floor on the error rate is not the error rate, and recall against execution is measured on one repository in one language.
 - **Recall tops out near 51%.** Brute-force keyword search reaches 61% if you let it read 423k tokens. Closing that gap needs better retrieval signals, not a bigger budget.
 - **Cost measured on one repo.** 40 bug-fix commits in django. Directionally strong, not yet a general claim.
 - **Fix mode does not run the tests.** The graph can tell you which tests import a changed file; running them safely needs a sandbox that is not built. Every pull request it opens says so.

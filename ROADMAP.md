@@ -43,8 +43,8 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 5d · Egress policy | ✅ **Done.** SSRF closed on clone URLs; optional host allowlist |
 | 6 · Breadth | ⬜ |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |
-| — · Edge verification | ⬜ **gating** — nodes verified, edges not |
-| — · Cost benchmark | ✅ **Done.** 13.7x fewer tokens at matched recall |
+| — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, p=8.6e-52 |
+| — · Cost benchmark | ✅ **Done, and now reproducible.** 26x fewer tokens at matched recall |
 
 **Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:
 
