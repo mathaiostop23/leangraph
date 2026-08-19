@@ -35,15 +35,17 @@ This gap is structural rather than tuning. Loading is not deserialization: `Grap
 
 | approach | recall | tokens/query | tokens per recall point |
 |---|---:|---:|---:|
-| arbor n=25 | 31.7% | 2,546 | **80** |
-| **arbor n=100** | **45.1%** | **10,140** | 225 |
-| arbor n=200 | 51.2% | 17,843 | 348 |
-| keyword top-5 | 41.5% | 144,652 | 3,489 |
-| keyword top-10 | 51.2% | 244,223 | 4,768 |
+| arbor n=25 | 30.5% | 2,500 | **82** |
+| **arbor n=100** | **50.0%** | **9,479** | 190 |
+| arbor n=200 | 52.4% | 17,520 | 334 |
+| keyword top-5 | 40.2% | 146,296 | 3,635 |
+| keyword top-10 | 52.4% | 261,812 | 4,993 |
 
-**At matched recall, 13.7× fewer tokens.** At n=100, arbor beats keyword top-5 on recall *and* costs 14× less.
+**At matched recall, 14.9× fewer tokens.** At n=100, arbor beats keyword top-5 on recall (50.0% vs 40.2%) *and* costs 15× less.
 
-Keyword search does reach 61% by brute force at 423k tokens; arbor tops out near 51%. The files it cannot reach are tests, docs and migrations touched by a fix but never named in its message — that is retrieval work (git co-change edges are the obvious next signal), not budget work.
+Git co-change edges close part of the gap — files a fix touches but never names. They earned it the hard way: mixed into the normal ranking they made recall *worse*, because they arrive at the second hop with lower confidence than any AST edge and never survived the cut while still displacing better candidates. Given a reserved fifth of the budget instead, n=100 went from 45.1% to 50.0% at fewer tokens.
+
+Keyword search still reaches 63% by brute force at 409k tokens; arbor tops out near 52%. Raising that is retrieval work, not budget work.
 
 ### Correctness
 

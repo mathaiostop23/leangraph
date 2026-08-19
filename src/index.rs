@@ -2,6 +2,7 @@
 
 use crate::core::{FileUnit, Interner};
 use crate::extract::{extract_file, Timings};
+use crate::cochange;
 use crate::graph;
 use crate::lang::{spec_for, Lang, Spec, ALL_LANGS};
 use crate::resolve;
@@ -22,6 +23,7 @@ pub struct Config {
     pub by_lang: bool,
     pub top: Option<usize>,
     pub no_resolve: bool,
+    pub no_cochange: bool,
     pub out: Option<PathBuf>,
     pub dry_run: bool,
 }
@@ -147,9 +149,36 @@ pub fn run(cfg: &Config) -> Result<()> {
 
     // ---- resolve -----------------------------------------------------------
     let t2 = Instant::now();
-    let resolved = (!cfg.no_resolve)
+    let mut resolved = (!cfg.no_resolve)
         .then(|| resolve::resolve(&units, &paths, &langs, &root, &interner));
     let d_resolve = t2.elapsed();
+
+    // ---- co-change ---------------------------------------------------------
+    // Correlation from git history, tagged as such. This is the signal the cost
+    // benchmark identified as the recall ceiling: files a fix touches but never
+    // names.
+    let mut cochange_stats = cochange::Stats::default();
+    if let Some(r) = resolved.as_mut() {
+        if !cfg.no_cochange {
+            let by_path: rustc_hash::FxHashMap<String, u32> = paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    (
+                        p.strip_prefix(&root)
+                            .unwrap_or(p)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        i as u32,
+                    )
+                })
+                .collect();
+            let (extra, st) =
+                cochange::edges(&root, &by_path, &r.space, &cochange::Opts::default());
+            cochange_stats = st;
+            r.edges.extend(extra);
+        }
+    }
 
     // ---- persist -----------------------------------------------------------
     let t3 = Instant::now();
@@ -237,6 +266,13 @@ pub fn run(cfg: &Config) -> Result<()> {
                 100.0 * n as f64 / tot
             );
         }
+    }
+
+    if cochange_stats.edges > 0 {
+        println!(
+            "  co-change        {} edges from {} of {} commits",
+            cochange_stats.edges, cochange_stats.commits_used, cochange_stats.commits_scanned
+        );
     }
 
     println!("\n  \x1b[1mwall clock\x1b[0m");

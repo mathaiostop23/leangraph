@@ -40,6 +40,8 @@ pub enum Why {
     OnPath,
     Caller,
     Callee,
+    /// Reached through git co-change rather than through the AST.
+    CoChange,
 }
 
 impl Why {
@@ -49,6 +51,7 @@ impl Why {
             Why::OnPath => "on-path",
             Why::Caller => "caller",
             Why::Callee => "callee",
+            Why::CoChange => "co-change",
         }
     }
     /// Base weight. A node on the flow between two named symbols is the answer
@@ -59,6 +62,7 @@ impl Why {
             Why::OnPath => 0.9,
             Why::Caller => 0.6,
             Why::Callee => 0.5,
+            Why::CoChange => 0.4,
         }
     }
 }
@@ -301,7 +305,12 @@ fn build_from(g: &Graph, seed_nodes: Vec<NodeId>, budget: &Budget) -> Context {
         for &s in &frontier {
             for (why, nbs) in [(Why::Caller, g.callers(s)), (Why::Callee, g.callees(s))] {
                 for nb in nbs {
-                    let w = why.weight() * (nb.conf as f32 / 100.0) * decay;
+                    // provenance 3 is CoChange; it is scored on its own scale
+                    let (why, w) = if nb.prov == 3 {
+                        (Why::CoChange, Why::CoChange.weight() * (nb.conf as f32 / 100.0))
+                    } else {
+                        (why, why.weight() * (nb.conf as f32 / 100.0) * decay)
+                    };
                     let e = scored.entry(nb.node).or_insert((why, 0.0));
                     if e.1 < w {
                         *e = (why, w);
@@ -338,17 +347,32 @@ fn build_from(g: &Graph, seed_nodes: Vec<NodeId>, budget: &Budget) -> Context {
 
     // Cut to budget. Seeds are never dropped: returning context that omits what
     // was asked for is the failure mode that sends an agent back to grep.
+    //
+    // Co-change gets a reserved slice rather than competing on the same scale.
+    // It is a different *kind* of evidence, not a weaker version of the same
+    // one — mixed into one ranking it always loses to structural edges, and
+    // measurement confirmed it: it never survived the cut and net recall went
+    // down. Historical coupling is exactly what the AST cannot see, so it earns
+    // its own quota.
+    let quota = budget.max_nodes / 5;
     let total = items.len();
     let mut kept: Vec<Item> = Vec::new();
     let mut bytes = 0usize;
+    let mut co_used = 0usize;
+
     for it in items {
         let is_seed = it.why == Why::Seed;
-        if !is_seed
-            && (kept.len() >= budget.max_nodes || bytes + it.bytes as usize > budget.max_bytes)
-        {
+        let is_co = it.why == Why::CoChange;
+        let room = if is_co {
+            co_used < quota && kept.len() < budget.max_nodes + quota
+        } else {
+            kept.len() - co_used < budget.max_nodes
+        };
+        if !is_seed && (!room || bytes + it.bytes as usize > budget.max_bytes) {
             continue;
         }
         bytes += it.bytes as usize;
+        co_used += usize::from(is_co);
         kept.push(it);
     }
 

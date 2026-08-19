@@ -21,33 +21,43 @@ agent without a structural index actually does.
 
 | approach | recall | tokens/query | tokens per recall point |
 |---|---:|---:|---:|
-| arbor n=10 | 19.5% | 1,295 | **66** |
-| arbor n=25 | 31.7% | 2,546 | **80** |
-| arbor n=50 | 34.1% | 3,896 | **114** |
-| **arbor n=100** | **45.1%** | **10,140** | 225 |
-| arbor n=200 | 51.2% | 17,843 | 348 |
-| keyword top-3 | 25.6% | 98,696 | 3,854 |
-| keyword top-5 | 41.5% | 144,652 | 3,489 |
-| keyword top-10 | 51.2% | 244,223 | 4,768 |
-| keyword top-20 | 61.0% | 422,832 | 6,934 |
+| arbor n=10 | 19.5% | 1,219 | **62** |
+| arbor n=25 | 30.5% | 2,500 | **82** |
+| arbor n=50 | 34.1% | 3,948 | **116** |
+| **arbor n=100** | **50.0%** | **9,479** | 190 |
+| arbor n=200 | 52.4% | 17,520 | 334 |
+| keyword top-3 | 28.0% | 87,703 | 3,127 |
+| keyword top-5 | 40.2% | 146,296 | 3,635 |
+| keyword top-10 | 52.4% | 261,812 | 4,993 |
+| keyword top-20 | 63.4% | 409,488 | 6,457 |
 
 Two readings, both fair:
 
-- **At matched recall (51.2%): 17,843 tokens against 244,223 — 13.7x fewer.**
-- **arbor at n=100 beats keyword top-5 on recall (45.1% vs 41.5%) while costing
-  14x less.**
+- **At matched recall (52.4%): 17,520 tokens against 261,812 — 14.9x fewer.**
+- **arbor at n=100 beats keyword top-5 on recall (50.0% vs 40.2%) while costing
+  15x less.**
 
-The efficiency column is the durable number: a recall point costs arbor 66–348
-tokens and keyword search 3,489–6,934. That gap is the product.
+The efficiency column is the durable number: a recall point costs arbor 62–334
+tokens and keyword search 3,127–6,457. That gap is the product.
+
+### Co-change: a negative result, then a positive one
+
+Git co-change edges were added to attack exactly this ceiling — the ground-truth
+files a fix touches but never names. Mixed into the normal ranking they made
+recall *worse* (45.1% → 43.9% at n=100): they arrive at the second hop with
+decay applied and confidence below any AST-derived edge, so they never survived
+the budget cut while still displacing better candidates.
+
+The fix was to stop treating them as weaker evidence of the same kind. They are
+a *different* kind — historical coupling is precisely what the AST cannot see —
+so they get a reserved fifth of the budget instead of competing on one scale.
+That took n=100 from 45.1% to **50.0% at fewer tokens** (9,479 vs 10,140).
 
 ### Where it stops
 
-Keyword search reaches 61% by brute force at 423k tokens; arbor tops out near
-51%. The remaining ground-truth files are ones no seed reaches — tests, docs and
-migrations touched by a fix but not named in its message. Raising that ceiling
-is retrieval work (co-change edges from git history are the obvious next
-signal), not budget work: arbor at n=200 already leaves most of its budget
-unspent on those queries.
+Keyword search reaches 63% by brute force at 409k tokens; arbor tops out near
+52%. Raising that is retrieval work, not budget work — arbor at n=200 already
+leaves most of its budget unspent on the queries it fails.
 
 ### What this measurement changed
 
