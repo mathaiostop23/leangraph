@@ -121,9 +121,14 @@ fn check_public(host: &str) -> Result<()> {
     // private answer is exactly how this check gets bypassed.
     for ip in &addrs {
         if !is_public(*ip) {
-            bail!(
-                "{host} resolves to {ip}, which is not a public address; set ARBOR_ALLOWED_HOSTS to permit an internal host deliberately"
-            );
+            // Reads badly as "1.2.3.4 resolves to 1.2.3.4" when the host was
+            // already an address, which is the commonest way this is probed.
+            let what = if host == ip.to_string() {
+                format!("{host} is not a public address")
+            } else {
+                format!("{host} resolves to {ip}, which is not a public address")
+            };
+            bail!("{what}; set ARBOR_ALLOWED_HOSTS to permit an internal host deliberately");
         }
     }
     Ok(())
