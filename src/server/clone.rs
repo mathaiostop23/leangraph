@@ -46,16 +46,12 @@ pub fn check_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-fn token() -> Option<String> {
-    std::env::var("ARBOR_GITHUB_TOKEN").ok().filter(|t| !t.is_empty())
-}
-
-fn run(dir: Option<&Path>, args: &[&str]) -> Result<String> {
+fn run(dir: Option<&Path>, token: Option<&str>, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("git");
     // Never prompt: a hung credential prompt inside a worker is a job that
     // never finishes and a queue that never drains.
     cmd.env("GIT_TERMINAL_PROMPT", "0");
-    if let Some(t) = token() {
+    if let Some(t) = token {
         cmd.arg("-c")
             .arg(format!("http.extraHeader=Authorization: Bearer {t}"));
     }
@@ -68,8 +64,8 @@ fn run(dir: Option<&Path>, args: &[&str]) -> Result<String> {
         // The token cannot appear here — it is in a `-c` argument, not the
         // output — but scrub anyway rather than rely on that staying true.
         let err = String::from_utf8_lossy(&out.stderr);
-        let err = match token() {
-            Some(t) => err.replace(&t, "***"),
+        let err = match token {
+            Some(t) => err.replace(t, "***"),
             None => err.into_owned(),
         };
         bail!("git {}: {}", args.first().unwrap_or(&""), err.trim());
@@ -81,7 +77,12 @@ fn run(dir: Option<&Path>, args: &[&str]) -> Result<String> {
 ///
 /// Returns the HEAD before and after, so a sync can diff two trees instead of
 /// walking — the cheap path measured in BENCH.md.
-pub fn fetch(dir: &Path, url: &str, branch: &str) -> Result<(Option<String>, String)> {
+pub fn fetch(
+    dir: &Path,
+    url: &str,
+    branch: &str,
+    token: Option<&str>,
+) -> Result<(Option<String>, String)> {
     check_url(url)?;
 
     if !dir.join(".git").is_dir() {
@@ -93,6 +94,7 @@ pub fn fetch(dir: &Path, url: &str, branch: &str) -> Result<(Option<String>, Str
         // fetches file contents lazily.
         run(
             None,
+            token,
             &[
                 "clone",
                 "--filter=blob:none",
@@ -107,31 +109,32 @@ pub fn fetch(dir: &Path, url: &str, branch: &str) -> Result<(Option<String>, Str
         // on a 677-commit repo: the first index took 6.8s where every later one
         // took 44ms. Doing it here moves that cost into the clone, where a user
         // expects to wait, instead of into the first answer, where they do not.
-        warm_history(dir);
-        let head = head(dir).context("cloned repository has no HEAD")?;
+        warm_history(dir, token);
+        let head = head(dir, token).context("cloned repository has no HEAD")?;
         return Ok((None, head));
     }
 
-    let before = head(dir);
-    run(Some(dir), &["fetch", "--prune", "origin", branch])?;
+    let before = head(dir, token);
+    run(Some(dir), token, &["fetch", "--prune", "origin", branch])?;
     // Reset rather than merge: this is a mirror of the remote, and a merge
     // conflict in a directory nobody edits is a job that fails forever.
-    run(Some(dir), &["reset", "--hard", &format!("origin/{branch}")])?;
-    let after = head(dir).context("repository has no HEAD after fetch")?;
+    run(Some(dir), token, &["reset", "--hard", &format!("origin/{branch}")])?;
+    let after = head(dir, token).context("repository has no HEAD after fetch")?;
     Ok((before, after))
 }
 
 /// Force any lazy object fetches a partial clone deferred. Best effort: a
 /// failure here costs latency later, not correctness.
-fn warm_history(dir: &Path) {
+fn warm_history(dir: &Path, token: Option<&str>) {
     let _ = run(
         Some(dir),
+        token,
         &["log", "--no-merges", "-n", "3000", "--name-only", "--format=%H"],
     );
 }
 
-pub fn head(dir: &Path) -> Option<String> {
-    run(Some(dir), &["rev-parse", "HEAD"])
+pub fn head(dir: &Path, token: Option<&str>) -> Option<String> {
+    run(Some(dir), token, &["rev-parse", "HEAD"])
         .ok()
         .map(|s| s.trim().to_string())
 }

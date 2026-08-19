@@ -167,6 +167,12 @@ enum Cmd {
         #[arg(long, default_value = "arbor")]
         trigger_label: String,
     },
+    /// Probe a running server. Exits non-zero when it is not serving, so it
+    /// works as a container healthcheck.
+    Health {
+        #[arg(long, default_value = "127.0.0.1:7777")]
+        addr: String,
+    },
     /// Graph statistics and load time
     Status {
         #[arg(default_value = ".")]
@@ -499,6 +505,26 @@ fn main() -> Result<()> {
                     .filter(|s| !s.is_empty()),
                 trigger_label,
             }))
+        }
+
+        Cmd::Health { addr } => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async move {
+                let url = format!("http://{addr}/health");
+                let res = reqwest::Client::new()
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .send()
+                    .await
+                    .with_context(|| format!("connecting to {url}"))?;
+                if !res.status().is_success() {
+                    bail!("{url} returned {}", res.status());
+                }
+                println!("{}", res.text().await.unwrap_or_default());
+                Ok(())
+            })
         }
 
         Cmd::Status { path } => {

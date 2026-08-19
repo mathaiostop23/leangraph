@@ -469,6 +469,48 @@ impl Db {
     }
 }
 
+// -------------------------------------------------------------------- secrets
+
+impl Db {
+    pub fn put_secret(&self, name: &str, nonce: &[u8], ct: &[u8], hint: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO secrets (name, nonce, ciphertext, hint, created_at)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(name) DO UPDATE SET
+                   nonce = ?2, ciphertext = ?3, hint = ?4, created_at = ?5",
+                params![name, nonce, ct, hint, now()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn get_secret(&self, name: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT nonce, ciphertext FROM secrets WHERE name = ?1",
+                params![name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+        })
+    }
+
+    /// Names and hints only. The API must never be able to return a secret it
+    /// was given, or storing it encrypted buys nothing.
+    pub fn secret_hints(&self) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT name, COALESCE(hint,'') FROM secrets ORDER BY name")?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    pub fn delete_secret(&self, name: &str) -> Result<bool> {
+        self.with(|c| Ok(c.execute("DELETE FROM secrets WHERE name = ?1", params![name])? > 0))
+    }
+}
+
 // ---------------------------------------------------------------- deliveries
 
 impl Db {

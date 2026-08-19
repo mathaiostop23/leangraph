@@ -75,11 +75,8 @@ pub struct Client {
 impl Client {
     /// `None` when no key is configured — the worker then skips the issue with
     /// a log line rather than failing the job forever.
-    pub fn from_env() -> Option<Client> {
-        let key = std::env::var("ARBOR_ANTHROPIC_KEY")
-            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-            .ok()
-            .filter(|k| !k.is_empty())?;
+    pub fn new(key: Option<String>) -> Option<Client> {
+        let key = key.filter(|k| !k.is_empty())?;
         Some(Client {
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(180))

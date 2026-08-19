@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod clone;
+pub mod crypto;
 pub mod db;
 pub mod webhook;
 
@@ -46,6 +47,7 @@ pub struct Config {
 pub struct App {
     pub db: Db,
     pub cfg: Arc<Config>,
+    pub vault: Arc<crypto::Vault>,
 }
 
 impl App {
@@ -57,6 +59,21 @@ impl App {
     /// whole install.
     pub fn trigger_label(&self, _repo: &db::Repo) -> String {
         self.cfg.trigger_label.clone()
+    }
+
+    /// Stored secret first, environment second.
+    ///
+    /// The database wins so an operator can rotate a key through the API
+    /// without restarting; the environment remains the way to bootstrap, and
+    /// the way to run without persisting a secret at all.
+    pub fn secret(&self, name: &str) -> Option<String> {
+        if let Ok(Some((nonce, ct))) = self.db.get_secret(name) {
+            match self.vault.open_sealed(&nonce, &ct) {
+                Ok(v) => return Some(v),
+                Err(e) => tracing_line("warn", &format!("secret `{name}`: {e}")),
+            }
+        }
+        std::env::var(env_name(name)).ok().filter(|v| !v.is_empty())
     }
 
     pub fn repo(&self, id: i64) -> anyhow::Result<db::Repo> {
@@ -71,9 +88,12 @@ impl App {
 pub async fn run(cfg: Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.data_dir).ok();
     let db = Db::open(&cfg.db_path)?;
+    let vault = crypto::Vault::open(&cfg.data_dir)?;
+    let key_on_disk = vault.key_on_disk;
     let app = App {
         db,
         cfg: Arc::new(cfg),
+        vault: Arc::new(vault),
     };
 
     for i in 0..app.cfg.workers {
@@ -87,6 +107,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         .route("/repos/{name}", get(get_repo))
         .route("/repos/{name}/sync", post(sync_repo))
         .route("/webhook/github", post(webhook::github))
+        .route("/secrets", get(list_secrets))
+        .route("/secrets/{name}", post(put_secret).delete(delete_secret))
         .with_state(app.clone());
 
     let listener = tokio::net::TcpListener::bind(app.cfg.addr)
@@ -105,6 +127,13 @@ pub async fn run(cfg: Config) -> Result<()> {
         },
         app.cfg.trigger_label
     );
+    if key_on_disk {
+        tracing_line(
+            "warn",
+            "master key is stored beside the database — anyone who can read one can \
+usually read the other. Set ARBOR_MASTER_KEY to keep it out of the volume.",
+        );
+    }
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown())
@@ -223,6 +252,54 @@ async fn add_repo(
     ))
 }
 
+/// Names and hints only. An endpoint that can return a secret it was given
+/// makes encrypting it pointless.
+async fn list_secrets(State(app): State<App>) -> ApiResult<Json<serde_json::Value>> {
+    let items: Vec<_> = app
+        .db
+        .secret_hints()?
+        .into_iter()
+        .map(|(name, hint)| json!({ "name": name, "hint": hint }))
+        .collect();
+    Ok(Json(json!({ "secrets": items })))
+}
+
+#[derive(Deserialize)]
+struct PutSecret {
+    value: String,
+}
+
+async fn put_secret(
+    State(app): State<App>,
+    AxPath(name): AxPath<String>,
+    Json(req): Json<PutSecret>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "name must be lowercase letters, digits and underscores".into(),
+        ));
+    }
+    if req.value.trim().is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "value is empty".into()));
+    }
+    let (nonce, ct) = app.vault.seal(&req.value)?;
+    let hint = crypto::hint(&req.value);
+    app.db.put_secret(&name, &nonce, &ct, &hint)?;
+    tracing_line("info", &format!("secret `{name}` stored ({hint})"));
+    Ok(Json(json!({ "stored": name, "hint": hint })))
+}
+
+async fn delete_secret(
+    State(app): State<App>,
+    AxPath(name): AxPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({ "deleted": app.db.delete_secret(&name)? })))
+}
+
 async fn get_repo(
     State(app): State<App>,
     AxPath(name): AxPath<String>,
@@ -300,7 +377,10 @@ async fn clone_repo(app: &App, repo_id: i64) -> Result<()> {
     app.db.set_repo_state(repo_id, "cloning", None)?;
     let existed = dir.join(".git").is_dir();
     let t = Instant::now();
-    let res = tokio::task::spawn_blocking(move || clone::fetch(&dir, &url, &branch)).await?;
+    let token = app.secret("github_token");
+    let res =
+        tokio::task::spawn_blocking(move || clone::fetch(&dir, &url, &branch, token.as_deref()))
+            .await?;
     let ms = t.elapsed().as_millis();
 
     match res {
@@ -403,7 +483,7 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
     let run_id = app.db.start_run(issue.id, repo.id)?;
     let started = Instant::now();
 
-    let Some(client) = agent::Client::from_env() else {
+    let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
         app.db.finish_run(run_id, "skipped", Some("no api key"), "", 0, 0.0,
             started.elapsed().as_millis() as i64, None)?;
         tracing_line("warn", "no ARBOR_ANTHROPIC_KEY — issue skipped");
@@ -450,7 +530,13 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
 
     comment.push_str(&agent::receipt(nodes, tokens, cached, cost));
 
-    let posted = post_comment(&repo.full_name, issue.number, &comment).await;
+    let posted = post_comment(
+        &repo.full_name,
+        issue.number,
+        &comment,
+        app.secret("github_token").as_deref(),
+    )
+    .await;
     let status = match &posted {
         Ok(true) => "posted",
         Ok(false) => "dry-run",
@@ -539,13 +625,15 @@ fn build_context(repo_path: &std::path::Path, text: &str) -> Result<Built> {
 
 /// Returns false when no token is configured — a deliberate dry run rather than
 /// an error, so the whole pipeline can be exercised without write access.
-async fn post_comment(full_name: &str, number: i64, body: &str) -> Result<bool> {
-    let Ok(token) = std::env::var("ARBOR_GITHUB_TOKEN") else {
+async fn post_comment(
+    full_name: &str,
+    number: i64,
+    body: &str,
+    token: Option<&str>,
+) -> Result<bool> {
+    let Some(token) = token.filter(|t| !t.is_empty()) else {
         return Ok(false);
     };
-    if token.is_empty() {
-        return Ok(false);
-    }
     let url = format!("https://api.github.com/repos/{full_name}/issues/{number}/comments");
     let res = reqwest::Client::new()
         .post(&url)
@@ -574,6 +662,11 @@ fn git_head(root: &std::path::Path) -> Option<String> {
 
 /// Deliberately minimal: one line, one level, no key-value ceremony. A
 /// self-hosted binary's log is read by a person tailing it, not by a pipeline.
+/// `anthropic_key` -> `ARBOR_ANTHROPIC_KEY`.
+fn env_name(name: &str) -> String {
+    format!("ARBOR_{}", name.to_ascii_uppercase())
+}
+
 pub fn tracing_line(level: &str, msg: &str) {
     let colour = match level {
         "error" => "\x1b[31m",
