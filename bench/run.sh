@@ -59,7 +59,10 @@ for r in "${TARGETS[@]}"; do
     git clone --depth 1 --quiet "$url" "$path"
   fi
 
-  a=$(median_wall "$RUNS" "$ARBOR index '$path'")
+  # Quoted: `median_wall` hands the string to `bash -c`, so an unquoted path
+  # word-splits. A checkout under "Coding Projects" made every row divide by a
+  # blank timing and awk reported "division by zero" with no other clue.
+  a=$(median_wall "$RUNS" "'$ARBOR' index '$path'")
   out=$("$ARBOR" index "$path" 2>/dev/null | strip_ansi)
   files=$(awk '/^  files/{print $2}' <<<"$out")
   a_nodes=$(awk '/^  graph/{print $2}' <<<"$out")
@@ -73,6 +76,10 @@ for r in "${TARGETS[@]}"; do
   c_nodes=$(awk '/nodes,/{for(i=1;i<=NF;i++) if($(i+1)=="nodes,") print $i}' <<<"$cg_out" | head -1)
   c_edges=$(awk '/edges/{for(i=1;i<=NF;i++) if($(i+1)=="edges") print $i}' <<<"$cg_out" | head -1)
 
+  if [[ -z "${a:-}" || "$a" == "0" ]]; then
+    echo "  $r: arbor produced no timing — is the binary runnable at '$ARBOR'?" >&2
+    continue
+  fi
   awk -v r="$r" -v f="$files" -v a="$a" -v an="$a_nodes" -v ae="$a_edges" -v ar="$a_res" \
       -v c="$c" -v cn="$c_nodes" -v ce="$c_edges" 'BEGIN{
     printf "%-12s %7s %7.0f ms %9s %7.2f s %9s %7.0fx\n", r, f, a*1000, an, c, cn, c/a
