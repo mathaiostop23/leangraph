@@ -52,10 +52,14 @@ jobs:
       # its own corpus. Small, always present, and exercises the whole pipeline.
       - name: index itself
         run: |
-          ./target/release/leangraph index . > /tmp/out.txt
-          cat /tmp/out.txt
-          grep -qE 'graph +[0-9]{3,}' /tmp/out.txt || {
-            echo "::error::indexing this repository produced a trivial graph"; exit 1; }
+          # The output is coloured, so the escape codes sit between the label
+          # and the number. Strip them before asserting, or the check passes
+          # only by accident on a terminal that has none.
+          ./target/release/leangraph index . 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tee /tmp/out.txt
+          nodes=$(grep -oE 'graph +[0-9]+ nodes' /tmp/out.txt | grep -oE '[0-9]+')
+          echo "nodes: ${nodes:-none}"
+          [ "${nodes:-0}" -gt 300 ] || {
+            echo "::error::indexing this repository produced ${nodes:-no} nodes"; exit 1; }
 
       # The invariant that makes incremental sync safe to trust: a sync must
       # produce a graph semantically identical to a full reindex. It found that

@@ -364,6 +364,48 @@ fn module_keys(root: &Path, path: &Path, lang: Lang) -> Vec<String> {
         .collect()
 }
 
+/// Every `package.json` in the tree, as `(declared name, its directory)`.
+///
+/// A monorepo addresses its own packages by name, and the name lives in a file
+/// the indexer otherwise has no reason to read. Only directories that actually
+/// contain indexed source are considered, so a stray manifest under
+/// `node_modules` — already excluded from the walk — cannot introduce a mapping.
+fn workspace_packages(root: &Path, paths: &[PathBuf]) -> Vec<(String, PathBuf, Vec<String>)> {
+    let mut seen: FxHashSet<PathBuf> = FxHashSet::default();
+    let mut out = Vec::new();
+    for d in paths.iter().filter_map(|p| p.parent()) {
+        let mut cur = Some(d);
+        // Walk up, so `packages/core/src/x.ts` also considers `packages/core`.
+        while let Some(dir) = cur {
+            if !dir.starts_with(root) || !seen.insert(dir.to_path_buf()) {
+                break;
+            }
+            if let Ok(text) = std::fs::read_to_string(dir.join("package.json")) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                        // Where a bare `import "@acme/core"` lands: what the
+                        // manifest declares, plus the conventional entries for
+                        // the common case where it declares nothing.
+                        let mut entries: Vec<String> = ["main", "module", "types"]
+                            .iter()
+                            .filter_map(|k| v.get(*k).and_then(|m| m.as_str()))
+                            .map(|m| m.trim_start_matches("./").to_string())
+                            .collect();
+                        entries.extend(
+                            ["index", "src/index", "lib/index"]
+                                .iter()
+                                .map(|x| (*x).to_string()),
+                        );
+                        out.push((name.to_string(), dir.to_path_buf(), entries));
+                    }
+                }
+            }
+            cur = dir.parent();
+        }
+    }
+    out
+}
+
 /// Resolve one import statement to a file.
 ///
 /// Relative TypeScript specifiers are normalised against the importing file's
@@ -503,6 +545,43 @@ pub fn resolve(
         for key in module_keys(root, &paths[f], langs[f]) {
             // longest key wins; shorter suffixes only fill gaps
             by_module.entry(key).or_insert(fid);
+        }
+    }
+
+    // Workspace package names. In a monorepo, `import { x } from "@acme/core"`
+    // names a directory of this same repository, and nothing in the path
+    // suffixes above says so — the import resolved to nothing and the call fell
+    // through to a name match at confidence 80, alongside every other function
+    // in the tree with that name.
+    for (name, dir, entries) in workspace_packages(root, paths) {
+        for (f, path) in paths.iter().enumerate() {
+            let Ok(rel) = path.strip_prefix(&dir) else {
+                continue;
+            };
+            let mut sub = rel.to_string_lossy().replace('\\', "/");
+            if let Some(dot) = sub.rfind('.') {
+                sub.truncate(dot);
+            }
+            // The bare package name lands on whatever the manifest points at,
+            // or on a conventional entry when it points at nothing.
+            if entries.iter().any(|e| {
+                let e = e
+                    .trim_end_matches(".ts")
+                    .trim_end_matches(".js")
+                    .trim_end_matches(".tsx");
+                e == sub
+            }) {
+                by_module.entry(name.clone()).or_insert(f as FileId);
+            }
+            // And every file under it, addressed as a subpath.
+            by_module
+                .entry(format!("{name}/{sub}"))
+                .or_insert(f as FileId);
+            if let Some(stripped) = sub.strip_suffix("/index") {
+                by_module
+                    .entry(format!("{name}/{stripped}"))
+                    .or_insert(f as FileId);
+            }
         }
     }
 
