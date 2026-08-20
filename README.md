@@ -12,10 +12,13 @@ agent reads them all, and you pay for the ones that were irrelevant. On django
 that is the difference between **9,444 tokens and 158,685** for a better answer.
 
 ```bash
-cargo build --release
+cargo install --path .               # or: cargo build --release, then ./target/release/leangraph
 leangraph index /path/to/repo        # django, 3,038 files → 0.75 s
 leangraph install                    # wire it into Claude Code, Cursor, Codex
 ```
+
+Needs a Rust toolchain (1.82+) and nothing else — no runtime, no database, no
+services. There are no prebuilt binaries yet.
 
 **Status: early.** Fourteen languages, but only Python and TypeScript are verified against an oracle. The numbers below are measured
 and reproducible — every one of them comes from a script in `bench/` that you

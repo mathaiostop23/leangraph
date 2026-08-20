@@ -697,19 +697,24 @@ pub fn run(cfg: &Config) -> Result<Summary> {
             mb / wall.as_secs_f64()
         );
 
-        println!("\n  \x1b[1mcpu time by stage\x1b[0m (summed over threads)");
+        // A fully cached run parses nothing, so every counter here is zero and
+        // the share is 0/0. Printing `NaN%` four times makes a correct run look
+        // broken, which is worse than saying there was no work to attribute.
         let cpu = (agg.ns_read + agg.ns_hash + agg.ns_parse + agg.ns_walk) as f64;
-        for (label, ns) in [
-            ("mmap", agg.ns_read),
-            ("blake3", agg.ns_hash),
-            ("parse", agg.ns_parse),
-            ("walk+intern", agg.ns_walk),
-        ] {
-            println!(
-                "    {label:<14} {:>8.0} ms  {:>5.1}%",
-                ns as f64 / 1e6,
-                100.0 * ns as f64 / cpu
-            );
+        if cpu > 0.0 {
+            println!("\n  \x1b[1mcpu time by stage\x1b[0m (summed over threads)");
+            for (label, ns) in [
+                ("mmap", agg.ns_read),
+                ("blake3", agg.ns_hash),
+                ("parse", agg.ns_parse),
+                ("walk+intern", agg.ns_walk),
+            ] {
+                println!(
+                    "    {label:<14} {:>8.0} ms  {:>5.1}%",
+                    ns as f64 / 1e6,
+                    100.0 * ns as f64 / cpu
+                );
+            }
         }
 
         if cfg.by_lang {

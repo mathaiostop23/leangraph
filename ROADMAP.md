@@ -94,7 +94,7 @@ Immutable base CSR + in-memory delta overlay, compacted in the background. Git-d
 
 ### 5 · Server — **A ships**
 
-See [SERVER.md](./SERVER.md). Single Rust binary + Postgres, two containers. GitHub App, webhook → queue → context → three-stage model routing → comment with cost receipt.
+See [SERVER.md](./SERVER.md). Shipped as a single Rust binary with SQLite compiled in — one container rather than the two this line planned for, and no Postgres. Webhook → queue → context → model routing → comment with cost receipt.
 
 **Guardrails ship with the server, not after it** — prompt injection defence, author/label gating, egress allowlist, encrypted keys. They belong to this phase and cannot be deferred past it.
 

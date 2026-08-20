@@ -1,366 +1,296 @@
 # leangraph server — self-hosted issue agent
 
-Webhook → issue → graph context → agent → comment. Self-hosted, bring-your-own API key.
+Webhook → issue → graph context → agent → comment. Self-hosted, bring-your-own
+API key.
 
-This document covers the **server product**. The engine it runs on is [ENGINE.md](./ENGINE.md);
-phasing is [ROADMAP.md](./ROADMAP.md).
+**This document describes what is built.** Where something was designed and not
+built, it says so under [§7](#7-what-is-not-built) rather than being described in
+the present tense — an earlier revision of this file was a plan written before
+the code, and a reader could not tell the two apart. The engine underneath is
+[ENGINE.md](./ENGINE.md); measurements are [BENCH.md](./BENCH.md); what is done
+and what is next is [ROADMAP.md](./ROADMAP.md).
 
-## 0. Engine: our own
-
-An earlier revision of this plan proposed building on `colbymchenry/codegraph` (MIT, 67k stars).
-That evaluation is still useful context and lives in [BENCH.md](./BENCH.md) — we use CodeGraph as
-a differential-testing oracle and benchmark baseline.
-
-We build our own engine instead. Phase 0 measured why: parse+extract is **2–6%** of CodeGraph's
-indexing pipeline, so the headroom is real and sits in resolution and persistence. Owning the
-engine is also what makes the cost axis reachable — ranking by edge confidence to return fewer
-tokens at equal recall is not something you can bolt onto someone else's graph.
+---
 
 ## 1. Architecture
 
+One process. One binary. One file on disk that is a database.
+
 ```
-                    GitHub App / GitLab webhook
-                              │  (HMAC verified, <100ms, returns 202)
-                              ▼
-                    ┌──────────────────┐
-                    │  ingress (Fastify)│
-                    └────────┬─────────┘
-                             ▼
-                    ┌──────────────────┐
-                    │  Redis / BullMQ  │
-                    └───┬──────────┬───┘
-              index queue│          │issue queue
-         (CPU-bound,     │          │(IO-bound, concurrency 20+)
-          concurrency=2) │          │
-                         ▼          ▼
-              ┌──────────────┐  ┌──────────────────────────┐
-              │ IndexWorker  │  │      IssueWorker         │
-              │ git fetch    │  │ 1. ensure graph fresh    │
-              │ leangraph index  │  │ 2. build_context()       │
-              │ leangraph sync   │  │ 3. triage (Haiku)        │
-              └──────┬───────┘  │ 4. solve (Sonnet/Opus)   │
-                     │          │ 5. post comment          │
-                     ▼          └───────────┬──────────────┘
-       ┌─────────────────────────┐          │
-       │ /var/lib/ig/repos/<id>/ │◄─────────┘
-       │   mirror.git  (bare)    │
-       │   worktree/   (checkout)│      ┌──────────────┐
-       │   .codegraph/*.db       │      │  Postgres    │
-       │   [NAMED VOLUME]        │      │ tenants,repos│
-       └─────────────────────────┘      │ issues, runs │
-                                        │ cost_ledger  │
-                                        │ pgvector     │
-                                        └──────────────┘
+                  GitHub webhook  (HMAC over raw bytes, returns 202)
+                          │
+                          ▼
+          ┌───────────────────────────────┐
+          │  axum — one process           │
+          │                               │
+          │  ingress ──► jobs table ◄──┐  │
+          │                  │         │  │
+          │            ┌─────┴─────┐   │  │
+          │            │ N workers │───┘  │   retry / requeue
+          │            └─────┬─────┘      │
+          └──────────────────┼────────────┘
+                             │
+           ┌─────────────────┴──────────────────┐
+           ▼                                    ▼
+ <data>/repos/<owner>/<name>            <data>/leangraph.db
+   the checkout, cloned                   repos, jobs, issues, runs,
+   .leangraph/  the CSR graph             cost_ledger, secrets, deliveries
 ```
+
+There is no Redis, no Postgres, no separate queue service and no second
+container. The queue is a table in the same SQLite file as everything else, and
+the workers are tokio tasks in the same process as the HTTP server. That is a
+deliberate trade: it costs concurrent writers, which a single-process server
+does not have, and it buys an install that is `docker compose up` with one
+volume.
 
 ### Stack
 
 | Layer | Choice | Reason |
 |---|---|---|
-| Runtime | **Rust** everywhere | leangraph links in as a crate: zero IPC, zero FFI, one static binary. Using Node here would reintroduce exactly the boundary cost we beat CodeGraph on. |
-| HTTP | axum + tokio | raw-body access for HMAC verification |
-| Queue | **Postgres** `FOR UPDATE SKIP LOCKED` | drops Redis entirely. At issue-bot volume it is more than adequate, and self-hosted users get two containers instead of four. |
-| App DB | Postgres 16 + pgvector | tenants, repos, runs, cost ledger, issue dedup embeddings |
-| Graph | leangraph CSR (mmap, per repo) | **do not conflate with the app DB** |
-| Git | `simple-git` shelling to real `git` | mirror + worktree; libgit2 bindings add nothing here |
-| LLM | `reqwest` → Anthropic Messages API, BYO key | no official Rust SDK; raw HTTP is the sanctioned path. Provider adapter trait for others later. |
-| Container | multi-stage, `scratch`/`distroless` | static binary, no runtime to ship |
+| Runtime | Rust, one static binary | the engine links in as a module: no IPC, no FFI, no serialization boundary between the graph and the thing using it |
+| HTTP | axum + tokio | raw-body access, which HMAC verification requires |
+| Queue | SQLite table, claimed with `UPDATE … RETURNING` | see below |
+| App DB | SQLite, bundled (`rusqlite`) | compiled into the binary; there is nothing to install |
+| Graph | leangraph CSR, mmap'd, one per repo | **not** the app DB — different file, different format, different lifecycle |
+| Git | shelling to real `git` | libgit2 adds a dependency and a second implementation of behaviour we would have to keep in sync |
+| LLM | `reqwest` → Anthropic Messages API, BYO key | no official Rust SDK; raw HTTP is the sanctioned path |
+| Secrets | AES-256-GCM, key from `LEANGRAPH_MASTER_KEY` | §5 |
 
-### Repo layout on disk
+### On disk
 
 ```
-/var/lib/issuegraph/repos/<repo_uuid>/
-  mirror.git/          # git clone --mirror — cheap fetches, no working tree
-  worktree/            # git worktree — the checkout leangraph indexes
-  .codegraph/          # codegraph.db (WAL), daemon.sock, lock
+<data>/
+  leangraph.db          app database (WAL)
+  master.key            0600, generated on first run if absent
+  admin.token           0600, generated on first run if absent
+  repos/<owner>/<name>/ the checkout, and .leangraph/ inside it
 ```
 
-`clone --mirror` once, then `git fetch` per push. One worktree per repo, checked out at the default branch. Fix-mode gets a **separate ephemeral worktree** so analysis is never blocked by a fix in progress.
+A plain clone, not a mirror plus worktree. Fix mode adds a **throwaway worktree**
+per attempt so a patch is never applied in the checkout the graph was built
+from, and removes it whether the attempt succeeded or failed.
+
+### The queue
+
+Everything asynchronous is a row in `jobs`: cloning, indexing, syncing, and
+answering an issue. Four properties are load-bearing, and each exists because of
+a specific way this goes wrong.
+
+**A worker claims a job atomically.** `UPDATE … WHERE state='queued' … RETURNING`
+in one statement, so two workers cannot take the same row. This is the
+single-writer equivalent of `FOR UPDATE SKIP LOCKED`; nothing else in the design
+depends on SQLite semantics.
+
+**A push burst collapses into one sync.** A partial unique index on
+`dedupe_key WHERE state='queued'` makes a second enqueue of the same key a no-op
+while the first is still waiting. Uniqueness only among queued rows, so the same
+key can be enqueued again once it has run — ten commits in thirty seconds
+produce one sync, and the eleventh commit tomorrow produces another.
+
+**A transient failure comes back; a real one does not.** Retries are decided by
+the error, not by the fact that there was one. `agent::Transient` marks HTTP 429,
+5xx, and a request that never landed — only those requeue, with `run_after` set
+30 s, 2 m, then 8 m out, across four attempts. A malformed request fails once and
+stays failed. Retrying that would burn three more calls to reach the same
+conclusion, and hide a bug behind what looks like flakiness. The base is
+`LEANGRAPH_RETRY_BASE_SECS` because the right first wait depends on the provider,
+and because a test that waits 30 s to prove a retry works is a test nobody runs.
+
+**A killed process does not strand its work.** A job is marked `running` before
+it runs, so a worker that dies mid-job leaves the row there — never claimed again
+because it is not queued, never reported because it has not failed, and shown in
+the dashboard as permanently in progress. Startup requeues them and logs how
+many. This is startup-only, which is correct for one process and *not* correct
+for two: see [§7](#7-what-is-not-built).
+
+### Workers
+
+`--workers N` (default 2) spawns N identical tasks over one queue. The design
+called for three queues at different concurrencies — index CPU-bound, issue
+IO-bound — and that is a real concern at volume, since a twelve-minute monorepo
+index will block an issue behind it. It is not built. At the volume this handles
+today the simpler thing is honest; at higher volume it is the first structural
+change to make.
 
 ---
 
-## 2. Speed engineering (priority #1)
+## 2. HTTP surface
 
-### 2.1 The decision that matters most: index at registration, not at issue time
-
-A cold index of a 10k-file repo is 30–60s. If that happens when the first webhook arrives, every issue pays it and the product feels broken.
-
-```
-repo registered  →  enqueue INDEX job immediately (background)
-                 →  repo state: pending → indexing → ready
-push webhook     →  enqueue SYNC job (~0.3s of work)
-issue webhook    →  graph is already warm; context build is milliseconds
-```
-
-Issues arriving while a repo is `indexing` are **queued**, not failed, and post a "indexing your repo, will respond shortly" comment. Never fail an issue because of cold state.
-
-### 2.2 Git-driven sync — replace the file watcher
-
-A laptop-oriented indexer syncs via FSEvents/inotify. On a server there are no local edits, only remote pushes, so leangraph's sync is git-driven by design — there is no watcher to disable.
-
-```ts
-async function syncRepo(repo: Repo) {
-  await git.cwd(repo.mirrorPath).fetch(['--prune']);
-  const head = await git.revparse([`origin/${repo.defaultBranch}`]);
-  if (head === repo.lastIndexedSha) return;               // no-op
-  await git.cwd(repo.worktreePath).checkout(head, ['--force']);
-  graph.sync(&changed).await?;                            // target <50ms
-  await db.updateRepo(repo.id, { lastIndexedSha: head });
-}
-```
-
-**Debounce**: a push burst (10 commits in 30s) should trigger one sync, not ten. Use BullMQ's `jobId: \`sync:${repo.id}\`` — an existing queued job with the same ID is deduplicated for free.
-
-**Force full reindex** when: branch changed, force-push detected (`git merge-base --is-ancestor` fails), >30% of files changed, or the leangraph index format version bumped.
-
-### 2.3 Warm handle pool
-
-Opening a graph is an `mmap` plus a header check — microseconds — but the delta overlay and interner are in-memory state worth keeping warm. Hold an LRU of open handles.
-
-```rust
-struct GraphPool { lru: Mutex<LruCache<RepoId, Arc<Graph>>> }
-
-impl GraphPool {
-    async fn acquire(&self, repo: RepoId) -> Result<Arc<Graph>> {
-        if let Some(g) = self.lru.lock().get(&repo) { return Ok(g.clone()); }
-        let g = Arc::new(Graph::open(path_for(repo))?);   // mmap + header check
-        self.lru.lock().put(repo, g.clone());
-        Ok(g)
-    }
-}
-```
-
-Bound the pool by RAM, not repo count. Budget ~50–150MB resident per open large graph — **measure in Phase 0**, do not guess.
-
-### 2.4 Queue separation is not optional
-
-A 12-minute index of a monorepo must not block a 3-second issue response.
-
-| Queue | Concurrency | Why |
+| | endpoint | |
 |---|---|---|
-| `index` | `max(1, floor(cores/2))` | CPU-saturating. leangraph already saturates cores with rayon — running 4 indexes at once makes all 4 slower. |
-| `sync` | 4 | short, bursty |
-| `issue` | 20+ | almost entirely waiting on the LLM API |
+| `GET` | `/` | dashboard — repos, runs, cost |
+| `GET` `POST` | `/repos` | list; register (clone + index in the background) |
+| `GET` | `/repos/{owner/name}` | state, counts, index time, last error |
+| `POST` | `/repos/{owner/name}/sync` | fetch and incrementally reindex |
+| `POST` | `/repos/{owner/name}/config` | per-repo settings; `fix_mode` is the only one |
+| `GET` | `/secrets` | names and hints only — never values |
+| `POST` `DELETE` | `/secrets/{name}` | store encrypted; remove |
+| `GET` | `/health` | **open** — counts, not contents |
+| `POST` | `/webhook/github` | **open** — HMAC-verified |
 
-**Per-repo serialization:** two workers compacting one graph will corrupt the delta overlay. Enforce with a Postgres advisory lock keyed on the repo id around every index/sync.
-
-### 2.5 Container CPU must be real
-
-leangraph sizes its rayon pool from the **cgroup quota**. A container with no `cpus` limit sees the host's core count and may oversubscribe; a container limited to 0.5 CPU will index the Linux kernel but slowly.
-
-```yaml
-# docker-compose.yml
-services:
-  worker:
-    deploy:
-      resources:
-        limits:   { cpus: '4', memory: 8G }
-        reservations: { cpus: '2', memory: 4G }
-```
-
-Document a sizing table in the README:
-
-| Repo size | Cold index (4 cores) | Recommended |
-|---|---|---|
-| <1k files | <10s | 2 cores / 2GB |
-| 1k–10k | 10–60s | 4 cores / 4GB |
-| 10k–30k | 1–3 min | 4 cores / 8GB |
-| 30k+ | 3–15 min | 8 cores / 16GB |
-
-*(Extrapolated from our django measurement — 3,038 files in 480ms on 8 cores. Re-measure per tier before publishing.)*
-
-### 2.6 The WAL/volume trap — get this right or it fails in the field
-
-```yaml
-volumes:
-  ig_repos:            # named volume — NOT a bind mount
-
-services:
-  worker:
-    volumes:
-      - ig_repos:/var/lib/issuegraph/repos
-```
-
-Bind mounts from macOS/Windows hosts go through a translation layer with unreliable file locking and mmap semantics — and our CSR is mmap'd. Add a **startup check** that writes and fsyncs a test WAL db in the data dir and refuses to boot with a clear error if it fails. Cheap to write, saves every future support ticket.
-
-### 2.7 Speed budget per issue (target)
-
-| Step | Target |
-|---|---|
-| Webhook ack | <100ms |
-| Graph freshness check | <500ms (usually a no-op) |
-| `buildContext()` | <1s |
-| Triage (Haiku, low effort) | 1–3s |
-| Solution (Sonnet, high effort) | 10–40s |
-| Post comment | <1s |
-| **Total p50** | **<30s** |
+Everything not marked open requires the admin token (§5.3). Registering a
+repository spends your API budget, `/secrets` writes credentials, and
+`/config` turns on the mode that opens pull requests — that surface does not
+default to open.
 
 ---
 
-## 3. Cost engineering (priority #2)
+## 3. What an issue costs
 
-Current pricing (verified 2026-08-19):
+Prices live in `price()` in `src/server/agent.rs`, in one place, because
+Sonnet's introductory rate expires 2026-08-31 and a ledger that quietly keeps
+using it is worse than one that is obviously wrong.
 
-| Model | ID | Input $/MTok | Output $/MTok | Context |
-|---|---|---|---|---|
-| Claude Opus 5 | `claude-opus-5` | $5.00 | $25.00 | 1M |
-| Claude Sonnet 5 | `claude-sonnet-5` | $3.00 (**$2.00 intro thru 2026-08-31**) | $15.00 ($10.00 intro) | 1M |
-| Claude Haiku 4.5 | `claude-haiku-4-5` | $1.00 | $5.00 | 200K |
+| Model | ID | Input $/MTok | Output $/MTok |
+|---|---|---|---|
+| Claude Haiku 4.5 | `claude-haiku-4-5` | $1.00 | $5.00 |
+| Claude Sonnet 5 | `claude-sonnet-5` | $3.00 | $15.00 |
 
-### 3.1 Three-stage model routing
-
-Most issues never need the expensive model.
+### The pipeline, cheapest stage first
 
 ```
-Stage 0 — free filter (no LLM)
-  ├─ label gate: only act on `ai-triage` or configured labels
-  ├─ author gate: OWNER / MEMBER / COLLABORATOR only (see §4)
-  └─ near-duplicate check via pgvector → reply from cached prior analysis
-                                                          ↓ ~$0.00
+0 — free gates, no model call
+    delivery replay · signature · label · author association
+    then local duplicate detection
+                                              ↓ costs nothing
 
-Stage 1 — TRIAGE  ·  claude-haiku-4-5  ·  effort: low
-  Classify {bug | feature | question | invalid} and extract
-  seed symbols / error strings / stack frames from the issue text.
-  Structured output, ~2k in / ~300 out  ≈  $0.0035/issue
-  → not a bug? post triage comment and STOP.
-                                                          ↓ ~40% continue
+1 — TRIAGE · claude-haiku-4-5 · 512 max_tokens
+    {bug | feature | question | invalid} + seed symbols
+    not a bug → post the triage note and stop
+                                              ↓
 
-Stage 2 — SOLVE  ·  claude-sonnet-5  ·  effort: high
-  Agent loop over graph tools + cached repo preamble.
-  ~25k in (mostly cache reads) / ~2k out  ≈  $0.02–0.05/issue
+2 — ANALYSE · claude-sonnet-5 · effort high · 4096 max_tokens
+    graph context + cached repo preamble → the comment
 
-Stage 3 — ESCALATE  ·  claude-opus-5  ·  effort: xhigh
-  Only when Stage 2 self-reports low confidence, or the issue
-  carries an `ai-deep` label. Expect <10% of issues.
+3 — FIX · claude-sonnet-5 · effort high · 8192 max_tokens
+    only where all three gates in §5.5 are open
 ```
 
-**Blended estimate: ~$0.02–0.04 per issue.** Track the real number in the cost ledger from day one and publish it in the README — nobody else does, and it is the most persuasive number this project can show.
+### Deduplication costs nothing, on purpose
 
-### 3.2 Prompt caching — the biggest single lever
+The obvious design embeds the issue and compares vectors. It works, and it means
+a network round trip and a bill on **every** issue including the overwhelming
+majority that are not duplicates — in a product whose entire argument is that you
+should not pay for context you did not need. Paying to find out you did not have
+to pay is the wrong shape.
 
-Cache economics: **write costs 1.25× (5-min TTL) or 2× (1-hour TTL); read costs 0.1×.** Break-even is 2 requests at 5-min TTL, 3 requests at 1-hour TTL.
+So three local signals, all exact and all free: **word shingles**, **content
+words**, and **graph seeds** — the nodes the context builder would select, which
+is the signal nothing else here has, since it judges whether two issues are about
+the same *code*. Shingles alone are not enough: measured at 0.78 against a paste
+with a comment appended but **0.19 against the same report typed again in the
+reporter's own words**, and people retype rather than paste. So a near-copy is
+conclusive on text alone, and everything else needs vocabulary *and* code to
+agree — seeds alone are far too weak, since two unrelated bugs in one popular
+function share every seed.
 
-Prompt render order is `tools` → `system` → `messages`. Structure the request so the stable part comes first:
+The thresholds are deliberately conservative because the error costs are
+asymmetric: a missed duplicate costs one analysis, while a false one answers a
+real issue with a link to an unrelated one and teaches the reporter that the bot
+does not work. Scoring and constants are in `src/server/dedup.rs`, with ten
+tests.
 
-```ts
-system: [
-  { type: 'text', text: AGENT_INSTRUCTIONS },              // frozen, identical for all repos
-  { type: 'text', text: repoPreamble,                       // arch summary, conventions, file tree
-    cache_control: { type: 'ephemeral', ttl: '1h' } },      // ← breakpoint here
-],
-messages: [
-  { role: 'user', content: issueSpecificContext },          // varies — AFTER the breakpoint
-]
-```
+### Prompt caching
 
-**Two hard rules:**
+The repo preamble is identical across every issue in a repo, so it sits before
+the cache breakpoint and the issue-specific context sits after it. Cache reads
+bill at 0.1×, so a busy repo pays a fraction of what the input-token count
+suggests — which is why the ledger accounts for cache reads separately instead of
+reporting a flat input rate that would overstate cost by roughly an order of
+magnitude.
 
-1. **Minimum cacheable prefix is 1024 tokens on Sonnet 5** (512 on Opus 5). A preamble below that silently will not cache — no error, just `cache_creation_input_tokens: 0`. Pad the repo preamble with genuinely useful content (architecture summary, top-50 modules by centrality, conventions) until it clears 1024.
+Two rules, both learned the hard way:
 
-2. **Never interpolate anything volatile before the breakpoint.** No timestamps, no issue IDs, no `new Date()`. One byte of drift invalidates the whole prefix. Assert this in a test.
+1. **The minimum cacheable prefix is 1024 tokens** (512 on Opus). Below that it
+   silently does not cache — no error, just `cache_creation_input_tokens: 0`.
+   This bit us: a ~950-token preamble never cached and nothing said so.
+   `cacheable()` now asserts the floor.
+2. **Nothing volatile before the breakpoint.** No timestamps, no issue ids. One
+   byte of drift invalidates the whole prefix. The agent suite asserts byte
+   equality of the cached prefix *across different issues* — which is the only
+   way to catch it, since a single call cannot.
 
-**TTL choice:** 1-hour TTL for repos with steady issue traffic (≥3 issues/hour); 5-minute default otherwise. Make it a per-repo setting derived from observed traffic.
+### The receipt
 
-**Verify it works:** log `usage.cache_read_input_tokens` on every call. If it is 0 across repeated issues on the same repo, a silent invalidator is present. Add a dashboard panel for cache hit rate — a regression here doubles cost silently.
+Every comment ends with what it cost:
 
-### 3.3 Hard context budget
+> *18 graph nodes · 24,102 tokens (21,340 cached) · $0.0310*
 
-`buildContext(text, { maxNodes })` gives a bound in nodes. Convert to a token bound:
-
-```ts
-let ctx = graph.build_context(issue_text, Budget { max_nodes: 25, max_tokens: repo.token_ceiling })?;
-const { input_tokens } = await anthropic.messages.countTokens({ model, messages, system });
-if (input_tokens > repo.tokenCeiling) {
-  // re-build with maxNodes reduced, don't truncate blindly
-}
-```
-
-Use `messages.countTokens` — **never `tiktoken`**, which is OpenAI's tokenizer and undercounts Claude by 15–20% on prose and far more on code.
-
-### 3.4 Issue deduplication
-
-Embed issue title+body, store in pgvector. On a new issue, cosine-search prior analyzed issues in the same repo. Above ~0.92 similarity, post the prior analysis with an explicit "this looks like a duplicate of #N" framing instead of running the agent. Costs one embedding call.
-
-### 3.5 Batch API for non-urgent work
-
-The Batch API is **50% off** with async completion (usually <1h, max 24h). Use it for:
-
-- initial backfill when a repo is first connected (analyze all open issues)
-- nightly re-analysis of stale open issues
-- benchmark/eval runs
-
-Never for live webhooks — latency is unbounded.
-
-### 3.6 Cost ledger as a product feature
-
-```sql
-CREATE TABLE cost_ledger (
-  id              bigserial PRIMARY KEY,
-  run_id          uuid NOT NULL REFERENCES agent_runs(id),
-  repo_id         uuid NOT NULL,
-  stage           text NOT NULL,          -- triage | solve | escalate | embed
-  model           text NOT NULL,
-  input_tokens            int NOT NULL,
-  output_tokens           int NOT NULL,
-  cache_read_input_tokens int NOT NULL DEFAULT 0,
-  cache_creation_input_tokens int NOT NULL DEFAULT 0,
-  cost_usd        numeric(10,6) NOT NULL,
-  created_at      timestamptz NOT NULL DEFAULT now()
-);
-```
-
-Expose per-repo and per-issue cost in the UI, and post the cost in the issue comment footer:
-
-> *Analyzed with 18 graph nodes · 24,102 tokens (21,340 cached) · $0.031*
-
-This "context receipt" is transparency, a differentiator, and a great screenshot.
+Per-run and per-repo totals go to `cost_ledger` and appear on the dashboard.
+This is transparency first and a differentiator second: nobody else shows you
+this number.
 
 ---
 
-## 4. Security
+## 4. Answering an issue
 
-This is where the project can embarrass itself publicly. Non-negotiables.
-
-### 4.1 GitHub App, not OAuth App
-
-Fine-grained per-repo permissions, installation tokens (1h expiry, auto-rotated), org-level revocation, no user-token blast radius.
-
-Minimum permissions: `Issues: Read & Write`, `Contents: Read`, `Metadata: Read`. Add `Pull requests: Write` **only** if fix mode is enabled.
-
-### 4.2 Webhook verification
-
-```ts
-import { timingSafeEqual, createHmac } from 'node:crypto';
-
-function verify(rawBody: Buffer, signature: string, secret: string): boolean {
-  const expected = 'sha256=' + createHmac('sha256', secret).update(rawBody).digest('hex');
-  const a = Buffer.from(expected), b = Buffer.from(signature);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
+```
+webhook delivery
+  ├─ X-GitHub-Delivery seen before? → 200, do nothing (providers retry)
+  ├─ HMAC over the raw bytes, constant-time
+  ├─ label gate: the configured trigger label, or nothing happens
+  ├─ author gate: OWNER / MEMBER / COLLABORATOR
+  └─ enqueue, return 202
+       │
+       ▼
+  duplicate of an already-answered issue? → post the prior analysis, stop
+       │
+       ▼
+  triage (Haiku) → not a bug? → post the note, stop
+       │
+       ▼
+  build context from the graph, bounded in nodes
+       │
+       ▼
+  analyse (Sonnet) → comment + receipt → ledger
+       │
+       ▼
+  fix mode gates all open? → §5.5
 ```
 
-Fastify must be configured to retain the **raw body** — re-serialized JSON breaks the MAC. Also: reject deliveries older than 5 minutes, and store `X-GitHub-Delivery` for idempotency (GitHub retries).
+An issue arriving before the graph exists is answered without graph context
+rather than failed. Deferring it until the index finishes — and saying so on the
+issue — is the better behaviour and is not built.
 
-### 4.3 Prompt injection — the real threat
+---
 
-Anyone can open an issue on a public repo. That text goes into the agent's prompt. This class of attack has been exploited against GitHub-integrated agents in the wild.
+## 5. Security
 
-| Control | Implementation |
+This is where the project could embarrass itself publicly.
+
+### 5.1 Webhook verification
+
+HMAC-SHA256 over the **raw request bytes**, compared in constant time.
+Re-serializing the JSON and verifying that instead would be checking something
+the sender never signed. GitHub's webhook UI also defaults to form encoding, so
+deliveries arrive as `payload=<urlencoded json>` rather than as a JSON body —
+the signature covers the form body, and that case has its own test because
+getting it wrong fails open on exactly the deliveries a default configuration
+sends.
+
+`X-GitHub-Delivery` is stored and replays are dropped. Providers retry, and a
+retried issue must not produce a second comment.
+
+### 5.2 Prompt injection
+
+Anyone can open an issue on a public repository, and that text goes into a
+prompt. This class of attack has been exploited against GitHub-integrated agents
+in the wild.
+
+| Control | How |
 |---|---|
-| **Trust boundary** | Issue body is **data**, never instruction. Wrap in `<untrusted_issue_content>` tags with an explicit system-prompt statement that its contents are user-submitted and carry no authority. |
-| **Author gate** | Only act on issues from `author_association` ∈ {OWNER, MEMBER, COLLABORATOR}. Public-repo drive-by issues are ignored by default. |
-| **Label gate** | Require an explicit `ai-triage` label. Opt-in per issue, not blanket. |
-| **No secrets in reach** | The agent's tools cannot read `.env`, `*.pem`, `*.key`, `secrets/`. Enforce in the tool implementation with a canonical-path allowlist, not a blocklist. |
-| **No write tools in analyze mode** | Stage 1–3 have read-only tools. Full stop. |
-| **Egress allowlist** | Worker container reaches only `api.anthropic.com` + the git host. Nothing else. Enforce at the Docker network / firewall layer, not in code. |
-| **Output scan** | Before posting, scan the comment for secret-shaped strings (`sk-`, `ghp_`, private key headers, high-entropy blobs) and block. Defense in depth. |
-| **Never auto-fix on public repos** | Default off. Requires explicit per-repo opt-in and cannot be enabled for repos with public issue creation. |
+| **Trust boundary** | the body is wrapped and declared as user-submitted data carrying no authority — asserted in the agent suite, including that attempted delimiter escapes are neutralised |
+| **Author gate** | only `author_association` ∈ {OWNER, MEMBER, COLLABORATOR} |
+| **Label gate** | an explicit label. Opt-in per issue, never blanket |
+| **No tools** | the analysis agent is handed no tools at all. It cannot read a file, run a command, or reach the network |
+| **Egress** | the worker container reaches the model API and the git host. §5.4 |
+| **Never auto-fix by default** | §5.5 |
 
-### 4.4 API key storage
+The strongest control here is the fourth: an agent with no tools cannot be
+talked into using one.
 
-Envelope encryption. Per-tenant DEK, wrapped by a KEK from `IG_MASTER_KEY` env (or a KMS in Phase 5). AES-256-GCM. Decrypt only in the worker, only into memory, never logged. Redact keys from all log lines and error traces.
-
-### 4.4a Access control
+### 5.3 Access control
 
 Seven of the nine endpoints manage the install: they register repositories,
 write secrets, and turn on the mode that pushes pull requests. All of them were
@@ -384,7 +314,7 @@ the container healthcheck calls, and it reports counts rather than contents.
 `--no-auth` restores the old behaviour for an operator who genuinely has
 authentication in front, and says what it costs in the startup log.
 
-### 4.4b Egress — where a repository URL can point
+### 5.4 Egress — where a repository URL can point
 
 A repository URL is the only user-supplied value in this product that causes an
 outbound connection to a host of the caller's choosing. `https://` alone is
@@ -394,14 +324,16 @@ anything that can reach it — and by every private address on whatever network
 the server can see. That is server-side request forgery, and it is enforced here
 rather than assumed away.
 
-`check_url` now resolves the host and refuses **every** answer that is not
-public: loopback, private, link-local, unique-local, CGNAT, multicast,
-unspecified, and IPv4-mapped forms of all of them. Every address is checked, not
-the first — a name returning one public and one private answer is precisely how
-this gets bypassed.
+`check_url` resolves the host and refuses **every** answer that is not public:
+loopback, private, link-local, unique-local, CGNAT, multicast, unspecified, and
+IPv4-mapped forms of all of them. Every address is checked, not the first — a
+name returning one public and one private answer is precisely how this gets
+bypassed. `file://`, `ssh://`, the scp-like `git@host:path` form and `ext::` are
+refused outright: they would read the host filesystem, use ambient key material,
+or run an arbitrary command.
 
-`LEANGRAPH_ALLOWED_HOSTS` pins cloning to named hosts. An entry covers the host and
-its subdomains (`github.com` allows `codeload.github.com`) and nothing that
+`LEANGRAPH_ALLOWED_HOSTS` pins cloning to named hosts. An entry covers the host
+and its subdomains (`github.com` allows `codeload.github.com`) and nothing that
 merely looks like it (`evil-github.com` is refused). Setting it is also how you
 deliberately permit an internal host — a GitHub Enterprise install — since an
 explicit allowlist is a statement about where this install may reach and
@@ -410,24 +342,23 @@ overrides the address check rather than stacking with it.
 **What this is not.** The check resolves now; git resolves again when it
 connects, so a name whose answer changes in between would slip past. Closing
 that needs a resolver the connection itself is pinned to, which git does not
-offer. `LEANGRAPH_ALLOWED_HOSTS` is the airtight in-process control, and a network
-policy on the container is the real one — the compose file says where to put it.
+offer. `LEANGRAPH_ALLOWED_HOSTS` is the airtight in-process control, and a
+network policy on the container is the real one — the compose file says where to
+put it.
 
-### 4.5 Fix mode — **built, opt-in** (`src/server/fix.rs`)
+### 5.5 Fix mode — built, opt-in (`src/server/fix.rs`)
 
 Posting a comment and changing someone's repository are different decisions, so
 they are gated differently. Fix mode is off in three independent ways, and all
 three must be open before a single line is written:
 
 1. the repository has `fix_mode` set — `POST /repos/{owner/name}/config`;
-2. the issue carries `leangraph-fix`, a **second** label distinct from the `leangraph`
-   one that triggers analysis;
+2. the issue carries `leangraph-fix`, a **second** label distinct from the one
+   that triggers analysis;
 3. a token with write access exists.
 
 Any one missing and the analysis still posts, but nothing is pushed. The refusal
 is logged with the reason so an operator is never left guessing why.
-
-What it does:
 
 ```
 clean the model's diff (fences, stray prose)
@@ -445,149 +376,119 @@ auto-mergeable, or touch CI configuration, dependency manifests, lockfiles,
 Dockerfiles or Makefiles. That last list is the important one — a patch editing
 `.github/workflows` or `package.json` is a privilege escalation wearing a bug
 fix, and it is the first thing a hostile issue would reach for. The rule is
-enforced in code before `git apply` runs, not merely requested in the prompt;
-the prompt states it too, so that enforcement has to reject less often.
+enforced in code before `git apply` runs, not merely requested in the prompt; the
+prompt states it too, so that enforcement has to reject less often.
 
-A patch is also refused for touching more than 12 files, exceeding 60 KB,
-naming no files, or reaching outside the worktree.
+A patch is also refused for touching more than 12 files, exceeding 60 KB, naming
+no files, or reaching outside the worktree.
 
 The context the patch is written from is the graph selection — the same one the
 analysis used, and the reason a fix can be attempted at all without reading the
 repository.
 
-**Not yet built:** running the affected tests before opening the PR. The graph
-knows which tests import the changed files, so the selection is cheap; executing
+**Not built:** running the affected tests before opening the PR. The graph knows
+which tests import the changed files, so the selection is cheap; executing
 untrusted code in the server's container is the part that needs its own sandbox
 first. Until then the PR body says plainly that nothing was run.
 
+### 5.6 Key storage
+
+API keys are encrypted with AES-256-GCM under a key from `LEANGRAPH_MASTER_KEY`,
+or one generated into `master.key` (0600) on first run. Decrypted only in the
+worker, only into memory, never logged. `GET /secrets` returns names and hints,
+never values.
+
 ---
 
-## 5. Data model (Postgres)
+## 6. Data model
 
-```sql
-tenants        (id, name, created_at)
-users          (id, tenant_id, github_id, email)
-llm_keys       (id, tenant_id, provider, ciphertext, nonce, key_hint, created_at)
+SQLite. `PRAGMA user_version` drives a forward-only migration ladder, and
+`SCHEMA` is asserted against the ladder's top step on every open — so adding a
+migration without bumping the constant, or the reverse, fires immediately rather
+than on someone's data months later.
 
-repos (
-  id uuid PK, tenant_id, provider,           -- github | gitlab
-  full_name, installation_id, default_branch,
-  state,                                     -- pending|cloning|indexing|ready|error
-  last_indexed_sha, last_indexed_at,
-  node_count, edge_count, file_count, index_duration_ms,
-  codegraph_version,                         -- forces reindex on upgrade
-  config jsonb                               -- labels, model routing, token ceiling, fix_mode
-)
-
-issues (
-  id uuid PK, repo_id, provider_number, title, body,
-  author_association, embedding vector(1024), created_at
-)
-
-agent_runs (
-  id uuid PK, issue_id, repo_id,
-  stage, status,                             -- queued|running|posted|failed|skipped
-  context_node_ids jsonb, context_files jsonb,
-  total_tokens int, total_cost_usd numeric(10,6),
-  duration_ms int, error text, created_at
-)
-
-cost_ledger (…)                              -- see §3.6
-webhook_deliveries (delivery_id PK, received_at)   -- idempotency
+```
+repos        id, full_name, provider, path, default_branch, url, private,
+             state (pending|cloning|indexing|ready|error),
+             last_indexed_sha, last_indexed_at,
+             node_count, edge_count, file_count, index_ms, error,
+             config_json          -- per-repo settings; `fix_mode` is the only key
+jobs         id, kind, repo_id, payload, state, dedupe_key,
+             attempts, run_after, error, created_at, started_at, finished_at
+issues       id, repo_id, number, title, body, author_association, fingerprint
+runs         id, issue_id, repo_id, status, outcome, context_files,
+             total_tokens, cost_usd, duration_ms, error, created_at
+cost_ledger  id, run_id, repo_id, stage, model,
+             input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, cost_usd, created_at
+secrets      name, ciphertext, nonce, hint, created_at
+deliveries   delivery_id, received_at        -- webhook idempotency
 ```
 
-`repos.codegraph_version` is load-bearing: when the pinned CodeGraph version bumps, mark every repo stale and reindex on a rolling basis rather than serving graphs built by a different extractor.
+The DDL is entirely `IF NOT EXISTS` and runs on **every** open, not only on an
+empty database. It ran only on an empty one until a table added after schema 1
+turned out never to reach an existing install — and the `ALTER` for its new
+column then failed against a table that had never been created.
 
 ---
 
-## 6. Phases
+## 7. What is not built
 
-### Phase 0 — Validation (2–3 days) · **DO THIS FIRST**
+Listed because a document that describes only what exists reads as though the
+rest was never considered.
 
-Do not write the server until these numbers exist.
-
-1. Install CodeGraph. Index 5 repos of varying size/language on the target container spec. Record: cold index time, incremental sync time, DB size on disk, peak RSS.
-2. Build an eval set: 40 closed issues with linked merged PRs → ground truth = files changed in the PR.
-3. Measure `recall@10` for:
-   - baseline A: embedding RAG over file chunks
-   - baseline B: BM25 over the repo
-   - **CodeGraph `buildContext()`**
-4. Measure tokens for each at equal recall.
-
-**Kill criterion:** if `buildContext` does not beat both baselines on recall-per-token, the whole premise is wrong and this is the cheapest possible moment to learn it.
-
-**Deliverable:** `benchmarks/README.md` with a table. This becomes the project's headline claim.
-
-### Phase 1 — Graph service (1.5–2 weeks)
-
-- `GraphProvider` interface + CodeGraph adapter (pinned version)
-- Repo lifecycle: register → clone --mirror → worktree → index → ready
-- BullMQ queues with per-repo Redis mutex; GraphPool LRU
-- REST: `POST /repos`, `GET /repos/:id`, `POST /repos/:id/sync`, `POST /repos/:id/context`
-- `docker compose up` works; named volume; WAL preflight check
-- **Exit criterion:** register a repo via API, get context for arbitrary text in <1s
-
-### Phase 2 — GitHub App + agent (2 weeks)
-
-- GitHub App registration, installation flow, HMAC + idempotency
-- Encrypted BYO key storage
-- Three-stage routing with prompt caching + cost ledger
-- Read-only tool surface: `graph_explore`, `graph_node`, `graph_callers`, `graph_callees`, `graph_impact`, `read_file`, `grep`
-- Post comment with context receipt
-- All security controls from §4 — **not deferred to a later phase**
-- **Exit criterion:** label an issue `ai-triage` → useful comment in <30s for <$0.05
-
-### Phase 3 — Operability (1 week)
-
-- Minimal web UI: repo list, index status, run history, **cost dashboard with cache hit rate**
-- Prometheus metrics; structured logs with key redaction
-- Backfill via Batch API
-- README with the Phase 0 benchmark table
-
-### Phase 4 — Fix mode (2 weeks, opt-in, gated)
-
-Sandbox, `codegraph affected` → targeted test run, branch + PR. Never main.
-
-### Phase 5 — GitLab (1 week)
-
-Same worker, different provider adapter. Webhook token verification instead of HMAC.
-
-**Total to a genuinely useful v1: ~6 weeks.** Phases 1–3.
+| | |
+|---|---|
+| **Opus escalation** | designed as a third stage for low-confidence answers. Analysis is Sonnet; there is no escalation path |
+| **Separate queues** | one worker pool over one queue. A long index blocks an issue behind it (§1) |
+| **Multi-instance** | orphan reclaim runs at startup, which is correct for one process. Two instances on one database need a lease with a heartbeat, not a state column |
+| **Graph handle pool** | every job opens the graph. It is an mmap and a header check — microseconds — so this has not been worth it, but it is measured nowhere |
+| **Batch API** | 50% off for backfill and nightly re-analysis. Not wired up |
+| **Metrics** | structured logs, no Prometheus endpoint |
+| **GitLab** | GitHub only. The provider boundary exists; the adapter does not |
+| **WAL preflight** | bind mounts from macOS/Windows hosts have unreliable locking and mmap semantics, and the CSR is mmap'd. The compose file uses a named volume; nothing refuses to boot if you override it |
+| **Tests before a PR** | §5.5 |
+| **Per-repo configuration** | `config_json` carries `fix_mode` and nothing else. The trigger and fix labels are server-wide flags, and there is no per-repo token ceiling |
+| **Deferring an issue until indexed** | answered without graph context instead (§4) |
 
 ---
 
-## 7. Risks
+## 8. Configuration
 
-| Risk | Severity | Mitigation |
-|---|---|---|
-| CodeGraph API churn at 67k stars / daily merges | High | Pin exact version; `GraphProvider` adapter; SQLite direct-query fallback |
-| Phase 0 shows graph context ≈ baseline RAG | **Critical** | Find out in 3 days, not 3 months. Kill criterion is explicit. |
-| WAL corruption on bind-mounted volumes | High | Named volume + boot-time preflight check that refuses to start |
-| Prompt injection incident | High | §4.3 in full, from Phase 2. Not deferred. |
-| Cold-index latency on monorepos | Medium | Index at registration; queue issues during indexing with a status comment |
-| Cache silently stops hitting → 10× cost | Medium | Log `cache_read_input_tokens` every call; alert on hit rate <50% |
-| Upstream adds a server mode and eats the niche | Medium | Real possibility. A PR contributing our server layer upstream is a legitimate alternative outcome — and better for visibility than a competing repo. |
-| Sonnet 5 intro pricing ends 2026-08-31 | Low | Cost model must read prices from config, not hardcode them |
-
----
-
-## 8. Open decisions
-
-1. **Name.** `issuegraph`, `triagent`, `graphtriage`, `cortex`?
-2. **License.** MIT maximizes adoption; AGPL prevents a SaaS clone. CodeGraph being MIT means either is legally available.
-3. **Also ship an MCP server?** Low marginal cost (the graph layer already exists) but CodeGraph already occupies that slot well. Probably skip — stay focused on the server gap.
-4. **Multi-tenancy depth.** Single-org self-hosted is far simpler. Full multi-tenant is a v2 concern.
-
----
-
-## 9. First commit
+| Variable | |
+|---|---|
+| `LEANGRAPH_ADMIN_TOKEN` | admin token. Generated into `admin.token` if unset |
+| `LEANGRAPH_MASTER_KEY` | 32 bytes, hex, for secret encryption. Generated into `master.key` if unset |
+| `LEANGRAPH_WEBHOOK_SECRET` | the shared secret the provider signs with |
+| `LEANGRAPH_ANTHROPIC_KEY` | your API key |
+| `LEANGRAPH_GITHUB_TOKEN` | read for cloning; write only if fix mode is on |
+| `LEANGRAPH_ALLOWED_HOSTS` | pin cloning to named hosts (§5.4) |
+| `LEANGRAPH_RETRY_BASE_SECS` | first retry wait, default 30 (§1) |
+| `LEANGRAPH_ANTHROPIC_BASE` `LEANGRAPH_GITHUB_API` | endpoint overrides — the test suite points them at stubs |
 
 ```bash
-mkdir issuegraph && cd issuegraph && git init
-npm init -y && npm pkg set engines.node=">=22.5.0"
-npm i -E @colbymchenry/codegraph@1.5.0
-npm i fastify bullmq ioredis pg simple-git @anthropic-ai/sdk zod pino
-npm i -D typescript tsx vitest @types/node
+docker compose up -d
+curl -X POST localhost:7777/repos \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"url":"https://github.com/owner/name"}'
 ```
 
-Then Phase 0 — the benchmark, before anything else.
+---
+
+## 9. Tests
+
+The server's share of the suite. All of it runs without the benchmark corpora.
+
+```
+27  unit                 vetting rules, dedup scoring, SSRF, schema migration
+21  webhook gates        signature, replay, authorship, labels, form encoding
+38  agent assertions     prompt safety, cache correctness
+23  fix mode, end-to-end against a real git remote
+10  deduplication, end-to-end
+ 7  retry and recovery, end-to-end against a rate-limited API
+```
+
+`bench/server_test.sh` runs the ones that need a live server, a stub API and a
+repo that has already answered two *different* issues — the caching assertion is
+byte equality across issues, so it cannot be checked from a single call. Setting
+that up by hand is how these stopped being run.

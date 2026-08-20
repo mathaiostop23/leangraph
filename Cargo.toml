@@ -3,6 +3,17 @@ name = "leangraph"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.82"
+description = "A code graph that gives a coding agent the relevant code instead of making it grep for it."
+license = "MIT"
+repository = "https://github.com/mathaiostop23/leangraph"
+homepage = "https://github.com/mathaiostop23/leangraph"
+readme = "README.md"
+keywords = ["code-graph", "tree-sitter", "mcp", "static-analysis", "llm"]
+categories = ["development-tools"]
+# The benchmark corpora, the transcripts and the design notes are the largest
+# things in the tree and none of them are needed to build. Without this the
+# published crate carries them to everyone who installs it.
+exclude = ["bench/", "*.md", "!README.md", ".github/", "Dockerfile", "docker-compose.yml"]
 
 [[bin]]
 name = "leangraph"
