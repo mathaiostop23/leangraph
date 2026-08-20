@@ -238,8 +238,7 @@ fn module_keys(root: &Path, path: &Path, lang: Lang) -> Vec<String> {
     if parts.is_empty() {
         return Vec::new();
     }
-    let sep = if lang == Lang::Python { "." } else { "/" };
-    (0..parts.len()).map(|i| parts[i..].join(sep)).collect()
+    (0..parts.len()).map(|i| parts[i..].join(lang.module_sep())).collect()
 }
 
 /// Resolve one import statement to a file.
@@ -250,8 +249,26 @@ fn resolve_import(
     spec: &str,
     importer: &Path,
     root: &Path,
+    lang: Lang,
     by_module: &FxHashMap<String, FileId>,
 ) -> Option<FileId> {
+    // `use crate::core::Def` names a crate root that is not a directory, and it
+    // ends in a *symbol* rather than a module. Strip the one, then try the path
+    // both with and without the other.
+    let spec = lang.strip_import_prefix(spec);
+    let sep = lang.module_sep();
+    if sep != "/" && !spec.starts_with('.') {
+        if let Some(f) = by_module.get(spec) {
+            return Some(*f);
+        }
+        if lang.import_ends_in_symbol() {
+            if let Some(cut) = spec.rfind(sep) {
+                if let Some(f) = by_module.get(&spec[..cut]) {
+                    return Some(*f);
+                }
+            }
+        }
+    }
     if spec.starts_with('.') {
         let mut base = importer.parent()?.to_path_buf();
         for part in spec.split('/') {
@@ -416,7 +433,7 @@ pub fn resolve(
             let mut imported: FxHashMap<SymId, NodeId> = FxHashMap::default();
             for imp in &unit.imports {
                 let spec = interner.resolve(&imp.module);
-                if let Some(tf) = resolve_import(spec, &paths[f], root, &by_module) {
+                if let Some(tf) = resolve_import(spec, &paths[f], root, langs[f], &by_module) {
                     if tf == fid {
                         continue;
                     }

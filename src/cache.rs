@@ -164,12 +164,11 @@ fn kind_of_ref(k: u32) -> RefKind {
     }
 }
 
+/// Position in `ALL_LANGS`, so adding a language does not mean remembering to
+/// update a second list. The value is written to the cache and read by nothing
+/// today, but it costs four bytes and a wrong one would be a silent mislabel.
 fn lang_id(l: Lang) -> u32 {
-    match l {
-        Lang::Python => 0,
-        Lang::TypeScript => 1,
-        Lang::Tsx => 2,
-    }
+    crate::lang::ALL_LANGS.iter().position(|&x| x == l).unwrap_or(0) as u32
 }
 
 fn pad8(v: &mut Vec<u8>) {

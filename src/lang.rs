@@ -17,9 +17,35 @@ pub enum Lang {
     Python,
     TypeScript,
     Tsx,
+    Rust,
+    Go,
+    Java,
+    C,
+    Cpp,
+    CSharp,
+    Ruby,
+    Php,
+    Kotlin,
+    Swift,
+    Scala,
 }
 
-pub const ALL_LANGS: [Lang; 3] = [Lang::Python, Lang::TypeScript, Lang::Tsx];
+pub const ALL_LANGS: [Lang; 14] = [
+    Lang::Python,
+    Lang::TypeScript,
+    Lang::Tsx,
+    Lang::Rust,
+    Lang::Go,
+    Lang::Java,
+    Lang::C,
+    Lang::Cpp,
+    Lang::CSharp,
+    Lang::Ruby,
+    Lang::Php,
+    Lang::Kotlin,
+    Lang::Swift,
+    Lang::Scala,
+];
 
 impl Lang {
     pub fn from_ext(ext: &str) -> Option<Lang> {
@@ -27,6 +53,20 @@ impl Lang {
             "py" | "pyi" => Some(Lang::Python),
             "ts" | "mts" | "cts" => Some(Lang::TypeScript),
             "tsx" | "jsx" | "js" | "mjs" | "cjs" => Some(Lang::Tsx),
+            "rs" => Some(Lang::Rust),
+            "go" => Some(Lang::Go),
+            "java" => Some(Lang::Java),
+            // `.h` is C here. It is ambiguous — most headers in a C++ project are
+            // C++ — but the C grammar parses the common subset without failing,
+            // where the reverse is not true.
+            "c" | "h" => Some(Lang::C),
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Lang::Cpp),
+            "cs" => Some(Lang::CSharp),
+            "rb" | "rake" => Some(Lang::Ruby),
+            "php" => Some(Lang::Php),
+            "kt" | "kts" => Some(Lang::Kotlin),
+            "swift" => Some(Lang::Swift),
+            "scala" | "sc" => Some(Lang::Scala),
             _ => None,
         }
     }
@@ -36,6 +76,58 @@ impl Lang {
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Lang::Go => tree_sitter_go::LANGUAGE.into(),
+            Lang::Java => tree_sitter_java::LANGUAGE.into(),
+            Lang::C => tree_sitter_c::LANGUAGE.into(),
+            Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Lang::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+            Lang::Swift => tree_sitter_swift::LANGUAGE.into(),
+            Lang::Scala => tree_sitter_scala::LANGUAGE.into(),
+        }
+    }
+
+    /// How this language spells the join between module path segments.
+    ///
+    /// Getting it wrong does not error — it produces a module table nothing
+    /// matches, so every import falls through to a name match and the tier
+    /// silently reports zero.
+    pub fn module_sep(self) -> &'static str {
+        match self {
+            Lang::Python | Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp => ".",
+            Lang::Rust => "::",
+            _ => "/",
+        }
+    }
+
+    /// Does an import path here name a symbol at the end, rather than only a
+    /// module?
+    ///
+    /// `use crate::core::Def` and `import java.util.List` both do; Python's
+    /// `from a.b import c` does not, because the module field stops at `a.b`.
+    /// Dropping the last segment for a language that does not do this binds
+    /// `import a.b` to the package `a`, which is a different file.
+    pub fn import_ends_in_symbol(self) -> bool {
+        matches!(
+            self,
+            Lang::Rust | Lang::Java | Lang::CSharp | Lang::Kotlin | Lang::Scala
+        )
+    }
+
+    /// Prefixes a language puts on an import path that name the current crate
+    /// or package rather than a directory. `use crate::core::Def` addresses the
+    /// same file as `use core::Def` from the root.
+    pub fn strip_import_prefix(self, path: &str) -> &str {
+        match self {
+            Lang::Rust => path
+                .strip_prefix("crate::")
+                .or_else(|| path.strip_prefix("self::"))
+                .or_else(|| path.strip_prefix("super::"))
+                .unwrap_or(path),
+            _ => path,
         }
     }
 
@@ -44,6 +136,17 @@ impl Lang {
             Lang::Python => "python",
             Lang::TypeScript => "typescript",
             Lang::Tsx => "tsx/jsx",
+            Lang::Rust => "rust",
+            Lang::Go => "go",
+            Lang::Java => "java",
+            Lang::C => "c",
+            Lang::Cpp => "c++",
+            Lang::CSharp => "c#",
+            Lang::Ruby => "ruby",
+            Lang::Php => "php",
+            Lang::Kotlin => "kotlin",
+            Lang::Swift => "swift",
+            Lang::Scala => "scala",
         }
     }
 }
@@ -199,12 +302,83 @@ pub fn spec_for(lang: Lang) -> Spec {
             namespaced: kinds(&l, &["namespace_import"]),
             f_alias: fields(&l, &["alias"]),
         },
+
+        // ---- pilot: one language written by hand, to prove the shape ----
+        Lang::Rust => Spec {
+            defs: tagged(
+                &l,
+                &[
+                    ("function_item", DefKind::Function),
+                    ("function_signature_item", DefKind::Function),
+                    ("struct_item", DefKind::Class),
+                    ("enum_item", DefKind::Class),
+                    ("union_item", DefKind::Class),
+                    // An impl block is not a definition, but it is a *container*:
+                    // naming it lets the extractor reclassify the functions inside
+                    // it as methods, which is what they are.
+                    ("impl_item", DefKind::Class),
+                    ("trait_item", DefKind::Interface),
+                ],
+            ),
+            refs: tagged(
+                &l,
+                &[
+                    ("call_expression", RefKind::Call),
+                    ("struct_expression", RefKind::New),
+                ],
+            ),
+            imports: kinds(&l, &["use_declaration"]),
+            // `type` names an impl block, `path` the original of a `use ... as`.
+            f_name: fields(&l, &["name", "type", "path"]),
+            f_callee: fields(&l, &["function"]),
+            // `a.b` puts the segment in `field`; `a::B` puts it in `name`.
+            f_member: fields(&l, &["field", "name"]),
+            f_module: fields(&l, &["argument"]),
+            cond_defs: Vec::new(),
+            f_value: Vec::new(),
+            fn_values: Vec::new(),
+            var_defs: kinds(&l, &["const_item", "static_item"]),
+            f_var_name: fields(&l, &["name"]),
+            idents: kinds(&l, &["identifier", "type_identifier", "field_identifier"]),
+            heritage: kinds(&l, &["trait_bounds"]),
+            dotted: kinds(&l, &["field_expression", "scoped_identifier", "scoped_type_identifier"]),
+            f_object: fields(&l, &["value", "path"]),
+            aliased: kinds(&l, &["use_as_clause"]),
+            namespaced: Vec::new(),
+            f_alias: fields(&l, &["alias"]),
+        },
+
+        // Every other language falls back to an empty spec until its own is
+        // written. An empty spec extracts nothing, which is visible immediately;
+        // a wrong one extracts plausible nonsense, which is not.
+        _ => Spec {
+            defs: Vec::new(),
+            refs: Vec::new(),
+            imports: Vec::new(),
+            f_name: Vec::new(),
+            f_callee: Vec::new(),
+            f_member: Vec::new(),
+            f_module: Vec::new(),
+            cond_defs: Vec::new(),
+            f_value: Vec::new(),
+            fn_values: Vec::new(),
+            var_defs: Vec::new(),
+            f_var_name: Vec::new(),
+            idents: Vec::new(),
+            heritage: Vec::new(),
+            dotted: Vec::new(),
+            f_object: Vec::new(),
+            aliased: Vec::new(),
+            namespaced: Vec::new(),
+            f_alias: Vec::new(),
+        },
     };
     // `kinds` drops names the grammar does not know, so a typo here produces an
     // empty list and a feature that silently does nothing. Fail at startup
     // instead, where it is one line to find.
+    // Only meaningful for a language that has a spec at all.
     debug_assert!(
-        !spec.aliased.is_empty() && !spec.f_alias.is_empty(),
+        spec.defs.is_empty() || (!spec.aliased.is_empty() && !spec.f_alias.is_empty()),
         "{:?}: alias node kinds did not resolve against the grammar",
         lang
     );
