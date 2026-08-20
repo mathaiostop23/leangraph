@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::sync::{Arc, Mutex};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -188,19 +189,33 @@ pub fn run(cfg: &Config) -> Result<Summary> {
     let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, Lang, u64, i64)>();
     let oversized = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
+    // What the walk turned away, by extension. A repository whose language we
+    // do not parse indexes almost nothing and reports success — the user is
+    // never told that eight of their nine files were skipped, which is a worse
+    // outcome than refusing to run.
+    let skipped: Arc<Mutex<FxHashMap<String, u32>>> = Arc::new(Mutex::new(FxHashMap::default()));
+
     if git_listing.is_none() {
         let oversized = oversized.clone();
+        let skipped = skipped.clone();
         WalkBuilder::new(&root)
             .hidden(true)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
+            // The `ignore` crate only applies `.gitignore` inside a git
+            // repository unless told otherwise. A downloaded tarball or a
+            // vendored copy has the file and not the directory, and every rule
+            // in it was silently skipped: a project whose `.gitignore` said
+            // `node_modules/` indexed 40 vendored files and 1 of its own.
+            .require_git(false)
             .follow_links(false)
             .threads(threads)
             .build_parallel()
             .run(|| {
                 let tx = tx.clone();
                 let oversized = oversized.clone();
+                let skipped = skipped.clone();
                 Box::new(move |res| {
                     use ignore::WalkState;
                     let Ok(entry) = res else {
@@ -215,6 +230,17 @@ pub fn run(cfg: &Config) -> Result<Summary> {
                         .and_then(|e| e.to_str())
                         .and_then(Lang::from_ext)
                     else {
+                        // Only code counts. Translations, docs and images are
+                        // not a language gap and reporting them as one reads as
+                        // a malfunction.
+                        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                            let ext = ext.to_ascii_lowercase();
+                            if Lang::is_unparsed_source(&ext) {
+                                if let Ok(mut m) = skipped.lock() {
+                                    *m.entry(ext).or_insert(0) += 1;
+                                }
+                            }
+                        }
                         return WalkState::Continue;
                     };
                     let Ok(md) = entry.metadata() else {
@@ -272,11 +298,31 @@ pub fn run(cfg: &Config) -> Result<Summary> {
     // always produces the same FileIds and therefore a byte-identical graph.
     found.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let oversized = oversized.load(std::sync::atomic::Ordering::Relaxed);
+    // Extensions the walk turned away, biggest first. Only the top few are
+    // worth showing; the tail is images and lock files.
+    let unsupported: Vec<(String, u32)> = {
+        let mut v: Vec<(String, u32)> = skipped
+            .lock()
+            .map(|m| m.iter().map(|(k, &n)| (k.clone(), n)).collect())
+            .unwrap_or_default();
+        v.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
+    };
+    let n_unsupported: u32 = unsupported.iter().map(|(_, n)| n).sum();
     let d_discover = t0.elapsed();
 
     if found.is_empty() {
         if !cfg.quiet {
-            println!("no Python/TypeScript files found under {}", root.display());
+            println!("no files in a supported language under {}", root.display());
+            if !unsupported.is_empty() {
+                let top: Vec<String> = unsupported
+                    .iter()
+                    .take(4)
+                    .map(|(e, n)| format!(".{e} ({n})"))
+                    .collect();
+                println!("  {n_unsupported} files were skipped: {}", top.join(", "));
+                println!("  supported: python typescript rust go java c c++ c# ruby php kotlin swift scala");
+            }
         }
         return Ok(Summary::default());
     }
@@ -500,6 +546,21 @@ pub fn run(cfg: &Config) -> Result<Summary> {
                 String::new()
             }
         );
+        // A repository mostly written in something we do not parse indexes a
+        // handful of files and prints success. Saying how much was left out is
+        // the difference between "this tool does not cover my project" and
+        // "this tool is broken".
+        if u64::from(n_unsupported) > n_files {
+            let top: Vec<String> = unsupported
+                .iter()
+                .take(4)
+                .map(|(e, n)| format!(".{e} ({n})"))
+                .collect();
+            println!(
+                "  \x1b[33mskipped          {n_unsupported} files in unsupported languages\x1b[0m — {}",
+                top.join(", ")
+            );
+        }
         if git_listing.is_some() {
             println!(
                 "  discovery        git tree diff ({} files, {} touched)",

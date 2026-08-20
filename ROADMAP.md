@@ -41,7 +41,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 5b · Fix mode | ✅ **Done, opt-in.** Three independent switches; draft PRs only |
 | 5c · Issue dedup | ✅ **Done.** Local signals, no embedding API; a duplicate costs zero |
 | 5d · Egress policy | ✅ **Done.** SSRF closed on clone URLs; optional host allowlist |
-| 6 · Breadth | ⬜ |
+| 6 · Breadth | 🟡 **14 languages.** Specs verified against each grammar; only 2 verified against an oracle |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |
 | — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, clustered p=0.008 |
 | — · Cost benchmark | ✅ **Done, and now reproducible.** 17x fewer tokens at matched recall |

@@ -47,7 +47,29 @@ pub const ALL_LANGS: [Lang; 14] = [
     Lang::Scala,
 ];
 
+/// Extensions that are source code in a language this does not parse.
+///
+/// The distinction matters for what gets reported. A repository full of `.po`
+/// and `.rst` is not a repository we failed on — those are translations and
+/// documentation, and saying "3,976 files skipped" about them reads as a
+/// malfunction. A repository full of `.ex` or `.hs` *is* one we do not cover,
+/// and the user should be told plainly rather than left with a two-node graph
+/// and a success message.
+pub const UNPARSED_SOURCE: &[&str] = &[
+    "ex", "exs", "erl", "hrl", "hs", "lhs", "ml", "mli", "lua", "pl", "pm", "r",
+    "jl", "dart", "groovy", "gradle", "clj", "cljs", "cljc", "edn", "f90", "f95",
+    "f03", "for", "vb", "m", "mm", "zig", "nim", "cr", "sh", "bash", "zsh", "fish",
+    "ps1", "sql", "v", "sv", "elm", "purs", "rkt", "scm", "lisp", "el", "pas",
+    "ada", "adb", "cob", "asm", "s", "d", "tcl", "awk", "vue", "svelte", "astro",
+    "coffee", "hx", "pony", "sol", "move", "wat", "wasm",
+];
+
 impl Lang {
+    /// Is this extension code we simply do not parse, as opposed to data?
+    pub fn is_unparsed_source(ext: &str) -> bool {
+        UNPARSED_SOURCE.contains(&ext)
+    }
+
     pub fn from_ext(ext: &str) -> Option<Lang> {
         match ext {
             "py" | "pyi" => Some(Lang::Python),

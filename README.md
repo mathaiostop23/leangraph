@@ -17,7 +17,7 @@ leangraph index /path/to/repo        # django, 3,038 files → 0.75 s
 leangraph install                    # wire it into Claude Code, Cursor, Codex
 ```
 
-**Status: early.** Python and TypeScript only. The numbers below are measured
+**Status: early.** Fourteen languages, but only Python and TypeScript are verified against an oracle. The numbers below are measured
 and reproducible — every one of them comes from a script in `bench/` that you
 can run yourself. The language coverage is not yet competitive; see
 [what it does not do](#what-it-does-not-do).
@@ -79,14 +79,21 @@ Apple M1 Pro. Against [CodeGraph](https://github.com/colbymchenry/codegraph)
 v1.5.0 — same repos, same machine, same run, median of 3, its process startup
 subtracted from its side. Reproduce with `./bench/run.sh`.
 
-| | files | index | graph on disk | vs CodeGraph |
-|---|---:|---:|---:|---:|
-| flask | 83 | **0.05 s** | 168 KB | 10× faster, 30× smaller |
-| excalidraw | 666 | **0.18 s** | 1.0 MB | 17× faster, 48× smaller |
-| django | 3,038 | **0.75 s** | 6.8 MB | 10× faster, 23× smaller |
+| | files | index | graph | everything on disk | CodeGraph |
+|---|---:|---:|---:|---:|---:|
+| flask | 83 | **0.05 s** | 172 KB | 1.0 MB | 5.0 MB |
+| excalidraw | 666 | **0.18 s** | 1.0 MB | 7.6 MB | 48 MB |
+| django | 3,038 | **0.75 s** | 6.9 MB | 39 MB | 156 MB |
 
-Full pipeline on both sides — discover, parse, resolve *and* persist. Re-running
-after a change is **0.11 s** on django, because unchanged files come from cache.
+Full pipeline on both sides — discover, parse, resolve *and* persist. **10× faster**
+on django, and 4× smaller counting everything.
+
+Two size columns because two things are true. The **graph** is what a query
+loads: 6.9 MB against CodeGraph's 156 MB database, which is the comparison that
+matters for startup and memory. But `.leangraph/` also holds a 33 MB extraction
+cache, and quoting only the first number would be the kind of selective framing
+this project exists to avoid. The cache is what makes re-running after a change
+**0.11 s** instead of 0.75.
 
 **Startup: 2.4 ms** against CodeGraph's 556 ms, spawn to MCP `initialize`
 (`bench/mcp_startup.py`). This gap is structural, not tuning: loading is not
@@ -192,9 +199,15 @@ measured it.
 
 ## What it does not do
 
-- **Two languages.** CodeGraph has 30+, with framework awareness and
-  Swift↔ObjC bridging. Breadth is cheap at the extraction tier and expensive at
-  the import/scope tier; neither cost has been paid yet.
+- **Fourteen languages, two of them verified.** Python, TypeScript, Rust, Go,
+  Java, C, C++, C#, Ruby, PHP, Kotlin, Swift and Scala all extract definitions
+  and resolve calls, and each spec was checked against its grammar's own
+  vocabulary. But only Python and TypeScript have been measured against an
+  external oracle; the other twelve are verified on a fixture, not on a corpus.
+  CodeGraph has 30+ with framework awareness.
+- **Import resolution is uneven across languages.** Rust, Java, C#, Kotlin and
+  Scala resolve module paths; the rest fall back to name matching more often
+  than Python and TypeScript do.
 - **Edge precision is bounded, not measured.** Runtime confirms edges that ran
   and is silent on the rest; the falsification rules give a floor, and a rule
   that does not fire is not a correct edge. Measured on one repository, in one
