@@ -141,7 +141,7 @@ Two costs were found by measuring rather than assuming:
 
 ### The invariant that makes it safe
 
-`bench/converge.sh` asserts that an incremental sync produces a **byte-identical**
+`bench/converge.sh` asserts that an incremental sync produces a **semantically identical**
 graph to a full reindex, across modify, revert, add and delete. A
 stale-but-plausible graph is worse than a slow one — it answers confidently and
 wrongly, and nothing downstream can tell.
@@ -572,7 +572,6 @@ one, and the compose file says where to put it.
 ```
 27/27 unit — scheme rules, address classification, host parsing, allowlist matching
 ```
-
 ## Edge correctness — does confidence predict it?
 
 Nodes were verified against an oracle at 95% presence recall. Edges were counted
@@ -597,68 +596,87 @@ where the body never names itself.
 **`bench/edgetrace.py` — what the code actually does.** flask's own test suite
 under `sys.monitoring`, recording every call that happened. An observed edge
 exists; no amount of agreement between two static tools changes that. 2,712
-distinct in-repo edges over 485 passing tests, deterministic across runs
-(symmetric difference 0), 1.6× wall clock. This gives recall, and a confirmation
-rate over edges whose caller ran. It says nothing about precision.
+distinct in-repo edges over 485 passing tests, symmetric difference 0 across
+repeated runs, 1.6× wall clock.
 
 **CodeGraph agreement** — covers everything, proves nothing. Where we differ,
 either side may be right.
 
-### The answer
-
-Both independent labellers, same direction, overwhelming:
+### The answer, and what it costs to state honestly
 
 ```
-flask, runtime-confirmed, callers that executed     all populations
-  conf 100  scope     60.0%   (53.3 – 66.4)
-  conf  95  import    94.3%   (81.4 – 98.4)
-  conf  80  name      36.8%   (33.6 – 40.1)
-  conf  60  name      20.3%   (17.6 – 23.2)
-  conf  45  name       5.2%   ( 2.7 –  9.9)
-  Cochran-Armitage   z=+15.1   p=8.6e-52
+flask lib→lib, callers that executed, + MRO closure
+  conf 100  scope     65.2%   [56.8 – 72.7]   135 edges / 106 callers
+  conf  95  import    20.0%                     5 edges /   5 callers  — too few to read
+  conf  80  name      48.0%   [40.2 – 55.9]   150 edges / 101 callers
+  conf  60  name      19.5%   [13.5 – 27.4]   123 edges /  43 callers
+  conf  45  name      34.8%                    23 edges /   6 callers  — too few to read
+
+  null holds caller and locality fixed:  z ≈ +6.13 ± 0.27, 31 informative strata
+  observed z = +6.83                     permutation p = 0.0082
 ```
 
-Confidence orders correctness. That is the claim the ranking rests on, and it is
-now measured rather than asserted.
+Confidence orders correctness over the range that carries data. Three things
+about how that is measured are load-bearing, and each of them makes the claim
+weaker than the first version of this file said.
+
+**The p-value had to be thrown away and recomputed.** Cochran-Armitage assumes
+independent observations. These are not: edges cluster hard by caller, and the
+buckets have very different caller counts. A caller whose edges all happen to be
+confirmed contributes a run of successes to whichever bucket it populates, and
+the statistic reads that as signal. So the null is generated rather than
+assumed — shuffle the confidence labels *within* each caller-and-locality
+stratum, which destroys any relationship between confidence and correctness
+while preserving exactly how the edges are grouped. That null sits at **z ≈ +6.13,
+not 0**. The textbook test reported `p = 1.5e-12` for this table; the honest
+figure is `p = 0.0082`. Almost all of the apparent significance was the grouping.
+
+**Confidence 100 is same-file by construction.** Scope resolution is lexical, so
+it cannot cross a file — every conf-100 edge is intra-file, while the name
+buckets are 5–18%. Part of the gap is locality, not confidence. Holding locality
+fixed is why the stratum count above is 31 rather than hundreds.
+
+**Two buckets are one or two functions wearing a percentage sign.** flask's
+`lib→lib` conf-45 bucket is 23 edges from 6 callers, and 7 of its 8 confirmations
+are inside a single function. It is printed, marked, and excluded from the
+monotonicity check rather than quoted as 34.8%.
+
+Pooled across populations the ordering is **not** monotone, and the tool now says
+so instead of asserting otherwise:
+
+```
+all populations, + MRO closure
+  conf 100  scope     60.0%   210 edges / 173 callers
+  conf  95  import    92.5%    53 edges /  53 callers
+  conf  80  name      37.7%   863 edges / 556 callers
+  conf  60  name      19.3%   767 edges / 222 callers
+  conf  45  name       5.2%   154 edges /  24 callers
+```
+
+**Import-resolved edges beat scope-resolved ones, 92.5% against 60.0%.** The two
+top confidences are ordered wrongly. One corpus is not enough to reorder the
+confidence model, so this is reported rather than acted on — but it is the most
+interesting thing the benchmark found, and it would not have been visible from
+any amount of agreement between static tools.
+
+The second labeller both confirms and complicates it. CodeGraph orders the name
+buckets identically — 70.5% / 33.3% / 7.6% for conf 80 / 60 / 45, over 919 / 745
+/ 66 edges — and puts import-resolved edges at **33.0%**, against execution's
+92.5%. Two independent labellers disagreeing by sixty points on one bucket is
+itself a finding, and the reason neither is ever quoted alone. Whichever is
+right, the name buckets are ordered the same way by both, which is the part the
+ranking actually depends on.
 
 ### What it found first, though, was that we were wrong
 
-Before the fixes below, the same measurement said something uncomfortable. On
-`lib→lib` — the population the ranking claim is actually about, rather than test
-code calling library code — the *proven* tier lost to the guess:
-
-```
-                      before      after
-  conf 100 scope      51.9%      65.2%
-  conf  80 name       54.5%      46.6%
-  trend             z=+4.85    z=+7.07
-```
-
+Before the fixes below, the same measurement said something worse. On `lib→lib`
+the *proven* tier lost to the guess: conf 100 at 51.9% against conf 80's 54.5%.
 And the falsification floor at confidence 100 was the highest of any bucket on
-two of three corpora. 12.9% of flask's scope-resolved call edges were provably
-false, and every sampled one was the same shape: `super().x()` inside `x`,
-resolved to itself.
+two of three corpora — 12.9% of flask's scope-resolved call edges were provably
+false, every sampled one the same shape: `super().x()` inside `x`, resolved to
+itself.
 
 ### Four defects, four different kinds of mistake
-
-| | before | after |
-|---|---|---|
-| `extends` into a non-class (django) | 8,655 | 146 |
-| edges crossing a language boundary | 14,533 | 0 |
-| calls into a vendored bundle | 13,718 | 918 |
-| self-calls with no recursion in the source | 1,285 | 425 |
-| **falsification floor, django** | **12.41%** | **0.83%** |
-| **semantic edges, django** | **206,100** | **179,987** |
-
-26,113 edges left django's graph and **24,076 of them — 92% — were ones a rule
-could prove wrong**. The remaining 2,037 are unverified: they may have been
-right. Structural edges are untouched, and excalidraw *gained* 184, because
-resolving `super()` through the classes a class declares finds edges that were
-previously dropped as too ambiguous.
-
-On flask, the one corpus where recall is measurable, the cost of all this was 7
-confirmed edges out of 541 — while `lib→lib` confirmation at confidence 100 went
-from 51.9% to 65.2%.
 
 **Dotted heritage.** `class X(a.B)` has two identifiers in its base list and only
 one is a base class. Both were tagged, so `a` — a module — was recorded as a
@@ -676,29 +694,116 @@ anywhere. django ships a minified bundle containing a function called `len`, so
 `get_models` — correct — and the receiver thrown away, after which a call through
 another object was indistinguishable from a bare one and the scope chain bound it
 to the nearest same-named method at confidence 100. References now carry how they
-reached their name.
+reached their name, and `super()` is resolved through the classes its own class
+declares.
 
-Node presence recall is unchanged at 95.0%, convergence still holds 5/5, and a
-full django index is 757 ms against 742 ms.
+### Three regressions those fixes introduced
+
+Found by an adversarial re-check, not by the fixes' own tests. Each is a case
+where a rule that was right in general was wrong in a shape nobody had listed.
+
+**The builtin filter became receiver-blind.** Moving it in front of the index
+made `client.open(url)` the builtin `open`. Every edge into flask's
+`FlaskClient.open` disappeared — all 198 of which the test suite executes — along
+with 8,867 python-to-python edges in django. `PY_BUILTINS` contains `open`,
+`set`, `list`, `filter`, `compile` and `type`; the names collide constantly. The
+check is now gated on a bare receiver.
+
+**Factory base classes lost their class.** Taking the last segment of a dotted
+base is right for `a.B` and wrong for `BaseManager.from_queryset(QuerySet)`,
+where it named a *method* — the same defect the fix was written to remove, one
+level along. A dotted base that is being called now yields the object it hangs
+off: `Manager extends BaseManager`, confidence 100.
+
+**A module receiver is not an opaque one.** `flask.redirect()` was demoted to a
+name match along with `client.open()`, because both are dotted. But an import is
+real evidence about a module and none about an object. References now carry the
+receiver's name, and the import tier applies when it matches something the file
+imports.
+
+### What actually changed in the graph
+
+A subtraction of two totals is not an audit. `bench/edgediff.py` joins the two
+dumps and reports what left, what arrived, and how much of what left any rule can
+prove wrong:
+
+```
+django, semantic edges     201,641  →  193,836     net -7,805
+  removed                   26,921
+  added                     19,116
+
+of what was removed
+  crosses a language boundary          11,962
+  targets a vendored bundle            10,562
+  extends a non-class                   8,499
+  self-call, no recursion in source        905
+  extends self                             473
+  any rule fires                        21,816    81.0%
+  no rule fires — unexamined             5,105    19.0%
+```
+
+Nineteen percent of what was removed was never checked. It is not therefore
+wrong, and it is not therefore right.
+
+### The floor is partly self-certifying, and says so
+
+Two of the five rules are the literal negation of a check the resolver now
+performs — `crosses a language boundary` is the complement of `same_family()`,
+and `extends self` is the `dst != src` suppression. After the fix they report
+zero *by construction*. Keeping them is worth it, because a regression would
+light them up; quoting a floor that includes them as proof the resolver improved
+is circular. `edgefacts` marks them and computes the headline over the rest:
+
+```
+rules the resolver does not enforce
+  django        1,487 of 196,607   0.76%
+  flask             28 of   3,356   0.83%
+  excalidraw        81 of  28,144   0.29%
+```
+
+The percentage has a denominator that moves when the resolver changes, so a
+before/after comparison has to quote counts as well — which is what the diff
+above does.
 
 ### Recall against execution
 
 ```
-observed edges                          2,712
-both endpoints are arbor nodes          2,682
-                                     all      direct only
-  exact match                       19.9%           24.8%
-  + constructor rule                23.3%           29.1%
-  + MRO closure                     23.7%           29.7%
+observed edges                       2,712
+both endpoints are arbor nodes       2,682
+of those, direct calls               2,101
+and 581 attributed by walking up past foreign frames
+
+                                   direct    incl. walked
+  exact match                       25.4%           20.5%
+  + constructor rule                29.8%           23.9%
+  + MRO closure                     30.3%           24.3%
 ```
 
 The staged ladder is printed rather than summarised: each rule makes matching
 easier, and a reader who sees only the last number cannot tell how much is arbor
 being right and how much is the comparison being generous.
 
-A quarter of the direct misses come out of five call sites. `Flask.dispatch_request`
-alone accounts for 258 of them, and it does `self.view_functions[rule.endpoint](...)`
-— a dictionary lookup, then a call. No static analysis follows that.
+**The walked column is reported second and never as the headline.** When a
+repository function calls into a library and the library calls back, the hop
+counter blames the nearest in-repo frame above — which did not make that call.
+`save_session → _lazy_sha1` at seven hops is a call `itsdangerous` made, and
+nothing in `save_session` names `_lazy_sha1`. Those 581 edges match at 2.8%,
+which is what you would expect of edges that are not ours to have.
+
+A quarter of the direct misses come out of five call sites.
+`Flask.dispatch_request` alone accounts for 258, and it does
+`self.view_functions[rule.endpoint](...)` — a dictionary lookup, then a call. No
+static analysis follows that. One of the five, a decorator wrapper, is
+followable in principle and is not dispatch; the framing is "five sites" because
+that is where the fraction was counted, and callers six through fourteen are the
+same mechanism.
+
+The fixes moved recall **up**, once the three regressions above were repaired.
+Measured with the same matcher against the same trace, direct calls only:
+exact-match 24.9% → 25.4%, `+MRO closure` 30.0% → 30.3%. The
+intermediate state — after the four fixes and before the regressions were found —
+was *below* the starting point, and nothing in the suite flagged it. Runtime
+recall is now printed on every run for that reason.
 
 ### What this does not measure
 

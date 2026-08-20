@@ -26,7 +26,7 @@ On-disk size for django: **7.9 MB** against 163 MB. Row-based storage with a ful
 | sync, nothing changed | **90 ms** | 8.0× |
 | sync, one file changed | **142 ms** | 5.1× |
 
-`bench/converge.sh` asserts that an incremental sync produces a **byte-identical** graph to a full reindex across modify, revert, add and delete. It found that the graph was not reproducible at all — two full indexes of identical source differed, from concurrent symbol interning, an unstable sort on a partial key, hash-map iteration deciding import shadowing, and unsorted co-change edges. All fixed; five invariants hold.
+`bench/converge.sh` asserts that an incremental sync produces a graph **semantically identical** to a full reindex across modify, revert, add and delete — every node identity, its location, and every edge with its confidence. Not byte-identical: node ids are an allocation detail, and a sync deliberately keeps the ids it had where a full index packs them from zero. Full indexes *are* byte-reproducible; the incremental path is not, and that is by design rather than by omission. It found that the graph was not reproducible at all — two full indexes of identical source differed, from concurrent symbol interning, an unstable sort on a partial key, hash-map iteration deciding import shadowing, and unsorted co-change edges. All fixed; five invariants hold.
 
 ### Startup — the number that decides whether an agent uses you at all
 
@@ -79,17 +79,21 @@ Nodes being right does not make edges right, and 83.5% of django's call edges ar
 
 `bench/edgetrace.py` runs flask's own test suite under `sys.monitoring` and records every call that actually happened. An observed edge exists — no argument.
 
-| confidence | provenance | runtime-confirmed | 95% interval |
-|---:|---|---:|---|
-| 100 | scope | **60.0%** | 53.3 – 66.4 |
-| 95 | import | **94.3%** | 81.4 – 98.4 |
-| 80 | name | 36.8% | 33.6 – 40.1 |
-| 60 | name | 20.3% | 17.6 – 23.2 |
-| 45 | name | 5.2% | 2.7 – 9.9 |
+| confidence | provenance | runtime-confirmed | 95% interval | edges / callers |
+|---:|---|---:|---|---:|
+| 100 | scope | **60.0%** | 53.3 – 66.4 | 210 / 173 |
+| 95 | import | **92.5%** | 82.1 – 97.0 | 53 / 53 |
+| 80 | name | 37.7% | 34.5 – 40.9 | 863 / 556 |
+| 60 | name | 19.3% | 16.7 – 22.2 | 767 / 222 |
+| 45 | name | 5.2% | 2.7 – 9.9 | 154 / 24 |
 
-Cochran-Armitage trend `z=+15.1`, `p=8.6e-52`. CodeGraph agreement, an entirely independent labeller, orders them the same way.
+The trend is tested against a null that keeps the clustering: edges group by caller, so the confidence labels are shuffled *within* each caller and locality stratum, which destroys any real relationship while preserving how the edges are grouped. On `lib→lib` — the population the ranking claim is about — that null sits at `z≈+6.13` and the observed statistic is `z=+6.83`, permutation `p=0.0082`. A textbook Cochran-Armitage test on the same data reports `p=1.5e-12`; almost all of that is the grouping, not the confidence.
 
-The first run of this said something else. On library-internal edges the *proven* tier scored 51.9% against the guess's 54.5% — confidence 100 was losing. Four defects came out of that: a dotted base class recorded its module as a superclass (47.4% of django's `extends` edges), the name index had no language partition (14,533 edges crossing one), the builtin filter was unreachable whenever a repo defined the name anywhere (2,878 Python `len()` calls landing in a minified JS bundle), and the receiver was discarded before resolution, so `super().x()` inside `x` resolved to itself. django's graph lost 39,919 edges and kept every measured property.
+Two things the table says that the headline does not. `conf 95` (import-resolved) *beats* `conf 100` (scope-resolved) — 92.5% against 60.0% pooled — so the two top confidences are ordered wrongly. And `conf 100` is same-file by construction, because scope resolution is lexical and cannot cross a file, so part of its advantage is locality rather than confidence.
+
+CodeGraph agreement, an entirely independent labeller, orders the name buckets identically — 70.5% / 33.3% / 7.6% for conf 80 / 60 / 45 — and disagrees sharply about import-resolved edges, accepting 33.0% of them where execution confirms 92.5%. Two labellers disagreeing that hard on one bucket is a result in itself, and it is why neither is quoted alone.
+
+The first run of this said something else. On library-internal edges the *proven* tier scored 51.9% against the guess's 54.5% — confidence 100 was losing. Four defects came out of that: a dotted base class recorded its module as a superclass (47.4% of django's `extends` edges), the name index had no language partition (14,533 edges crossing one), the builtin filter was unreachable whenever a repo defined the name anywhere (2,878 Python `len()` calls landing in a minified JS bundle), and the receiver was discarded before resolution, so `super().x()` inside `x` resolved to itself. A real diff of the two graphs — `bench/edgediff.py`, not a subtraction of totals — says 26,921 edges left django and 19,116 arrived, and that an independent rule fires on 81% of what left. The other 19% is unexamined, which is a different statement from correct. Node presence recall is unchanged at 95.0% and runtime recall rose.
 
 Neither labeller measures precision — `bench/edgefacts.py` bounds it from below without an oracle, and a rule that does not fire is not a correct edge.
 

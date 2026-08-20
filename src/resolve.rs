@@ -438,6 +438,10 @@ pub fn resolve(
                 }
             }
 
+            // Module paths this file imports, so a dotted call through one can
+            // be told apart from a dotted call through an object.
+            let import_names: FxHashSet<SymId> = unit.imports.iter().map(|i| i.module).collect();
+
             // What each class in this file declares as a base. The heritage
             // list is inside the class node, so its Extends refs carry that
             // class as their scope — the information is already here, it was
@@ -458,9 +462,25 @@ pub fn resolve(
                 // receiver decides that, and we do not know what it is. Binding
                 // it through the scope chain anyway is what made a method call
                 // itself: `super().x()` inside `x` resolved to `x`.
-                if r.recv.lexical() {
-                    // tier 1 — lexical scope chain
-                    if let Some(hit) = walk_scopes(&unit.defs, &scoped, r.scope, r.name) {
+                // A call through an imported module is still an import: the
+                // module was named explicitly and its exports are known.
+                // `flask.redirect()` loses nothing by being dotted. Only a call
+                // through an *object* is opaque, because nothing here says what
+                // the object is.
+                let via_module = r
+                    .recv_name
+                    .is_some_and(|n| import_names.contains(&n));
+
+                if r.recv.lexical() || via_module {
+                    // tier 1 — lexical scope chain. Never for a module
+                    // receiver: `flask.redirect` is not whatever `redirect`
+                    // happens to mean in this file.
+                    if let Some(hit) = r
+                        .recv
+                        .lexical()
+                        .then(|| walk_scopes(&unit.defs, &scoped, r.scope, r.name))
+                        .flatten()
+                    {
                         // A class is on the scope stack while its own base list
                         // is being read, so `class Migration(migrations.Migration)`
                         // finds itself. Recursion makes a self-call legitimate;
@@ -506,17 +526,25 @@ pub fn resolve(
                     st.weak_read += 1;
                     continue;
                 }
-                // The language runtime owns this name. Scope and import have
-                // already had their turn, so anything reaching here that is
-                // called `len` in Python is the builtin.
-                let mine = if langs[fid as usize] == Lang::Python {
-                    &py_builtins
-                } else {
-                    &js_builtins
-                };
-                if mine.contains(&r.name) {
-                    st.builtin += 1;
-                    continue;
+                // The language runtime owns this name — but only when nothing
+                // else is being asked. `open(path)` is the builtin;
+                // `client.open(url)` is a method on someone's object that
+                // happens to share its name. Consulting the builtin list
+                // without looking at the receiver deleted every edge into
+                // flask's `FlaskClient.open`, all 198 of which the test suite
+                // actually executes, and 8,867 python-to-python edges in
+                // django. PY_BUILTINS contains `open`, `set`, `list`,
+                // `filter`, `compile` and `type`; the names collide constantly.
+                if r.recv == Recv::Bare {
+                    let mine = if langs[fid as usize] == Lang::Python {
+                        &py_builtins
+                    } else {
+                        &js_builtins
+                    };
+                    if mine.contains(&r.name) {
+                        st.builtin += 1;
+                        continue;
+                    }
                 }
                 let Some(cands) = by_name.get(&r.name) else {
                     // defined nowhere in the repo: third-party dependency

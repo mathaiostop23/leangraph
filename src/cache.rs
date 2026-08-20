@@ -24,7 +24,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAGIC: [u8; 8] = *b"ARBORC\x00\x03";
+const MAGIC: [u8; 8] = *b"ARBORC\x00\x04";
 const N_SECTIONS: usize = 10;
 
 const S_FILES: usize = 0;
@@ -89,6 +89,9 @@ struct CRef {
     /// anyway: a cache written before the receiver existed holds refs whose
     /// meaning has changed, not merely a missing field.
     recv: u32,
+    /// The receiver's interned name; `u32::MAX` for none.
+    recv_name: u32,
+    _pad: u32,
 }
 
 #[repr(C)]
@@ -231,6 +234,8 @@ pub fn write(
                 span_e: r.span.end,
                 scope: r.scope,
                 recv: r.recv as u32,
+                recv_name: r.recv_name.map_or(u32::MAX, |n| n.into_usize() as u32),
+                _pad: 0,
             });
         }
         for m in &u.imports {
@@ -374,6 +379,7 @@ pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>>
                     },
                     scope: r.scope,
                     recv: Recv::from_u8(r.recv as u8),
+                    recv_name: (r.recv_name != u32::MAX).then(|| map(r.recv_name)),
                 })
                 .collect(),
             imports: imports[cf.imp_at as usize..(cf.imp_at + cf.imp_n) as usize]

@@ -21,7 +21,7 @@ an oracle, and that floor is the honest complement to the numbers here.
 
 Usage: bench/edges.py [--trace FILE] [repo]
 """
-import argparse, json, math, os, sqlite3, subprocess, sys
+import argparse, json, math, os, random, sqlite3, subprocess, sys
 from collections import Counter, defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +32,10 @@ ARBOR = os.path.join(HERE, "..", "target", "release", "arbor")
 REPOS = os.environ.get("ARBOR_BENCH_REPOS", os.path.join(HERE, "..", "..", ".bench-repos"))
 
 BUCKETS = [(100, "scope"), (95, "import"), (80, "name"), (60, "name"), (45, "name")]
+
+# Below this many distinct callers a bucket is one or two functions wearing a
+# percentage sign. Not a statistical threshold — a readability one.
+MIN_CLUSTERS = 12
 
 
 # ------------------------------------------------------------------ statistics
@@ -61,25 +65,73 @@ def two_prop(k1, n1, k2, n2):
     return (z, math.erfc(abs(z) / math.sqrt(2)))
 
 
-def trend(pairs):
-    """Cochran-Armitage over ordered confidence levels. Answers the actual
-    question — is there a monotone relationship — rather than comparing two
-    buckets and hoping the rest follow."""
-    pairs = [(s, k, n) for s, k, n in pairs if n > 0]
+def ca_z(obs):
+    """Cochran-Armitage statistic over (confidence, confirmed) observations."""
+    agg = defaultdict(lambda: [0, 0])
+    for conf, ok in obs:
+        agg[conf][0] += int(ok)
+        agg[conf][1] += 1
+    pairs = [(s, k, n) for s, (k, n) in agg.items() if n > 0]
     if len(pairs) < 3:
-        return (0.0, 1.0)
+        return 0.0
     N = sum(n for _, _, n in pairs)
     K = sum(k for _, k, _ in pairs)
     if N == 0 or K == 0 or K == N:
-        return (0.0, 1.0)
+        return 0.0
     p = K / N
     sbar = sum(s * n for s, _, n in pairs) / N
     num = sum((s - sbar) * (k - n * p) for s, k, n in pairs)
     var = p * (1 - p) * sum(n * (s - sbar) ** 2 for s, _, n in pairs)
-    if var <= 0:
-        return (0.0, 1.0)
-    z = num / math.sqrt(var)
-    return (z, math.erfc(abs(z) / math.sqrt(2)))
+    return num / math.sqrt(var) if var > 0 else 0.0
+
+
+def clustered_trend(obs, strata, nperm=4000, seed=0):
+    """Cochran-Armitage against a null that keeps the clustering.
+
+    The textbook test assumes every observation is an independent draw. These
+    are not: edges cluster by caller, and the confidence buckets have very
+    different caller counts. A caller whose edges are all confirmed contributes
+    a run of successes to whichever bucket it happens to populate, and the
+    statistic reads that as signal.
+
+    So the null is generated rather than assumed: shuffle the confidence labels
+    *within* each stratum, which destroys any relationship between confidence
+    and correctness while preserving exactly how the edges are grouped. On flask
+    that null sits at z≈+5 rather than 0 — five of the seven z the naive test
+    reported were the grouping, not the confidence.
+
+    Returns (observed z, null mean, null sd, permutation p, informative strata).
+    """
+    rng = random.Random(seed)
+    obs = list(obs)
+    z_obs = ca_z(obs)
+    groups = defaultdict(list)
+    for (conf, ok), st in zip(obs, strata):
+        groups[st].append((conf, ok))
+    # A stratum with one confidence level cannot be permuted into anything
+    # different, so it carries no information about the question.
+    informative = sum(1 for g in groups.values() if len({c for c, _ in g}) > 1)
+    if informative == 0:
+        return (z_obs, 0.0, 0.0, 1.0, 0)
+    null = []
+    for _ in range(nperm):
+        shuffled = []
+        for g in groups.values():
+            confs = [c for c, _ in g]
+            rng.shuffle(confs)
+            shuffled.extend((c, ok) for c, (_, ok) in zip(confs, g))
+        null.append(ca_z(shuffled))
+    mean = sum(null) / len(null)
+    var = sum((x - mean) ** 2 for x in null) / max(len(null) - 1, 1)
+    hits = sum(1 for x in null if x >= z_obs)
+    return (z_obs, mean, math.sqrt(var), (hits + 1) / (nperm + 1), informative)
+
+
+def monotone(rates):
+    """Is the ordering actually monotone? A positive trend statistic is not the
+    same claim, and printing the stronger one over a table with a visible
+    inversion is the tool asserting the conclusion it exists to test."""
+    return all(a >= b for a, b in zip(rates, rates[1:]))
 
 
 # ----------------------------------------------------------------------- input
@@ -250,27 +302,53 @@ def codegraph_edges(repo):
 
 # --------------------------------------------------------------------- reports
 
-def calibration(name, rows, label_fn, eligible_fn, note):
-    """One confidence table. `rows` are arbor edges; `label_fn` says confirmed."""
+def calibration(name, rows, label_fn, eligible_fn, note, stratify=None):
+    """One confidence table.
+
+    `stratify` names what the permutation null holds fixed. Caller is always
+    held fixed; adding locality matters because scope resolution is lexical and
+    therefore *cannot* cross a file — the confidence-100 bucket is 100%
+    same-file by construction, and part of any gap it shows is that, not
+    confidence.
+    """
     print(f"\n  \033[1m{name}\033[0m   \033[2m{note}\033[0m")
-    print(f"    {'conf':>5} {'prov':<8}{'eligible':>10}{'confirmed':>11}{'rate':>8}   95% interval")
-    data = []
+    print(f"    {'conf':>5} {'prov':<8}{'edges':>8}{'callers':>9}{'ok':>7}{'rate':>8}   95% interval")
+    obs, strata, rates = [], [], []
+    shown = 0
     for conf, prov in BUCKETS:
         el = [e for e in rows if e["conf"] == conf and e["prov"] == prov and eligible_fn(e)]
         if not el:
             continue
+        callers = {(e["sf"], norm_qual(e["sq"])) for e in el}
         k = sum(1 for e in el if label_fn(e))
         lo, hi = wilson(k, len(el))
-        data.append((conf, k, len(el)))
-        print(f"    {conf:>5} {prov:<8}{len(el):>10,}{k:>11,}{100*k/len(el):>7.1f}%   "
-              f"{lo:5.1f} – {hi:5.1f}")
-    if len(data) >= 3:
-        z, p = trend(data)
-        verdict = "confidence orders correctness" if z > 0 and p < 0.05 else \
-                  "INVERTED — lower confidence scores better" if z < 0 and p < 0.05 else \
-                  "no monotone relationship"
-        print(f"    \033[1mtrend\033[0m  z={z:+.2f}  p={p:.2g}   → {verdict}")
-    return data
+        for e in el:
+            obs.append((conf, label_fn(e)))
+            key = (e["sf"], norm_qual(e["sq"]))
+            strata.append((key, e["sf"] == e["df"]) if stratify == "locality" else key)
+        # A bucket carried by a handful of callers is not a rate. flask's
+        # conf-45 lib->lib bucket is 23 edges from 6 callers with 7 of its 8
+        # confirmations inside one function; quoting 34.8% for that invites a
+        # reader to compare it with a bucket of 150.
+        weak = len(callers) < MIN_CLUSTERS
+        mark = "  \033[2m(too few callers to read as a rate)\033[0m" if weak else ""
+        if not weak:
+            rates.append(k / len(el))
+            shown += 1
+        print(f"    {conf:>5} {prov:<8}{len(el):>8,}{len(callers):>9,}{k:>7,}"
+              f"{100*k/len(el):>7.1f}%   {lo:5.1f} – {hi:5.1f}{mark}")
+
+    if shown >= 3:
+        z, mu, sd, p, inf = clustered_trend(obs, strata)
+        held = "caller" if stratify != "locality" else "caller and locality"
+        print(f"    \033[2mnull holds {held} fixed: z≈{mu:+.2f} ± {sd:.2f} "
+              f"over {inf} informative strata\033[0m")
+        verdict = ("ordering is monotone and survives the null"
+                   if p < 0.05 and monotone(rates)
+                   else "positive but NOT monotone — read the table" if p < 0.05
+                   else "does not survive the null")
+        print(f"    \033[1mtrend\033[0m  z={z:+.2f}  permutation p={p:.2g}   → {verdict}")
+    return obs
 
 
 def main():
@@ -304,18 +382,31 @@ def main():
                for e in tedges]
         joinable = [o for o in obs if (o[0], o[1]) in known and (o[2], o[3]) in known]
         direct = [o for o in joinable if o[4] == 0]
+        walked = [o for o in joinable if o[4] > 0]
         print(f"\n  \033[1mrecall against execution\033[0m")
         print(f"    observed edges                     {len(obs):>8,}")
         print(f"    both endpoints are arbor nodes     {len(joinable):>8,}")
-        print(f"    {'':<35}{'all':>12}{'direct only':>14}")
+        print(f"    of those, direct calls             {len(direct):>8,}")
+        print(f"    \033[2mand {len(walked):,} attributed by walking up past foreign "
+              f"frames\033[0m")
+        print(f"    {'':<35}{'direct':>10}{'incl. walked':>15}")
         for stage, label in ((1, "exact match"), (2, "+ constructor rule"),
                              (3, "+ MRO closure")):
             a = sum(1 for o in joinable if static.has(o, stage))
             d = sum(1 for o in direct if static.has(o, stage))
             bold = "\033[1m" if stage == 3 else ""
             end = "\033[0m" if stage == 3 else ""
-            print(f"    {label:<35}{bold}{100*a/max(len(joinable),1):>11.1f}%{end}"
-                  f"{100*d/max(len(direct),1):>13.1f}%")
+            print(f"    {label:<35}{bold}{100*d/max(len(direct),1):>9.1f}%{end}"
+                  f"{100*a/max(len(joinable),1):>14.1f}%")
+        # The walked column is reported second and never as the headline. When
+        # a repository function calls into a library and the library calls back,
+        # the hop counter blames the nearest in-repo frame above — which did not
+        # make that call. flask's `save_session -> _lazy_sha1` at seven hops is
+        # a call `itsdangerous` made, and nothing in `save_session` names
+        # `_lazy_sha1`. Those edges are not arbor's to have.
+        wk = sum(1 for o in walked if static.has(o, 3))
+        print(f"    \033[2mthe walked edges alone: {100*wk/max(len(walked),1):.1f}% — "
+              f"they are mostly calls a library made, not ones we missed\033[0m")
         # Where the remainder lives. A handful of dispatch sites dominate it,
         # and a reader who is not told that will read the headline as a uniform
         # failure rather than as a small number of places no static analysis
@@ -343,7 +434,8 @@ def main():
                     if len(sub) > 40:
                         calibration(f"runtime-confirmed, {label} — {pop} only",
                                     sub, lab, elig,
-                                    "the population the ranking claim is about")
+                                    "the population the ranking claim is about",
+                                    stratify="locality")
     else:
         print("\n  SKIP runtime oracle: no trace (see bench/edgetrace.py)")
 

@@ -138,6 +138,11 @@ pub struct Ref {
     pub scope: DefIdx,
     /// What the call was made through.
     pub recv: Recv,
+    /// The receiver's own name, where it had one. `flask.redirect()` is a call
+    /// through a module and an import is real evidence about it;
+    /// `client.open()` is a call through an object and it is not. Without the
+    /// name the two are the same reference.
+    pub recv_name: Option<SymId>,
 }
 
 /// How a reference reached its name.

@@ -83,7 +83,8 @@ fn walk(
         // segments before it are a module or a namespace, and recording them
         // as superclasses is not a near miss — `migrations` is not a class.
         if !heritage.is_empty() && spec.is_dotted(kind) {
-            if let Some(seg) = spec.dotted_member(&node) {
+            let is_callee = spec.is_callee_of_parent(&node);
+            if let Some(seg) = spec.base_name_node(&node, is_callee) {
                 if let Some(txt) = node_text(&seg, src) {
                     consume_idents(&node, spec, &mut consumed);
                     unit.refs.push(Ref {
@@ -92,6 +93,7 @@ fn walk(
                         span: Span::of(&node),
                         scope,
                         recv: Recv::Bare,
+                        recv_name: None,
                     });
                 }
             }
@@ -137,6 +139,10 @@ fn walk(
                         span: Span::of(&node),
                         scope,
                         recv: spec.recv_of(&node, src),
+                        recv_name: spec
+                            .recv_node(&node)
+                            .and_then(|n| node_text(&n, src))
+                            .map(|t| interner.get_or_intern(t)),
                     });
                 }
             }
@@ -165,6 +171,7 @@ fn walk(
                     span: Span::of(&node),
                     scope,
                     recv: Recv::Bare,
+                    recv_name: None,
                 });
             }
         }

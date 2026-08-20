@@ -60,9 +60,24 @@ def main():
     executed = {}       # (file, qualname) -> times entered
     flags = {}          # (file, qualname) -> "generator" | "coroutine" | ""
     bases = {}          # qualname -> [base qualnames], filled after the run
-    stats = {"events": 0, "disabled": 0, "no_caller": 0, "nonlocal_caller": 0}
+    stats = {"events": 0, "disabled": 0, "no_caller": 0, "nonlocal_caller": 0,
+             "stale_bytecode": 0}
+    # A rejected path that ends with the repository's own name is almost always
+    # stale bytecode: `__pycache__` records the co_filename the module had when
+    # it was compiled, so moving a checkout leaves every cached module claiming
+    # its old location. The tracer then silences them all and reports a
+    # perfectly plausible, badly wrong number — 584 edges instead of 2,712,
+    # with no error anywhere.
+    marker = os.sep + os.path.basename(root) + os.sep
 
     seen_paths = {}
+    # The directory the run started in. A code object's co_filename can be
+    # relative, and `abspath` would resolve it against whatever the *current*
+    # directory is — which pytest changes constantly, because tests chdir into
+    # temporary directories. A file resolved while cwd was elsewhere looks
+    # foreign, gets DISABLE'd, and is then silenced for the rest of the process.
+    # Measured on flask: 19 of 485 test functions were ever seen.
+    base = os.getcwd()
 
     def rel(path):
         if not path:
@@ -75,7 +90,8 @@ def main():
         # it dangerous.
         if path.startswith("<"):
             return None
-        ap = os.path.abspath(path)
+        ap = path if os.path.isabs(path) else os.path.join(base, path)
+        ap = os.path.normpath(ap)
         if not ap.startswith(root + os.sep):
             return None
         r = os.path.relpath(ap, root).replace("\\", "/")
@@ -94,6 +110,8 @@ def main():
         callee_rel = rel(code.co_filename)
         if callee_rel is None:
             stats["disabled"] += 1
+            if marker in code.co_filename:
+                stats["stale_bytecode"] += 1
             # Permanently silence this code object: foreign libraries dominate
             # the event count and none of their frames can ever be an edge we
             # claim to have.
@@ -192,6 +210,13 @@ def main():
         for q, bs in sorted(bases.items()):
             out.write(json.dumps({"kind": "bases", "q": q, "b": bs}) + "\n")
 
+    if stats["stale_bytecode"] > 20:
+        print(f"\n  \033[31mWARNING\033[0m {stats['stale_bytecode']:,} code objects "
+              f"named a path under a *different* checkout of this repository.\n"
+              f"  That is stale bytecode from a moved or renamed directory. Delete\n"
+              f"  __pycache__ and .pytest_cache under {root} and run again — the\n"
+              f"  numbers below are wrong, and wrong in a way that looks fine.\n",
+              file=sys.stderr)
     print(f"  traced {len(edges):,} distinct in-repo edges over "
           f"{len(executed):,} executed functions "
           f"({stats['events']:,} events, {stats['disabled']:,} silenced)",

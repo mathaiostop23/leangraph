@@ -27,6 +27,11 @@ python3 bench/edgefacts.py "$@"
 TRACE=""
 FLASK="$CORPUS/flask"
 if [ -d "$FLASK/src/flask" ] && python3 -c 'import pytest' 2>/dev/null; then
+  # Stale bytecode names the checkout it was compiled in, which silently
+  # removes most of the trace after a move. Cheap to prevent, invisible to
+  # diagnose.
+  find "$FLASK" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
+  find "$FLASK" -name .pytest_cache -type d -prune -exec rm -rf {} + 2>/dev/null
   TRACE=$(mktemp -t arbor-trace).jsonl
   echo
   echo "──────────  running flask's own test suite under a tracer  ──────────"

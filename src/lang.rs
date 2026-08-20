@@ -268,6 +268,34 @@ impl Spec {
         first_field(node, &self.f_member)
     }
 
+    /// The identifier naming a dotted base class.
+    ///
+    /// `a.B` names `B`. But `BaseManager.from_queryset(QuerySet)` is a factory:
+    /// the base is whatever it returns, which is unknowable, and the most
+    /// informative thing in the expression is the class the factory hangs off.
+    /// Naming `from_queryset` — a method — is the same defect this rule was
+    /// written to remove, one level along.
+    pub fn base_name_node<'t>(&self, dotted: &Node<'t>, is_callee: bool) -> Option<Node<'t>> {
+        if is_callee {
+            let obj = first_field(dotted, &self.f_object)?;
+            return if self.is_dotted(obj.kind_id()) {
+                first_field(&obj, &self.f_member)
+            } else if self.is_ident(obj.kind_id()) {
+                Some(obj)
+            } else {
+                None
+            };
+        }
+        first_field(dotted, &self.f_member)
+    }
+
+    /// Is this node the thing being called by its parent?
+    pub fn is_callee_of_parent(&self, node: &Node) -> bool {
+        node.parent()
+            .and_then(|p| first_field(&p, &self.f_callee))
+            .is_some_and(|c| c.id() == node.id())
+    }
+
     #[inline]
     pub fn is_import(&self, k: u16) -> bool {
         self.imports.contains(&k)
@@ -317,6 +345,15 @@ impl Spec {
             Some(t) if t == "super" || t.starts_with("super(") => Recv::Super,
             _ => Recv::Other,
         }
+    }
+
+    /// The receiver expression of a call, if it has one.
+    pub fn recv_node<'t>(&self, call: &Node<'t>) -> Option<Node<'t>> {
+        let callee = first_field(call, &self.f_callee)?;
+        if !self.is_dotted(callee.kind_id()) {
+            return None;
+        }
+        first_field(&callee, &self.f_object)
     }
 
     /// The node holding an import's module path.

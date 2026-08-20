@@ -139,12 +139,18 @@ def rule_vendored_target(e, src):
     return e["prov"] == "name" and vendored(e["df"]) and not vendored(e["sf"])
 
 
+# `enforced` marks a rule the resolver now guarantees can never fire — the rule
+# is the literal negation of a check in src/. Those rules are worth keeping,
+# because a regression would light them up, but they cannot be evidence that the
+# resolver improved: after the guard exists, they report zero by construction.
+# Quoting a floor that includes them as proof of a fix is circular, so the
+# headline is computed over the independent rules and both are printed.
 RULES = [
-    ("extends self",       rule_self_loop_extends),
-    ("self-call, no recursion in source", rule_self_call_not_recursive),
-    ("extends a non-class", rule_extends_non_class),
-    ("crosses a language boundary", rule_cross_language),
-    ("targets a vendored bundle", rule_vendored_target),
+    ("extends self", rule_self_loop_extends, True),
+    ("self-call, no recursion in source", rule_self_call_not_recursive, False),
+    ("extends a non-class", rule_extends_non_class, False),
+    ("crosses a language boundary", rule_cross_language, True),
+    ("targets a vendored bundle", rule_vendored_target, False),
 ]
 
 SEMANTIC = ("calls", "extends", "references")
@@ -180,10 +186,11 @@ def report(repo):
     by_bucket = Counter()
     falsified = defaultdict(set)      # bucket -> indices
 
+    indep = defaultdict(set)
     for i, e in enumerate(sem):
         b = (e["ek"], e["prov"], e["conf"])
         by_bucket[b] += 1
-        for rname, fn in RULES:
+        for rname, fn, enforced in RULES:
             try:
                 hit = fn(e, src)
             except Exception:
@@ -191,29 +198,37 @@ def report(repo):
             if hit:
                 fired[rname].add(i)
                 falsified[b].add(i)
+                if not enforced:
+                    indep[b].add(i)
 
     print(f"\n\033[1m{name}\033[0m — {len(sem):,} semantic edges "
           f"({len(edges):,} total, {len(edges)-len(sem):,} structural)")
 
     print("\n  \033[2mfalsified by rule\033[0m")
-    for rname, _ in RULES:
+    for rname, _, enforced in RULES:
         n = len(fired[rname])
-        print(f"    {rname:<38} {n:>7,}  {100.0*n/len(sem):>5.2f}%")
+        tag = "  \033[2m← the resolver now forbids this\033[0m" if enforced else ""
+        print(f"    {rname:<38} {n:>7,}  {100.0*n/len(sem):>5.2f}%{tag}")
     any_fired = set().union(*fired.values()) if fired else set()
-    print(f"    {'—— at least one rule ——':<38} {len(any_fired):>7,}  "
+    any_indep = set().union(*indep.values()) if indep else set()
+    print(f"    {'—— any rule ——':<38} {len(any_fired):>7,}  "
           f"{100.0*len(any_fired)/len(sem):>5.2f}%")
+    print(f"    \033[1m{'—— rules the resolver does not enforce ——':<38} {len(any_indep):>7,}  "
+          f"{100.0*len(any_indep)/len(sem):>5.2f}%\033[0m")
 
     print("\n  \033[2mfloor on the error rate, by confidence bucket\033[0m")
-    print(f"    {'kind':<11}{'provenance':<11}{'conf':>5}{'edges':>9}{'falsified':>11}{'floor':>8}")
+    print(f"    {'kind':<11}{'provenance':<11}{'conf':>5}{'edges':>9}"
+          f"{'any rule':>10}{'independent':>13}{'floor':>8}")
     for b in sorted(by_bucket, key=lambda x: (x[0], -x[2])):
         ek, prov, conf = b
-        n, f = by_bucket[b], len(falsified[b])
-        print(f"    {ek:<11}{prov:<11}{conf:>5}{n:>9,}{f:>11,}{100.0*f/n:>7.1f}%")
+        n, f, ind = by_bucket[b], len(falsified[b]), len(indep[b])
+        print(f"    {ek:<11}{prov:<11}{conf:>5}{n:>9,}{f:>10,}{ind:>13,}"
+              f"{100.0*ind/n:>7.1f}%")
 
     g, n, ratio = fanout(edges)
     print(f"\n  \033[2mfan-out\033[0m  {n:,} call edges over {g:,} (caller, name) groups"
           f"  →  indicative precision ceiling {ratio:.1f}%")
-    return name, len(sem), len(any_fired)
+    return name, len(sem), len(any_indep)
 
 
 def main():
@@ -225,9 +240,11 @@ def main():
         except subprocess.CalledProcessError:
             print(f"\n  SKIP {t}: no graph — run `arbor index` first")
     if len(rows) > 1:
-        print("\n\033[1m  floor across corpora\033[0m")
+        print("\n\033[1m  floor across corpora (independent rules only)\033[0m")
         for n, sem, bad in rows:
             print(f"    {n:<14}{bad:>8,} of {sem:>9,}   {100.0*bad/sem:>5.2f}%")
+        print("\n  \033[2mThe percentage has a denominator that moves when the resolver\n"
+              "  changes, so a before/after comparison must quote the counts too.\033[0m")
     print("\n  A rule that does not fire is not a correct edge. This is a floor.\n")
 
 

@@ -33,7 +33,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 2 · CSR + persistence | ✅ **Done.** 7.9 MB vs 163 MB; ~20 µs load |
 | 2b · Context builder | ✅ **Done.** Confidence-ranked, budget-capped |
 | 3 · MCP server (**B ships**) | ✅ **Done.** 3.9 ms startup vs 561.7 ms |
-| 4 · Incremental sync | ✅ **Done.** 5–8x; byte-identical to a full reindex |
+| 4 · Incremental sync | ✅ **Done.** 5–8x; semantically identical to a full reindex |
 | 4b · Stable node ids | ✅ **Done.** Persistent key table; ids survive edits |
 | 4c · Git tree-diff sync | ✅ **Done.** `--since <sha>` for push webhooks |
 | 4d · Per-file edge cache + CSR patching | ⬜ — the rest of the delta overlay |
@@ -43,7 +43,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 5d · Egress policy | ✅ **Done.** SSRF closed on clone URLs; optional host allowlist |
 | 6 · Breadth | ⬜ |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |
-| — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, p=8.6e-52 |
+| — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, clustered p=0.008 |
 | — · Cost benchmark | ✅ **Done, and now reproducible.** 26x fewer tokens at matched recall |
 
 **Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:
