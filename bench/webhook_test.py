@@ -8,7 +8,7 @@ test that asserts it actually does.
 
 Usage: bench/webhook_test.py [base_url] [secret]
 """
-import hashlib, hmac, json, subprocess, sys, time, urllib.error, urllib.request
+import hashlib, hmac, json, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7788"
 SECRET = (sys.argv[2] if len(sys.argv) > 2 else "test-secret").encode()
@@ -25,6 +25,27 @@ def post(payload, event="issues", delivery=None, sign=True, secret=SECRET):
     req.add_header("x-github-delivery", delivery or f"d-{time.time_ns()}")
     if sign:
         req.add_header("x-hub-signature-256", sig)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def post_form(payload, event="issues", delivery=None, secret=SECRET):
+    """A delivery encoded the way GitHub's webhook form does by default.
+
+    The signature is over the raw form body, not over the JSON inside it, which
+    is what makes this worth a test of its own: verifying the decoded payload
+    instead would check something the sender never signed.
+    """
+    body = urllib.parse.urlencode({"payload": json.dumps(payload)}).encode()
+    sig = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+    req = urllib.request.Request(f"{BASE}/webhook/github", data=body, method="POST")
+    req.add_header("content-type", "application/x-www-form-urlencoded")
+    req.add_header("x-github-event", event)
+    req.add_header("x-github-delivery", delivery or f"f-{time.time_ns()}")
+    req.add_header("x-hub-signature-256", sig)
     try:
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read() or b"{}")
@@ -117,6 +138,15 @@ check("trusted + labelled issue is queued", res.get("status"), "queued")
 _, res = post({"ref": "refs/heads/feature/x", "before": "abc",
                "repository": {"full_name": "pallets/flask"}}, event="push")
 check("push to another branch is ignored", res.get("reason"), "not the indexed branch")
+
+# --- encoding -----------------------------------------------------------------
+# GitHub's webhook form defaults to x-www-form-urlencoded. Rejecting it meant
+# the default configuration failed every time, with an error that said only
+# "malformed payload".
+check("form-encoded delivery is accepted",
+      post_form(issue(90))[1], "queued")
+check("form-encoded with a bad signature is still refused",
+      post_form(issue(91), secret=b"wrong")[1], "bad signature")
 
 print(f"\n  \033[1m{passed}/{passed + failed} gates hold\033[0m\n")
 sys.exit(1 if failed else 0)

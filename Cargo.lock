@@ -966,6 +966,7 @@ dependencies = [
  "blake3",
  "bytemuck",
  "clap",
+ "form_urlencoded",
  "hex",
  "hmac",
  "ignore",

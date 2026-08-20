@@ -88,8 +88,8 @@ pub async fn github(
     let event = header(&headers, "x-github-event")
         .unwrap_or_default()
         .to_string();
-    let payload: Value = serde_json::from_slice(&body)
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "malformed payload".into()))?;
+    let payload = parse_payload(&headers, &body)
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "malformed payload".into()))?;
 
     let outcome = match event.as_str() {
         "ping" => json!({ "status": "pong" }),
@@ -98,6 +98,27 @@ pub async fn github(
         other => json!({ "status": "ignored", "event": other }),
     };
     Ok((StatusCode::ACCEPTED, Json(outcome)))
+}
+
+/// The JSON a delivery carries, whichever way it was encoded.
+///
+/// GitHub's webhook form defaults to `application/x-www-form-urlencoded`, which
+/// sends `payload=<urlencoded json>` rather than a JSON body — and every such
+/// delivery was rejected as malformed. The default configuration failed one
+/// hundred percent of the time, with an error that did not say why.
+///
+/// The signature is verified over the raw bytes before this runs, and must stay
+/// that way: decoding first and hashing the result would verify something the
+/// sender never signed.
+fn parse_payload(h: &HeaderMap, body: &[u8]) -> Option<Value> {
+    let ct = header(h, "content-type").unwrap_or_default();
+    if ct.starts_with("application/x-www-form-urlencoded") {
+        let field = form_urlencoded::parse(body)
+            .find(|(k, _)| k == "payload")
+            .map(|(_, v)| v.into_owned())?;
+        return serde_json::from_str(&field).ok();
+    }
+    serde_json::from_slice(body).ok()
 }
 
 fn repo_of(app: &App, p: &Value) -> Option<db::Repo> {

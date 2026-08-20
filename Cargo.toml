@@ -42,6 +42,9 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 hmac = "0.12.1"
 sha2 = "0.10.9"
+# GitHub's webhook UI defaults to form-encoded deliveries, which arrive as
+# `payload=<urlencoded json>` rather than as a JSON body.
+form_urlencoded = "1.2"
 hex = "0.4.3"
 subtle = "2.6.1"
 time = "0.3.41"

@@ -359,8 +359,22 @@ fn module_keys(root: &Path, path: &Path, lang: Lang) -> Vec<String> {
     if parts.is_empty() {
         return Vec::new();
     }
+    // Every suffix, because the source root is not known — `src/flask/app.py`
+    // has to be reachable as `flask.app`, and `examples/tutorial/flaskr/` is a
+    // real package three levels down that legitimately answers to `flaskr`.
+    //
+    // The exception is a single-segment key that collides with a standard
+    // library module. `django/core/serializers/json.py` was reachable as plain
+    // `json`, so `import json` — the standard library — bound to it: a false
+    // edge at confidence 95, the tier documented as the strongest AST evidence,
+    // dragging that module's whole export list into scope. `import io` landed
+    // in `django/contrib/gis/geos/io.py` the same way.
+    //
+    // Depth is the wrong test for this; the collision is.
+    let sep = lang.module_sep();
     (0..parts.len())
-        .map(|i| parts[i..].join(lang.module_sep()))
+        .map(|i| parts[i..].join(sep))
+        .filter(|k| !(k == &parts[parts.len() - 1] && lang.shadows_stdlib(k)))
         .collect()
 }
 
