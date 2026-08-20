@@ -117,3 +117,102 @@ impl IdTable {
         self.keys.iter().map(|k| k.0).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(n: u64) -> NodeKey {
+        NodeKey(n)
+    }
+
+    #[test]
+    fn a_node_that_still_exists_keeps_its_id() {
+        // The property the whole incremental path rests on. If an id moves
+        // because an unrelated file grew a function, every cached edge and every
+        // row of the adjacency structure is wrong.
+        let mut t = IdTable::default();
+        let (first, _) = t.assign(&[key(10), key(20), key(30)]);
+        let id_of_20 = first[1];
+
+        // A new node appears before it and another after it.
+        let (second, churn) = t.assign(&[key(5), key(10), key(20), key(30), key(40)]);
+        assert_eq!(
+            second[2], id_of_20,
+            "key 20 must hold the id it was given, not shift for its new neighbours"
+        );
+        assert_eq!(churn.kept, 3);
+        assert_eq!(churn.added, 2);
+    }
+
+    #[test]
+    fn a_deleted_node_leaves_a_hole_that_is_reused() {
+        let mut t = IdTable::default();
+        let (ids, _) = t.assign(&[key(1), key(2), key(3)]);
+        let freed = ids[1];
+
+        let (_, churn) = t.assign(&[key(1), key(3)]);
+        assert_eq!(churn.retired, 1);
+        assert_eq!(churn.holes, 1);
+
+        // The next new key takes the vacated id rather than growing the space.
+        let before = t.len();
+        let (ids, _) = t.assign(&[key(1), key(3), key(4)]);
+        assert_eq!(
+            ids[2], freed,
+            "a new node should reuse the hole a retired one left"
+        );
+        assert_eq!(t.len(), before, "and not extend the id space to do it");
+    }
+
+    #[test]
+    fn the_same_keys_in_the_same_order_give_the_same_ids() {
+        let mut a = IdTable::default();
+        let mut b = IdTable::default();
+        let keys = [key(7), key(8), key(9)];
+        assert_eq!(a.assign(&keys).0, b.assign(&keys).0);
+    }
+
+    #[test]
+    fn a_table_survives_a_round_trip_through_its_key_array() {
+        // The table is persisted as the graph's key section and rebuilt from it
+        // on the next run. An id that changes across that boundary is the same
+        // failure as an id that changes across an edit.
+        let mut t = IdTable::default();
+        let (ids, _) = t.assign(&[key(11), key(22), key(33)]);
+        let raw = t.raw_keys();
+
+        let mut reopened = IdTable::from_keys(&raw);
+        let (again, churn) = reopened.assign(&[key(11), key(22), key(33)]);
+        assert_eq!(again, ids, "ids must survive being written and read back");
+        assert_eq!(churn.added, 0, "nothing is new on an unchanged tree");
+        assert_eq!(churn.kept, 3);
+    }
+
+    #[test]
+    fn holes_survive_the_round_trip_as_holes() {
+        let mut t = IdTable::default();
+        t.assign(&[key(1), key(2), key(3)]);
+        t.assign(&[key(1), key(3)]); // 2 retired
+        let reopened = IdTable::from_keys(&t.raw_keys());
+        assert_eq!(reopened.len(), t.len());
+
+        let mut reopened = reopened;
+        let before = reopened.len();
+        reopened.assign(&[key(1), key(3), key(9)]);
+        assert_eq!(
+            reopened.len(),
+            before,
+            "the hole must still be known after a reload, or the space grows every sync"
+        );
+    }
+
+    #[test]
+    fn an_empty_assignment_retires_everything() {
+        let mut t = IdTable::default();
+        t.assign(&[key(1), key(2)]);
+        let (ids, churn) = t.assign(&[]);
+        assert!(ids.is_empty());
+        assert_eq!(churn.retired, 2);
+    }
+}

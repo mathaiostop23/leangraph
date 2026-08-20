@@ -423,3 +423,184 @@ pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>>
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::{Corpus, TempTree};
+
+    fn corpus() -> Corpus {
+        Corpus::build(&[
+            (
+                "app.py",
+                "import helper\n\
+                 from helper import assist as helper_fn\n\
+                 \n\
+                 class Client:\n\
+                 \x20   def open(self, url):\n\
+                 \x20       return self.send(url)\n\
+                 \x20   def send(self, url):\n\
+                 \x20       return helper_fn(url)\n",
+            ),
+            ("helper.py", "def assist(u):\n    return u\n"),
+        ])
+    }
+
+    fn round_trip(c: &Corpus) -> (TempTree, Vec<Entry>) {
+        let tree = TempTree::new("cache");
+        let path = tree.path().join("cache.bin");
+        write(
+            &path,
+            &c.units,
+            &c.paths,
+            &c.langs,
+            &c.metas,
+            &c.interner,
+            &c.root,
+            "abc123",
+        )
+        .expect("writing the cache");
+        let back = read(&path, &c.interner, &c.root).expect("reading the cache");
+        (tree, back)
+    }
+
+    #[test]
+    fn everything_extracted_comes_back() {
+        // The cache is what makes a sync cheap: an unchanged file is not
+        // re-parsed, its extraction is read back from here. Anything this drops
+        // is silently missing from the next incremental graph, and shows up as
+        // edges that exist after a full index but not after a sync.
+        let c = corpus();
+        let (_tree, back) = round_trip(&c);
+
+        assert_eq!(back.len(), c.units.len(), "every file must come back");
+        for (entry, original) in back.iter().zip(&c.units) {
+            assert_eq!(entry.unit.defs.len(), original.defs.len(), "defs");
+            assert_eq!(entry.unit.refs.len(), original.refs.len(), "refs");
+            assert_eq!(entry.unit.imports.len(), original.imports.len(), "imports");
+            assert_eq!(entry.unit.aliases.len(), original.aliases.len(), "aliases");
+        }
+    }
+
+    #[test]
+    fn a_reference_keeps_the_receiver_it_was_extracted_with() {
+        // `Recv` decides which tier a reference is allowed to reach. Losing it
+        // across the cache would silently re-tier every call in an unchanged
+        // file on the next sync — the graph would differ from a full index
+        // without a single error.
+        let c = corpus();
+        let (_tree, back) = round_trip(&c);
+
+        for (entry, original) in back.iter().zip(&c.units) {
+            for (got, want) in entry.unit.refs.iter().zip(&original.refs) {
+                assert_eq!(got.recv, want.recv, "receiver kind");
+                assert_eq!(
+                    got.recv_name.map(|s| c.interner.resolve(&s).to_string()),
+                    want.recv_name.map(|s| c.interner.resolve(&s).to_string()),
+                    "receiver name"
+                );
+                assert_eq!(got.kind, want.kind);
+                assert_eq!(
+                    c.interner.resolve(&got.name),
+                    c.interner.resolve(&want.name)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn names_and_containment_survive_interning_twice() {
+        // Symbol ids are assigned by a concurrent interner, so they are not
+        // stable across runs. What has to survive is the *string* and the
+        // parent chain, not the number.
+        let c = corpus();
+        let (_tree, back) = round_trip(&c);
+
+        let app = back
+            .iter()
+            .find(|e| e.path.ends_with("app.py"))
+            .expect("app.py in the cache");
+        let names: Vec<&str> = app
+            .unit
+            .defs
+            .iter()
+            .map(|d| c.interner.resolve(&d.name))
+            .collect();
+        assert!(names.contains(&"Client"));
+        assert!(names.contains(&"open"));
+        assert!(names.contains(&"send"));
+
+        let client = app
+            .unit
+            .defs
+            .iter()
+            .position(|d| c.interner.resolve(&d.name) == "Client")
+            .unwrap() as u32;
+        let open = app
+            .unit
+            .defs
+            .iter()
+            .find(|d| c.interner.resolve(&d.name) == "open")
+            .unwrap();
+        assert_eq!(open.parent, client, "open must still be inside Client");
+    }
+
+    #[test]
+    fn an_alias_survives_the_round_trip() {
+        let c = corpus();
+        let (_tree, back) = round_trip(&c);
+        let app = back
+            .iter()
+            .find(|e| e.path.ends_with("app.py"))
+            .expect("app.py");
+        let pairs: Vec<(String, String)> = app
+            .unit
+            .aliases
+            .iter()
+            .map(|(l, o)| {
+                (
+                    c.interner.resolve(l).to_string(),
+                    c.interner.resolve(o).to_string(),
+                )
+            })
+            .collect();
+        assert!(
+            pairs.contains(&("helper_fn".to_string(), "assist".to_string())),
+            "the alias binding must persist: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn the_commit_it_was_built_at_is_recorded() {
+        // A sync asks git what changed since this. Without it there is nothing
+        // to diff against and the only safe move is walking the whole tree.
+        let c = corpus();
+        let tree = TempTree::new("cache-head");
+        let path = tree.path().join("cache.bin");
+        write(
+            &path,
+            &c.units,
+            &c.paths,
+            &c.langs,
+            &c.metas,
+            &c.interner,
+            &c.root,
+            "deadbeef",
+        )
+        .unwrap();
+        assert_eq!(read_head(&path).as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_cache_is_an_error_not_a_panic() {
+        let tree = TempTree::new("cache-bad");
+        let interner = Interner::new();
+        let missing = tree.path().join("nothing.bin");
+        assert!(read(&missing, &interner, tree.path()).is_err());
+
+        let garbage = tree.path().join("garbage.bin");
+        std::fs::write(&garbage, b"not a cache file at all, just some bytes").unwrap();
+        assert!(read(&garbage, &interner, tree.path()).is_err());
+        assert!(read_head(&garbage).is_none());
+    }
+}

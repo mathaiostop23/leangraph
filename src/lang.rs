@@ -1282,9 +1282,22 @@ impl Spec {
     }
 
     /// The node holding an import's module path.
+    ///
+    /// `import numpy as np` puts an `aliased_import` in the module field, and
+    /// that node's text is the whole clause — so the module was interned as
+    /// `"numpy as np"`, which matches no module key. Every aliased module
+    /// import therefore fell out of the import tier: on a two-file fixture
+    /// `import helper as h` resolved by name at 80 where plain `import helper`
+    /// resolved at 95, and where the name is ambiguous it resolved to nothing.
+    /// The rename is already recorded separately in the alias table; what
+    /// belongs here is the path.
     #[inline]
     pub fn import_module_node<'t>(&self, imp: &Node<'t>) -> Option<Node<'t>> {
-        first_field(imp, &self.f_module)
+        let m = first_field(imp, &self.f_module)?;
+        if self.is_aliased(m.kind_id()) {
+            return first_field(&m, &self.f_name).or(Some(m));
+        }
+        Some(m)
     }
 }
 

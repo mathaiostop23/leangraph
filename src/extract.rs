@@ -316,3 +316,196 @@ pub fn extract_file(
 
     Some((unit, t, meta))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::{DefKind, Recv};
+    use crate::testkit::Corpus;
+
+    /// Every receiver kind the extractor distinguishes, for the call named.
+    fn recv_of(c: &Corpus, file: usize, called: &str) -> Vec<Recv> {
+        c.units[file]
+            .refs
+            .iter()
+            .filter(|r| c.interner.resolve(&r.name) == called)
+            .map(|r| r.recv)
+            .collect()
+    }
+
+    #[test]
+    fn the_four_receiver_kinds_are_told_apart() {
+        // `Recv` is what decides whether the lexical scope chain is evidence.
+        // Collapsing any two of these is not a small error: `self.x()` and
+        // `other.x()` resolving the same way is how 1,285 django edges became a
+        // method calling itself at confidence 100.
+        let c = Corpus::build(&[(
+            "a.py",
+            "class Child(Base):\n\
+             \x20   def run(self, other):\n\
+             \x20       bare()\n\
+             \x20       self.mine()\n\
+             \x20       super().theirs()\n\
+             \x20       other.unknown()\n",
+        )]);
+        assert_eq!(recv_of(&c, 0, "bare"), vec![Recv::Bare]);
+        assert_eq!(recv_of(&c, 0, "mine"), vec![Recv::SelfObj]);
+        assert_eq!(recv_of(&c, 0, "theirs"), vec![Recv::Super]);
+        assert_eq!(recv_of(&c, 0, "unknown"), vec![Recv::Other]);
+    }
+
+    #[test]
+    fn this_is_the_self_receiver_in_the_typescript_family() {
+        let c = Corpus::build(&[(
+            "a.ts",
+            "class C {\n\
+             \x20 run(other: any) {\n\
+             \x20   this.mine();\n\
+             \x20   other.unknown();\n\
+             \x20 }\n\
+             \x20 mine() {}\n\
+             }\n",
+        )]);
+        assert_eq!(recv_of(&c, 0, "mine"), vec![Recv::SelfObj]);
+        assert_eq!(recv_of(&c, 0, "unknown"), vec![Recv::Other]);
+    }
+
+    #[test]
+    fn a_receiver_keeps_its_own_name() {
+        // Without the name, `flask.redirect()` and `client.open()` are the same
+        // reference — and one of them has an import behind it while the other
+        // has nothing.
+        let c = Corpus::build(&[(
+            "a.py",
+            "import flask\n\ndef go(client):\n    flask.redirect('/')\n    client.open('/')\n",
+        )]);
+        let named: Vec<(String, Option<String>)> = c.units[0]
+            .refs
+            .iter()
+            .filter(|r| r.recv == Recv::Other)
+            .map(|r| {
+                (
+                    c.interner.resolve(&r.name).to_string(),
+                    r.recv_name.map(|s| c.interner.resolve(&s).to_string()),
+                )
+            })
+            .collect();
+        assert!(
+            named.contains(&("redirect".to_string(), Some("flask".to_string()))),
+            "{named:?}"
+        );
+        assert!(
+            named.contains(&("open".to_string(), Some("client".to_string()))),
+            "{named:?}"
+        );
+    }
+
+    #[test]
+    fn nesting_is_recorded_as_it_is_written() {
+        let c = Corpus::build(&[(
+            "a.py",
+            "class Outer:\n\
+             \x20   class Inner:\n\
+             \x20       def deep(self):\n\
+             \x20           return 1\n",
+        )]);
+        let defs = &c.units[0].defs;
+        let name = |i: u32| c.interner.resolve(&defs[i as usize].name).to_string();
+
+        let deep = defs
+            .iter()
+            .position(|d| c.interner.resolve(&d.name) == "deep")
+            .expect("deep is extracted");
+        let inner = defs[deep].parent;
+        assert_eq!(name(inner), "Inner");
+        assert_eq!(name(defs[inner as usize].parent), "Outer");
+        assert!(matches!(defs[inner as usize].kind, DefKind::Class));
+    }
+
+    #[test]
+    fn imports_and_aliases_are_both_captured() {
+        let c = Corpus::build(&[(
+            "a.py",
+            "import os\nimport numpy as np\nfrom helper import assist as fn\n",
+        )]);
+        let modules: Vec<&str> = c.units[0]
+            .imports
+            .iter()
+            .map(|i| c.interner.resolve(&i.module))
+            .collect();
+        assert!(modules.contains(&"os"));
+        assert!(modules.contains(&"numpy"));
+
+        let aliases: Vec<(String, String)> = c.units[0]
+            .aliases
+            .iter()
+            .map(|(l, o)| {
+                (
+                    c.interner.resolve(l).to_string(),
+                    c.interner.resolve(o).to_string(),
+                )
+            })
+            .collect();
+        assert!(
+            aliases.contains(&("np".to_string(), "numpy".to_string())),
+            "{aliases:?}"
+        );
+        assert!(
+            aliases.contains(&("fn".to_string(), "assist".to_string())),
+            "{aliases:?}"
+        );
+    }
+
+    #[test]
+    fn a_constant_assignment_is_a_definition_in_every_language_that_has_one() {
+        // `var_def_name` carried a hardcoded whitelist of node kinds, which
+        // rejected Ruby's `constant` and took that language to 62.2% recall.
+        // A whitelist written from memory is exactly the thing that fails
+        // silently — the extractor runs, and simply finds less.
+        for (file, src, want) in [
+            ("a.rb", "MAX_SIZE = 10\n", "MAX_SIZE"),
+            ("a.py", "MAX_SIZE = 10\n", "MAX_SIZE"),
+            ("a.go", "const MaxSize = 10\n", "MaxSize"),
+            ("a.ts", "export const maxSize = 10;\n", "maxSize"),
+        ] {
+            let c = Corpus::build(&[(file, src)]);
+            let names: Vec<&str> = c.units[0]
+                .defs
+                .iter()
+                .map(|d| c.interner.resolve(&d.name))
+                .collect();
+            assert!(
+                names.contains(&want),
+                "{file}: {want} was not extracted, got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_still_yields_what_it_can() {
+        // Real repositories contain files that do not parse — a syntax error
+        // mid-refactor, a template, a dialect the grammar predates. Dropping
+        // the file loses every definition in it; the tree-sitter parse is
+        // partial by design and the good half is still worth having.
+        let c = Corpus::build(&[(
+            "a.py",
+            "def before():\n    return 1\n\ndef broken(:\n\ndef after():\n    return 2\n",
+        )]);
+        let names: Vec<&str> = c.units[0]
+            .defs
+            .iter()
+            .map(|d| c.interner.resolve(&d.name))
+            .collect();
+        assert!(c.units[0].had_parse_error, "the error must be recorded");
+        assert!(
+            names.contains(&"before"),
+            "definitions before the error survive: {names:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_file_is_not_an_error() {
+        let c = Corpus::build(&[("empty.py", "")]);
+        assert!(c.units[0].defs.is_empty());
+        assert!(c.units[0].refs.is_empty());
+    }
+}

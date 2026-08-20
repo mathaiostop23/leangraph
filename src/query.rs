@@ -418,3 +418,219 @@ fn build_from(g: &Graph, seed_nodes: Vec<NodeId>, budget: &Budget) -> Context {
         flow_reversed,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::Corpus;
+
+    /// A chain deep enough that a budget has to refuse something.
+    fn chain(n: usize) -> Corpus {
+        let mut src = String::new();
+        for i in 0..n {
+            src.push_str(&format!(
+                "def step{i}(x):\n    # padding to give this node some bytes\n    return step{}(x)\n\n",
+                i + 1
+            ));
+        }
+        src.push_str(
+            "def step{}(x):\n    return x\n"
+                .replace("{}", &n.to_string())
+                .as_str(),
+        );
+        let files: Vec<(String, String)> = vec![("chain.py".to_string(), src)];
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        Corpus::build(&refs)
+    }
+
+    #[test]
+    fn the_budget_is_a_ceiling_not_a_suggestion() {
+        // Returning fewer tokens at equal recall is the entire argument of this
+        // project. A selection that overruns its budget is not a smaller
+        // context, it is a bigger one with a number attached.
+        let c = chain(40);
+        let g = c.graph();
+        let budget = Budget {
+            max_nodes: 5,
+            max_bytes: 400,
+            max_node_bytes: 200,
+        };
+        let ctx = build(&g, &["step0".to_string()], &budget);
+        assert!(
+            ctx.items.len() <= budget.max_nodes,
+            "{} items exceeds max_nodes {}",
+            ctx.items.len(),
+            budget.max_nodes
+        );
+        let total: u32 = ctx.items.iter().map(|i| i.bytes).sum();
+        assert!(
+            total as usize <= budget.max_bytes,
+            "{total} bytes exceeds max_bytes {}",
+            budget.max_bytes
+        );
+        assert!(
+            ctx.items.iter().all(|i| i.bytes <= budget.max_node_bytes),
+            "no single node may exceed its own ceiling"
+        );
+    }
+
+    #[test]
+    fn a_tighter_budget_never_returns_more() {
+        let c = chain(30);
+        let g = c.graph();
+        let wide = build(
+            &g,
+            &["step0".to_string()],
+            &Budget {
+                max_nodes: 20,
+                max_bytes: 20_000,
+                max_node_bytes: 2_000,
+            },
+        );
+        let tight = build(
+            &g,
+            &["step0".to_string()],
+            &Budget {
+                max_nodes: 3,
+                max_bytes: 20_000,
+                max_node_bytes: 2_000,
+            },
+        );
+        assert!(tight.items.len() <= wide.items.len());
+        assert!(tight.items.len() <= 3);
+    }
+
+    #[test]
+    fn what_was_asked_for_comes_back_first() {
+        // A seed the caller named must not be evicted in favour of something
+        // the walk found. It is the one node the caller is certain about.
+        let c = chain(12);
+        let g = c.graph();
+        let ctx = build(
+            &g,
+            &["step0".to_string()],
+            &Budget {
+                max_nodes: 2,
+                max_bytes: 20_000,
+                max_node_bytes: 2_000,
+            },
+        );
+        assert!(!ctx.items.is_empty());
+        assert_eq!(ctx.items[0].why, Why::Seed);
+        assert_eq!(g.name(ctx.items[0].node), "step0");
+    }
+
+    #[test]
+    fn a_path_is_found_and_respects_its_hop_limit() {
+        let c = chain(10);
+        let g = c.graph();
+        let from = g.find("step0")[0];
+        let to = g.find("step4")[0];
+
+        let p = path(&g, from, to, 16);
+        assert_eq!(p.first(), Some(&from));
+        assert_eq!(p.last(), Some(&to));
+        assert!(p.len() >= 2);
+
+        // Every consecutive pair must be a real edge, or the path is fiction.
+        for pair in p.windows(2) {
+            assert!(
+                g.callees(pair[0]).iter().any(|n| n.node == pair[1]),
+                "{} -> {} is not an edge",
+                g.qualified(pair[0]),
+                g.qualified(pair[1])
+            );
+        }
+
+        assert!(
+            path(&g, from, to, 1).is_empty(),
+            "a target four hops away must not be reachable in one"
+        );
+    }
+
+    #[test]
+    fn a_node_reaches_itself_in_zero_hops() {
+        let g = chain(3).graph();
+        let n = g.find("step0")[0];
+        assert_eq!(path(&g, n, n, 4), vec![n]);
+    }
+
+    #[test]
+    fn unconnected_nodes_have_no_path() {
+        let c = Corpus::build(&[
+            ("a.py", "def alpha():\n    return 1\n"),
+            ("b.py", "def beta():\n    return 2\n"),
+        ]);
+        let g = c.graph();
+        let a = g.find("alpha")[0];
+        let b = g.find("beta")[0];
+        assert!(path(&g, a, b, 8).is_empty());
+    }
+
+    // ---- seed selection from prose ----------------------------------------
+
+    #[test]
+    fn identifier_shape_ranks_code_above_prose() {
+        assert!(identifier_shape("send_file") > identifier_shape("file"));
+        assert!(identifier_shape("sendFile") > identifier_shape("file"));
+        assert!(identifier_shape("SendFile") > identifier_shape("file"));
+        assert!(identifier_shape("MAX_SIZE") > identifier_shape("size"));
+        assert_eq!(identifier_shape("crashes"), 0);
+    }
+
+    #[test]
+    fn words_that_are_both_english_and_method_names_are_not_seeds() {
+        for w in ["error", "test", "run", "fix", "the", "file"] {
+            assert!(is_stopword(w), "{w} should be a stopword");
+        }
+        for w in ["send_file", "Flask", "werkzeug", "descriptor"] {
+            assert!(!is_stopword(w), "{w} must survive as a lead");
+        }
+    }
+
+    #[test]
+    fn a_bug_report_selects_the_symbol_it_names() {
+        let c = Corpus::build(&[(
+            "app.py",
+            "def send_file(path):\n    return open(path)\n\ndef unrelated():\n    return 0\n",
+        )]);
+        let g = c.graph();
+        let seeds = seeds_from_text(
+            &g,
+            "The file descriptor leaks when send_file streams a large download.",
+            8,
+        );
+        let names: Vec<&str> = seeds.iter().map(|n| g.name(*n)).collect();
+        assert!(
+            names.contains(&"send_file"),
+            "the named symbol must be picked: {names:?}"
+        );
+        assert!(
+            !names.contains(&"unrelated"),
+            "and an unmentioned one must not be"
+        );
+    }
+
+    #[test]
+    fn text_naming_nothing_in_the_repo_selects_nothing() {
+        let c = Corpus::build(&[("app.py", "def send_file(path):\n    return path\n")]);
+        let g = c.graph();
+        let seeds = seeds_from_text(&g, "The documentation could be clearer about this.", 8);
+        assert!(
+            seeds.is_empty(),
+            "prose with no leads must not invent them: {:?}",
+            seeds.iter().map(|n| g.name(*n)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn asking_for_a_symbol_that_does_not_exist_is_empty_not_a_panic() {
+        let g = Corpus::build(&[("a.py", "def alpha():\n    return 1\n")]).graph();
+        let ctx = build(&g, &["no_such_thing".to_string()], &Budget::default());
+        assert!(ctx.items.is_empty());
+        assert!(seeds(&g, &["no_such_thing".to_string()]).is_empty());
+    }
+}

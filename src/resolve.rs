@@ -1070,3 +1070,367 @@ fn locality(cand: FileId, from: FileId, dirs: &[&Path]) -> u8 {
         1
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Provenance;
+    use crate::lang::ALL_LANGS;
+    use crate::testkit::Corpus;
+
+    // ---- the three tiers ---------------------------------------------------
+    //
+    // The tiers are the product. Each one is a different claim about how much
+    // the evidence is worth, and the confidence attached to it is what lets a
+    // caller rank. A change that quietly moves an edge between tiers is not
+    // visible in any total.
+
+    #[test]
+    fn each_tier_resolves_what_it_is_for_and_says_so() {
+        let c = Corpus::build(&[
+            (
+                "app.py",
+                "from helper import assist\n\
+                 \n\
+                 class Client:\n\
+                 \x20   def open(self, url):\n\
+                 \x20       return self.send(url)\n\
+                 \x20   def send(self, url):\n\
+                 \x20       return assist(url)\n\
+                 \n\
+                 def main():\n\
+                 \x20   c = Client()\n\
+                 \x20   return c.open('/')\n",
+            ),
+            ("helper.py", "def assist(u):\n    return u\n"),
+        ]);
+
+        // `self.send()` — the enclosing object, so the lexical chain answers it.
+        let e = c.call("Client.open", "Client.send").expect("self call");
+        assert_eq!((e.prov, e.conf), (Provenance::Scope, 100));
+
+        // `assist()` — a bare name the file explicitly imported.
+        let e = c.call("Client.send", "assist").expect("imported call");
+        assert_eq!((e.prov, e.conf), (Provenance::Import, 95));
+
+        // `c.open()` — nothing here says what `c` is. One method in the repo
+        // carries the name, so it is a guess, and it is labelled as one.
+        let e = c.call("main", "Client.open").expect("name match");
+        assert_eq!(e.prov, Provenance::NameMatch);
+        assert!(
+            e.conf < 95,
+            "a guess must not outrank an import: {}",
+            e.conf
+        );
+    }
+
+    #[test]
+    fn an_unknown_receiver_is_not_lexical_evidence() {
+        // The bug this guards: `other.send()` binding to the *enclosing* class's
+        // `send` at confidence 100. Nothing in the surrounding scopes says what
+        // `other` is. On django 1,285 edges at confidence 100 were a method
+        // calling itself for this reason.
+        let c = Corpus::build(&[(
+            "a.py",
+            "class Session:\n\
+             \x20   def send(self, r):\n\
+             \x20       return r\n\
+             \x20   def forward(self, other, r):\n\
+             \x20       return other.send(r)\n",
+        )]);
+
+        let e = c
+            .call("Session.forward", "Session.send")
+            .expect("the edge is still worth having — it is the confidence that must be honest");
+        assert_ne!(
+            e.prov,
+            Provenance::Scope,
+            "a call through an unknown object is not scope evidence"
+        );
+        assert!(
+            e.conf <= 80,
+            "and must not carry proof-level confidence, got {}",
+            e.conf
+        );
+    }
+
+    #[test]
+    fn super_is_not_a_call_to_the_same_implementation() {
+        // `super().run()` means explicitly *not* this class's `run`. Resolving
+        // it to the enclosing class inverts the meaning of the code.
+        let c = Corpus::build(&[(
+            "a.py",
+            "class Base:\n\
+             \x20   def run(self):\n\
+             \x20       return 1\n\
+             \n\
+             class Child(Base):\n\
+             \x20   def run(self):\n\
+             \x20       return super().run() + 1\n",
+        )]);
+
+        let from_child = c.calls_from("Child.run");
+        assert!(
+            from_child.iter().all(|e| !e.dst.ends_with("Child.run")),
+            "super().run() must not resolve to Child.run: {from_child:?}"
+        );
+        let base = from_child
+            .iter()
+            .find(|e| e.dst.ends_with("Base.run"))
+            .expect("it should reach the base implementation, which is what it means");
+        assert!(base.conf <= 80, "reached by name, not by proof");
+    }
+
+    // ---- language families -------------------------------------------------
+
+    #[test]
+    fn every_language_matches_itself() {
+        // `same_family` listed two families explicitly and returned false for
+        // everything else, so eleven languages resolved nothing beyond the
+        // current file. Nothing failed; tier 3 was simply never reached. The
+        // aggregate that would have shown it was never computed per language.
+        for l in ALL_LANGS {
+            assert!(
+                same_family(l, l),
+                "{l:?} does not match itself, which disables cross-file name matching for it"
+            );
+        }
+    }
+
+    #[test]
+    fn families_are_the_ones_that_share_a_module_system() {
+        use Lang::*;
+        assert!(same_family(TypeScript, Tsx));
+        assert!(same_family(Tsx, TypeScript));
+        assert!(same_family(C, Cpp));
+        assert!(same_family(Cpp, C));
+        assert!(!same_family(Python, Go));
+        assert!(!same_family(TypeScript, Python));
+        assert!(!same_family(Java, Kotlin), "different name resolution");
+    }
+
+    // ---- module keys -------------------------------------------------------
+
+    #[test]
+    fn a_file_answers_to_every_suffix_of_its_path() {
+        // The source root is not known, so `src/flask/app.py` has to be
+        // reachable as `flask.app` — and `examples/tutorial/flaskr/` is a real
+        // package three levels down that legitimately answers to `flaskr`.
+        let root = Path::new("/repo");
+        let keys = module_keys(root, Path::new("/repo/src/flask/app.py"), Lang::Python);
+        assert!(keys.contains(&"src.flask.app".to_string()));
+        assert!(keys.contains(&"flask.app".to_string()));
+        assert!(keys.contains(&"app".to_string()));
+    }
+
+    #[test]
+    fn a_package_entry_point_addresses_its_directory() {
+        let root = Path::new("/repo");
+        for (file, want) in [
+            ("/repo/flask/__init__.py", "flask"),
+            ("/repo/pkg/index.ts", "pkg"),
+            ("/repo/pkg/mod.rs", "pkg"),
+        ] {
+            let lang = match Path::new(file).extension().unwrap().to_str().unwrap() {
+                "py" => Lang::Python,
+                "ts" => Lang::TypeScript,
+                _ => Lang::Rust,
+            };
+            let keys = module_keys(root, Path::new(file), lang);
+            assert!(
+                keys.contains(&want.to_string()),
+                "{file} should answer to {want}, got {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_module_named_after_the_standard_library_does_not_capture_its_import() {
+        // `django/core/serializers/json.py` was reachable as plain `json`, so
+        // `import json` — the standard library — bound to it at confidence 95,
+        // the tier documented as the strongest AST evidence, dragging that
+        // module's whole export list into scope. `import io` landed in
+        // `django/contrib/gis/geos/io.py` the same way.
+        let root = Path::new("/repo");
+        let keys = module_keys(
+            root,
+            Path::new("/repo/django/core/serializers/json.py"),
+            Lang::Python,
+        );
+        assert!(
+            !keys.contains(&"json".to_string()),
+            "bare `json` must not be a key: {keys:?}"
+        );
+        // ...but the qualified paths still are, because those are unambiguous.
+        assert!(keys.contains(&"django.core.serializers.json".to_string()));
+        assert!(keys.contains(&"serializers.json".to_string()));
+    }
+
+    #[test]
+    fn the_stdlib_rule_applies_only_to_the_bare_name() {
+        // A repo module genuinely called `parser` at the top level is still
+        // shadowed, but one called `mytool` never was — the filter must not
+        // reach beyond the collision it exists for.
+        let root = Path::new("/repo");
+        let keys = module_keys(root, Path::new("/repo/pkg/mytool.py"), Lang::Python);
+        assert!(keys.contains(&"mytool".to_string()));
+        assert!(keys.contains(&"pkg.mytool".to_string()));
+    }
+
+    // ---- locality ----------------------------------------------------------
+
+    #[test]
+    fn locality_prefers_near_over_far() {
+        let a = Path::new("/repo/pkg");
+        let b = Path::new("/repo/pkg");
+        let c = Path::new("/repo/other");
+        let dirs = [a, b, c];
+        assert!(
+            locality(0, 0, &dirs) > locality(1, 0, &dirs),
+            "the same file beats a sibling"
+        );
+        assert!(
+            locality(1, 0, &dirs) > locality(2, 0, &dirs),
+            "a sibling beats an unrelated directory"
+        );
+    }
+
+    // ---- imports and aliases ----------------------------------------------
+
+    #[test]
+    fn an_alias_binds_the_local_name() {
+        let c = Corpus::build(&[
+            (
+                "app.py",
+                "from helper import assist as helper_fn\n\
+                 \n\
+                 def main():\n\
+                 \x20   return helper_fn(1)\n",
+            ),
+            ("helper.py", "def assist(u):\n    return u\n"),
+        ]);
+        let e = c
+            .call("main", "assist")
+            .expect("`assist as helper_fn` must bind helper_fn to assist");
+        assert_eq!(e.prov, Provenance::Import);
+    }
+
+    #[test]
+    fn a_plain_named_import_is_not_an_alias() {
+        // `import { a }` has the same shape as `import * as a` to a careless
+        // reader of the tree. Treating it as an alias removed 2,926 edges from
+        // one repository — every plain named import stopped binding.
+        let c = Corpus::build(&[
+            (
+                "app.ts",
+                "import { assist } from './helper';\n\
+                 export function main() { return assist(1); }\n",
+            ),
+            (
+                "helper.ts",
+                "export function assist(u: number) { return u; }\n",
+            ),
+        ]);
+        let e = c
+            .call("main", "assist")
+            .expect("a plain named import must still bind");
+        assert_eq!(e.prov, Provenance::Import);
+    }
+
+    #[test]
+    fn a_call_through_a_module_keeps_its_import_evidence() {
+        // `helper.assist()` is a call through a *module*, and the import is
+        // real evidence about what `helper` is — unlike `obj.assist()`. A fix
+        // for the object case that does not distinguish these demotes every
+        // module-qualified call in the repository.
+        let c = Corpus::build(&[
+            (
+                "app.py",
+                "import helper\n\
+                 \n\
+                 def main():\n\
+                 \x20   return helper.assist(1)\n",
+            ),
+            ("helper.py", "def assist(u):\n    return u\n"),
+        ]);
+        let e = c.call("main", "assist").expect("module-qualified call");
+        assert_eq!(
+            e.prov,
+            Provenance::Import,
+            "a module receiver is evidence; an object receiver is not"
+        );
+    }
+
+    // ---- ambiguity ---------------------------------------------------------
+
+    #[test]
+    fn a_name_too_many_files_define_resolves_to_nothing() {
+        // Past the cap the answer is not "pick one with lower confidence", it
+        // is "this is not evidence". Emitting nine guesses would put nine
+        // wrong edges in the graph to bury one right one.
+        let mut files: Vec<(String, String)> = (0..MAX_AMBIGUITY + 3)
+            .map(|i| {
+                (
+                    format!("m{i}.py"),
+                    "class T:\n    def handle(self):\n        return 1\n".to_string(),
+                )
+            })
+            .collect();
+        files.push((
+            "caller.py".to_string(),
+            "def go(x):\n    return x.handle()\n".to_string(),
+        ));
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+
+        let c = Corpus::build(&refs);
+        assert!(
+            c.calls_from("go").is_empty(),
+            "{} candidates is past the cap and must resolve to nothing, got {:?}",
+            MAX_AMBIGUITY + 3,
+            c.calls_from("go")
+        );
+        assert!(c.resolved.stats.too_ambiguous > 0, "and must be counted");
+    }
+
+    #[test]
+    fn a_name_only_one_file_defines_is_taken() {
+        let c = Corpus::build(&[
+            (
+                "m.py",
+                "class T:\n    def handle(self):\n        return 1\n",
+            ),
+            ("caller.py", "def go(x):\n    return x.handle()\n"),
+        ]);
+        let e = c.call("go", "T.handle").expect("a unique name resolves");
+        assert_eq!(e.prov, Provenance::NameMatch);
+        assert_eq!(c.resolved.stats.name_unique, 1);
+    }
+
+    // ---- determinism -------------------------------------------------------
+
+    #[test]
+    fn the_same_source_resolves_identically_twice() {
+        // Ids come from a persistent key table rather than from position, and
+        // the whole incremental story rests on two runs over identical source
+        // producing identical output.
+        let files: &[(&str, &str)] = &[
+            (
+                "a.py",
+                "class C:\n    def x(self):\n        return self.y()\n    def y(self):\n        return 1\n",
+            ),
+            ("b.py", "from a import C\n\ndef go():\n    return C().x()\n"),
+        ];
+        let one = Corpus::build(files);
+        let two = Corpus::build(files);
+
+        let mut a: Vec<_> = one.calls();
+        let mut b: Vec<_> = two.calls();
+        a.sort_by(|x, y| (&x.src, &x.dst).cmp(&(&y.src, &y.dst)));
+        b.sort_by(|x, y| (&x.src, &x.dst).cmp(&(&y.src, &y.dst)));
+        assert_eq!(a, b);
+        assert!(!a.is_empty(), "the fixture must actually produce edges");
+    }
+}

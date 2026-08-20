@@ -443,7 +443,15 @@ impl Graph {
 
     #[inline]
     pub fn name(&self, n: NodeId) -> &str {
-        self.sym(self.node_name.get(n.0 as usize).copied().unwrap_or(0))
+        // Falling back to symbol 0 answered an out-of-range node with a real
+        // name — whichever symbol happened to be interned first. Ids come from
+        // a persistent table, so a stale caller holding an id this graph never
+        // assigned is an expected case, not a corrupt one, and it has to read
+        // as "nothing" rather than as a confident wrong answer.
+        match self.node_name.get(n.0 as usize) {
+            Some(&id) => self.sym(id),
+            None => "",
+        }
     }
 
     #[inline]
@@ -692,5 +700,149 @@ The files below carry most of the graph, ordered by how much of it they hold.\n\
             .get(name)
             .cloned()
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::EdgeKind;
+    use crate::testkit::Corpus;
+
+    fn two_files() -> Corpus {
+        Corpus::build(&[
+            (
+                "app.py",
+                "from helper import assist\n\
+                 \n\
+                 class Client:\n\
+                 \x20   def open(self, url):\n\
+                 \x20       return self.send(url)\n\
+                 \x20   def send(self, url):\n\
+                 \x20       return assist(url)\n",
+            ),
+            ("helper.py", "def assist(u):\n    return u\n"),
+        ])
+    }
+
+    #[test]
+    fn what_was_resolved_is_what_is_read_back() {
+        let c = two_files();
+        let g = c.graph();
+        assert_eq!(
+            g.n_edges(),
+            c.resolved.edges.len(),
+            "every edge must survive the round trip"
+        );
+        assert_eq!(g.n_files(), 2);
+        assert!(g.n_nodes() >= 5, "two files and at least three definitions");
+    }
+
+    #[test]
+    fn both_directions_of_every_edge_agree() {
+        // The adjacency is stored twice, forward and reverse, built by two
+        // separate sorts. Nothing in the format forces them to describe the
+        // same graph, and a caller asking "who calls this" would get a
+        // different answer from one asking "what does this call".
+        let c = two_files();
+        let g = two_files_graph(&c);
+        let mut checked = 0;
+        for n in 0..g.n_nodes() {
+            let src = NodeId(n);
+            for callee in g.callees(src) {
+                assert!(
+                    g.callers(callee.node).iter().any(|back| back.node == src),
+                    "{} -> {} is missing from the reverse direction",
+                    g.qualified(src),
+                    g.qualified(callee.node)
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the fixture must produce edges to check");
+    }
+
+    fn two_files_graph(c: &Corpus) -> Graph {
+        c.graph()
+    }
+
+    #[test]
+    fn a_symbol_can_be_found_by_name_and_carries_its_qualified_path() {
+        let c = two_files();
+        let g = c.graph();
+        let hits = g.find("send");
+        assert_eq!(hits.len(), 1, "one definition is named send");
+        assert_eq!(g.qualified(hits[0]), "Client.send");
+        assert_eq!(g.name(hits[0]), "send");
+
+        let (file, start, end) = g.location(hits[0]);
+        assert!(end > start, "a definition spans some bytes");
+        assert!(g.path(file).ends_with("app.py"));
+    }
+
+    #[test]
+    fn a_name_nothing_defines_finds_nothing() {
+        let g = two_files().graph();
+        assert!(g.find("no_such_symbol_anywhere").is_empty());
+    }
+
+    #[test]
+    fn an_out_of_range_node_does_not_panic() {
+        // Ids come from a persistent table and a stale caller can hold one that
+        // this graph never assigned. Returning nothing is fine; indexing off
+        // the end of an mmap is not.
+        let g = two_files().graph();
+        let past_the_end = NodeId(g.n_nodes() + 1000);
+        assert!(g.callees(past_the_end).is_empty());
+        assert!(g.callers(past_the_end).is_empty());
+        assert_eq!(g.name(past_the_end), "");
+    }
+
+    #[test]
+    fn a_file_edited_after_indexing_is_no_longer_current() {
+        // The graph holds byte offsets. Slicing them out of a file that has
+        // changed underneath returns whatever now sits at those offsets — the
+        // wrong function, or a panic on a boundary. This is the only thing that
+        // can tell a query the bytes moved.
+        let c = two_files();
+        let g = c.graph();
+        let helper = (0..g.n_files())
+            .find(|f| g.path(*f).ends_with("helper.py"))
+            .expect("helper.py is in the graph");
+        assert!(g.file_is_current(helper), "unchanged right after indexing");
+
+        c.tree().write(
+            "helper.py",
+            "# a comment that was not there before\ndef assist(u):\n    return u + 1\n",
+        );
+        assert!(
+            !g.file_is_current(helper),
+            "a file whose size changed must not read as current"
+        );
+    }
+
+    #[test]
+    fn containment_reaches_every_definition() {
+        // Every definition is contained by something — its class, or its file.
+        // A node reachable by neither is a node no traversal will ever find.
+        let c = two_files();
+        let g = c.graph();
+        let contains = EdgeKind::Contains as u8;
+        let mut checked = 0;
+        for n in 0..g.n_nodes() {
+            let id = NodeId(n);
+            // A file node is the root of its own containment tree, and is
+            // recorded as a Module.
+            if g.node_kind(id) == crate::core::DefKind::Module as u8 || g.name(id).is_empty() {
+                continue;
+            }
+            assert!(
+                g.callers(id).iter().any(|e| e.kind == contains),
+                "{} is contained by nothing",
+                g.qualified(id)
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "the fixture must have definitions to check");
     }
 }

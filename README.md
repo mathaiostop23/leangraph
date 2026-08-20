@@ -53,8 +53,8 @@ on purpose.
 
 ```bash
 docker compose up -d
-curl -X POST localhost:7777/repos -H 'content-type: application/json' \
-  -d '{"url":"https://github.com/owner/name"}'
+curl -X POST localhost:7777/repos -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"url":"https://github.com/owner/name"}'
 ```
 
 One binary, one volume, **no database container** — SQLite is compiled in. Point
@@ -196,7 +196,8 @@ Everything below runs in CI on every push, without the benchmark corpora — thi
 repository is Rust, which the indexer supports, so it can be its own corpus.
 
 ```
-29  unit                 vetting rules, dedup scoring, SSRF, schema migration
+58  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
+27  server unit          vetting rules, dedup scoring, SSRF, schema migration
  5  convergence          incremental sync equals a full reindex
 21  webhook gates        signature, replay, authorship, labels
 38  agent assertions     prompt safety, cache correctness
@@ -206,13 +207,26 @@ repository is Rust, which the indexer supports, so it can be its own corpus.
 13  languages, each connecting two methods on a fixture
 ```
 
-Two of the unit tests exist because of how this can break silently: every node
-kind and field name a spec asks for must exist in its grammar, and every
-language must define and call something. `kinds()` drops a name the grammar
-does not know, so a spec that a grammar upgrade has outdated still compiles,
-still runs, and quietly stops finding whatever that node was for. The first run
-of that test found a stale entry in the TypeScript spec that had never
-resolved.
+Two of them exist because of how this can break silently: every node kind and
+field name a spec asks for must exist in its grammar, and every language must
+define and call something. `kinds()` drops a name the grammar does not know, so
+a spec that a grammar upgrade has outdated still compiles, still runs, and
+quietly stops finding whatever that node was for. The first run of that test
+found a stale entry in the TypeScript spec that had never resolved.
+
+The engine tests were written last and should have been written first. Until
+then the only thing guarding resolution was `bench/` against three cloned
+repositories — which does catch regressions, but only ones large enough to move
+an aggregate, only when someone runs it, and never in CI, where the corpora do
+not exist. Three had already reached `master` that way: a receiver-blind filter
+that deleted 198 real edges, a `same_family` that returned false for eleven
+languages and disabled cross-file name matching for all of them, and an alias
+binding that removed 2,926 edges from one repository. Each is now a few lines of
+source and one assertion, and each was checked by reintroducing the original bug
+and confirming the right test fails. Writing them turned up two more: an
+out-of-range node id answered with a real symbol name instead of nothing, and
+`import x as y` interned the module as `"x as y"`, which matched no module and
+quietly cost every aliased import its evidence.
 
 ---
 

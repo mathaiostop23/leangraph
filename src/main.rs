@@ -24,6 +24,8 @@ mod mcp;
 mod query;
 mod resolve;
 mod server;
+#[cfg(test)]
+mod testkit;
 
 use crate::core::{DefKind, EdgeKind, NodeId, Provenance};
 use crate::graph::{Graph, Neighbor};
