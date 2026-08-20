@@ -24,7 +24,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAGIC: [u8; 8] = *b"ARBORC\x00\x04";
+const MAGIC: [u8; 8] = *b"LGRPHC\x00\x04";
 const N_SECTIONS: usize = 10;
 
 const S_FILES: usize = 0;

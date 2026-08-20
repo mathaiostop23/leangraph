@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Record the call edges a program actually takes.
 
-Every other check in this directory compares arbor to another static tool, and
+Every other check in this directory compares leangraph to another static tool, and
 two static tools can agree and both be wrong. Running the code settles it: if
 `Flask.send_file` called `send_file` during the test suite, that edge exists,
 and a static graph missing it is missing it. No amount of agreement changes
@@ -9,7 +9,7 @@ that.
 
 This gives RECALL and nothing else. An edge the tests never exercised is
 unobserved, not absent, so nothing here may be read as precision — the
-denominator for any statement about arbor's edges has to be restricted to
+denominator for any statement about leangraph's edges has to be restricted to
 callers that actually ran, which the reader downstream does.
 
 `sys.monitoring` (3.12+) rather than `setprofile`: it is per-tool, it is
@@ -153,7 +153,7 @@ def main():
         stats["nonlocal_caller"] += 1
         return None
 
-    mon.use_tool_id(TOOL_ID, "arbor-edgetrace")
+    mon.use_tool_id(TOOL_ID, "leangraph-edgetrace")
     mon.register_callback(TOOL_ID, E.PY_START, on_start)
     mon.set_events(TOOL_ID, E.PY_START)
 

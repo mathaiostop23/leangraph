@@ -1,4 +1,4 @@
-# arbor — roadmap
+# leangraph — roadmap
 
 **Goal:** something overall better — **faster and cheaper**. A native code-graph engine, shipped first as an MCP server for editors, then as a self-hosted issue-triage service.
 
@@ -9,7 +9,7 @@ Design details: [ENGINE.md](./ENGINE.md) · Measurements: [BENCH.md](./BENCH.md)
 ## Why both A and B
 
 **A** = self-hosted server: webhook → issue → graph context → agent → comment.
-**B** = MCP server: arbor as the context layer for Claude Code / Cursor / OpenHands.
+**B** = MCP server: leangraph as the context layer for Claude Code / Cursor / OpenHands.
 
 They share ~90% of the code. B's unique surface is one week; A's is four.
 
@@ -49,7 +49,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 **Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:
 
 ```
-                        arbor        CodeGraph
+                        leangraph        CodeGraph
 index (full pipeline)   560 ms       7.87 s        14x
 graph on disk           7.9 MB       163 MB        21x
 graph load              ~20 us       —
@@ -82,7 +82,7 @@ Forward + reverse CSR, `mmap`-able binary, zero-copy load. SQLite for metadata +
 
 ### 3 · MCP server — **B ships**
 
-`arbor serve --mcp` over JSON-RPC/stdio. Two tools only (`arbor_explore` primary, `arbor_node` secondary) — CodeGraph's hardest-won finding is that agents under-pick secondary tools.
+`leangraph serve --mcp` over JSON-RPC/stdio. Two tools only (`leangraph_explore` primary, `leangraph_node` secondary) — CodeGraph's hardest-won finding is that agents under-pick secondary tools.
 
 Installers for Claude Code, Cursor, Codex. Structural win: static binary + mmap'd CSR starts in **single-digit ms** where CodeGraph documents ~2–3 s MCP startup as a real problem that makes agents give up and grep.
 

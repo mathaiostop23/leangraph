@@ -1,7 +1,7 @@
 target
 .git
-.arbor
-.arbor-server
+.leangraph
+.leangraph-server
 bench
 __pycache__
 .pytest_cache

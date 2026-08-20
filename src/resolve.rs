@@ -654,7 +654,7 @@ pub fn resolve(
         );
 
     let ms_par = t_par.elapsed().as_secs_f64() * 1e3;
-    if std::env::var_os("ARBOR_PROFILE").is_some() {
+    if std::env::var_os("LEANGRAPH_PROFILE").is_some() {
         eprintln!(
             "      resolve: keys+ids {ms_keys:.0}ms · global index {ms_index:.0}ms · parallel {ms_par:.0}ms"
         );
@@ -740,7 +740,6 @@ fn walk_scopes(
 ///
 /// TypeScript, TSX and JavaScript share a module system and routinely reference
 /// each other. Python and that family do not, in either direction.
-#[inline]
 fn same_family(a: Lang, b: Lang) -> bool {
     matches!(
         (a, b),

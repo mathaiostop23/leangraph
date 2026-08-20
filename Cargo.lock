@@ -121,36 +121,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arbor"
-version = "0.0.1"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "axum",
- "blake3",
- "bytemuck",
- "clap",
- "hex",
- "hmac",
- "ignore",
- "lasso",
- "memmap2",
- "rayon",
- "reqwest",
- "rusqlite",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "time",
- "tokio",
- "tree-sitter",
- "tree-sitter-python",
- "tree-sitter-typescript",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -984,6 +954,36 @@ checksum = "6e14eda50a3494b3bf7b9ce51c52434a761e383d7238ce1dd5dcec2fbc13e9fb"
 dependencies = [
  "dashmap",
  "hashbrown 0.14.5",
+]
+
+[[package]]
+name = "leangraph"
+version = "0.0.1"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "axum",
+ "blake3",
+ "bytemuck",
+ "clap",
+ "hex",
+ "hmac",
+ "ignore",
+ "lasso",
+ "memmap2",
+ "rayon",
+ "reqwest",
+ "rusqlite",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "time",
+ "tokio",
+ "tree-sitter",
+ "tree-sitter-python",
+ "tree-sitter-typescript",
 ]
 
 [[package]]

@@ -112,7 +112,7 @@ fn out_dir(cfg: &Config, root: &std::path::Path) -> PathBuf {
     cfg.out
         .as_ref()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(|| root.join(".arbor"))
+        .unwrap_or_else(|| root.join(".leangraph"))
 }
 
 pub fn run(cfg: &Config) -> Result<Summary> {
@@ -465,7 +465,7 @@ pub fn run(cfg: &Config) -> Result<Summary> {
         let head = cochange::head(&root).unwrap_or_default();
         cache::write(&cache_path, &units, &paths, &langs, &metas, &interner, &root, &head)
             .context("writing extraction cache")?;
-        if std::env::var_os("ARBOR_PROFILE").is_some() {
+        if std::env::var_os("LEANGRAPH_PROFILE").is_some() {
             eprintln!(
                 "      persist: graph {ms_graph:.0}ms · unit cache {:.0}ms",
                 tc.elapsed().as_secs_f64() * 1e3
@@ -483,7 +483,7 @@ pub fn run(cfg: &Config) -> Result<Summary> {
 
     if !cfg.quiet {
         // ---- report ------------------------------------------------------------
-        println!("\n\x1b[1marbor\x1b[0m  {}", root.display());
+        println!("\n\x1b[1mleangraph\x1b[0m  {}", root.display());
         println!("  threads          {threads}");
         println!(
             "  files            {n_files}  ({mb:.1} MB{})",

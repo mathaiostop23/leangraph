@@ -174,7 +174,7 @@ use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
 use std::io::Write;
 
-const CACHE_MAGIC: [u8; 8] = *b"ARBORX\x00\x01";
+const CACHE_MAGIC: [u8; 8] = *b"LGRPHX\x00\x01";
 /// Recompute once HEAD has moved further than this. Small enough that coupling
 /// stays current, large enough to make the common sync free.
 pub const MAX_DRIFT: u32 = 25;

@@ -19,7 +19,7 @@ import argparse, json, os, re, subprocess, sys
 from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ARBOR = os.path.join(HERE, "..", "target", "release", "arbor")
+LEANGRAPH = os.path.join(HERE, "..", "target", "release", "leangraph")
 SRC_EXT = (".py", ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs")
 BYTES_PER_TOKEN = 3.5  # source code tokenises denser than prose
 
@@ -39,7 +39,7 @@ def harvest(repo, want, min_files=2, max_files=8):
     # its answers therefore depend on which blobs happen to be local. That makes
     # the ground truth itself drift between runs: the same command on the same
     # repository gave 27.8% and then 24.3% for the keyword baseline — a baseline
-    # that does not use arbor at all — because indexing in between had populated
+    # that does not use leangraph at all — because indexing in between had populated
     # the object store. Disabling it makes the case list a function of history.
     raw = sh(["git", "log", "--no-merges", "--no-renames", "-n", "4000",
               "--pretty=format:%x00%H%x01%s%x01%b", "--name-only"], repo)
@@ -93,7 +93,7 @@ def keyword_baseline(repo, text, k, tracked):
     # Deduplicated in order of appearance, not through a set. `set` iteration
     # order for strings depends on PYTHONHASHSEED, so `list(set(...))[:12]`
     # drew a different twelve tokens on every run — the baseline moved between
-    # 24.3% and 27.8% on identical input, and arbor was being compared against
+    # 24.3% and 27.8% on identical input, and leangraph was being compared against
     # a number that was one sample from a distribution. Order of appearance is
     # also the better rule: the subject line comes before the body.
     seen, toks = set(), []
@@ -113,8 +113,8 @@ def keyword_baseline(repo, text, k, tracked):
     return ranked, sum(file_tokens(repo, f) for f in ranked)
 
 
-def arbor_context(repo, text, max_nodes, max_bytes):
-    out = sh([ARBOR, "context", text, "-p", repo, "--files-json",
+def leangraph_context(repo, text, max_nodes, max_bytes):
+    out = sh([LEANGRAPH, "context", text, "-p", repo, "--files-json",
               "--max-nodes", str(max_nodes), "--max-bytes", str(max_bytes)], repo)
     try:
         d = json.loads(out.strip().splitlines()[-1])
@@ -130,8 +130,8 @@ def main():
     args = ap.parse_args()
     repo = os.path.abspath(args.repo)
 
-    if not os.path.exists(os.path.join(repo, ".arbor", "graph.bin")):
-        subprocess.run([ARBOR, "index", repo], capture_output=True, check=True)
+    if not os.path.exists(os.path.join(repo, ".leangraph", "graph.bin")):
+        subprocess.run([LEANGRAPH, "index", repo], capture_output=True, check=True)
 
     tracked = set(sh(["git", "ls-files"], repo).splitlines())
     cases = harvest(repo, args.n)
@@ -145,7 +145,7 @@ def main():
     # Sweep both sides. A single operating point tells you nothing about
     # whether an approach is cheap or just truncated.
     approaches = [
-        (f"arbor n={n}", (lambda n: lambda t: arbor_context(repo, t, n, n * 4_000))(n))
+        (f"leangraph n={n}", (lambda n: lambda t: leangraph_context(repo, t, n, n * 4_000))(n))
         for n in (10, 25, 50, 100, 200)
     ] + [
         (f"keyword top-{k}", (lambda k: lambda t: keyword_baseline(repo, t, k, tracked))(k))

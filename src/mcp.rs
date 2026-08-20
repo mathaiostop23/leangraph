@@ -26,10 +26,10 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 const SERVER_INSTRUCTIONS: &str = "\
-arbor gives you the structure of this repository: what calls what, what breaks \
+leangraph gives you the structure of this repository: what calls what, what breaks \
 if something changes, and the path between two symbols.
 
-Use `arbor_explore` first, and pass a bag of symbol names you already suspect \
+Use `leangraph_explore` first, and pass a bag of symbol names you already suspect \
 are involved — function, method or class names, `Class.method` to disambiguate \
 an overload. It returns the call path between them plus the surrounding code, \
 ranked by how strongly the graph supports each connection.
@@ -48,7 +48,7 @@ struct Server {
 
 impl Server {
     fn new(root: PathBuf) -> Server {
-        let p = root.join(".arbor").join("graph.bin");
+        let p = root.join(".leangraph").join("graph.bin");
         let graph = Graph::open(&p).ok();
         Server { root, graph }
     }
@@ -56,7 +56,7 @@ impl Server {
     fn tools() -> Value {
         json!([
             {
-                "name": "arbor_explore",
+                "name": "leangraph_explore",
                 "description": "PRIMARY. Given symbol names you suspect are involved, returns \
 the call path between them plus the relevant surrounding code, ranked by graph \
 confidence. Call this before reading files — its output is the answer to 'how \
@@ -78,7 +78,7 @@ to pick a specific overload. Two or more names makes the tool find the path betw
                 }
             },
             {
-                "name": "arbor_node",
+                "name": "leangraph_node",
                 "description": "SECONDARY, use after explore. Full source of one symbol plus \
 everything that calls it and everything it calls, with confidence on each edge.",
                 "inputSchema": {
@@ -101,7 +101,7 @@ everything that calls it and everything it calls, with confidence on each edge."
     fn graph(&self) -> std::result::Result<&Graph, Value> {
         self.graph.as_ref().ok_or_else(|| {
             self.guidance(format!(
-                "No graph for {}. Run `arbor index {}` to build one, then retry. \
+                "No graph for {}. Run `leangraph index {}` to build one, then retry. \
 Until then, fall back to reading files directly.",
                 self.root.display(),
                 self.root.display()
@@ -180,7 +180,7 @@ index may predate them. Try a different name, or read the files directly."
         }
         if ctx.dropped > 0 {
             out.push_str(&format!(
-                "_{} lower-ranked nodes omitted. Call arbor_explore again with more \
+                "_{} lower-ranked nodes omitted. Call leangraph_explore again with more \
 specific symbol names to see them — do not fall back to reading files._\n",
                 ctx.dropped
             ));
@@ -202,7 +202,7 @@ specific symbol names to see them — do not fall back to reading files._\n",
         let Some(&n) = hits.first() else {
             return self.guidance(format!(
                 "`{symbol}` is not in the graph. It may be third-party, or the index may \
-be stale. Try arbor_explore with related names."
+be stale. Try leangraph_explore with related names."
             ));
         };
 
@@ -240,7 +240,7 @@ be stale. Try arbor_explore with related names."
                     .and_then(Value::as_str)
                     .unwrap_or("2025-06-18"),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "arbor", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "leangraph", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": SERVER_INSTRUCTIONS
             }),
             "tools/list" => json!({"tools": Self::tools()}),
@@ -249,10 +249,10 @@ be stale. Try arbor_explore with related names."
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 match name {
-                    "arbor_explore" => self.explore(&args),
-                    "arbor_node" => self.node(&args),
+                    "leangraph_explore" => self.explore(&args),
+                    "leangraph_node" => self.node(&args),
                     other => self.guidance(format!(
-                        "No tool named `{other}`. Available: arbor_explore, arbor_node."
+                        "No tool named `{other}`. Available: leangraph_explore, leangraph_node."
                     )),
                 }
             }

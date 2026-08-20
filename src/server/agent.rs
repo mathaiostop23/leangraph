@@ -85,7 +85,7 @@ impl Client {
             key,
             // Overridable so the pipeline can be exercised against a stub
             // without spending anything.
-            base: std::env::var("ARBOR_ANTHROPIC_BASE").unwrap_or_else(|_| API.into()),
+            base: std::env::var("LEANGRAPH_ANTHROPIC_BASE").unwrap_or_else(|_| API.into()),
         })
     }
 
@@ -456,8 +456,6 @@ code analysis.\n\n{}\n",
         ),
     }
 }
-
-pub use Kind as TriageKind;
 
 impl Triage {
     pub fn worth_analysing(&self) -> bool {

@@ -1,11 +1,11 @@
 [package]
-name = "arbor"
+name = "leangraph"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.80"
 
 [[bin]]
-name = "arbor"
+name = "leangraph"
 path = "src/main.rs"
 
 [dependencies]

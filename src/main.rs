@@ -1,4 +1,4 @@
-//! arbor — native code-graph indexer and query engine.
+//! leangraph — native code-graph indexer and query engine.
 
 mod cache;
 mod cochange;
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
-#[command(name = "arbor", version, about = "Native code-graph indexer")]
+#[command(name = "leangraph", version, about = "Native code-graph indexer")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -113,7 +113,7 @@ enum Cmd {
         #[arg(long)]
         source: bool,
     },
-    /// Wire arbor into your editors as an MCP server
+    /// Wire leangraph into your editors as an MCP server
     Install {
         /// Targets: claude-code, cursor, codex (default: all)
         #[arg(value_name = "TARGET")]
@@ -158,16 +158,16 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1:7777")]
         addr: String,
         /// Where repositories, graphs and the database live
-        #[arg(long, default_value = ".arbor-server")]
+        #[arg(long, default_value = ".leangraph-server")]
         data: PathBuf,
         /// Concurrent workers. Indexing already saturates cores.
         #[arg(long, default_value_t = 2)]
         workers: usize,
         /// Label an issue must carry before the bot acts
-        #[arg(long, default_value = "arbor")]
+        #[arg(long, default_value = "leangraph")]
         trigger_label: String,
         /// Additional label that requests a patch, where fix mode is enabled
-        #[arg(long, default_value = "arbor-fix")]
+        #[arg(long, default_value = "leangraph-fix")]
         fix_label: String,
     },
     /// Probe a running server. Exits non-zero when it is not serving, so it
@@ -517,12 +517,12 @@ fn main() -> Result<()> {
                 .build()?;
             rt.block_on(server::run(server::Config {
                 addr: addr.parse().context("parsing --addr")?,
-                db_path: data.join("arbor.db"),
+                db_path: data.join("leangraph.db"),
                 data_dir: data,
                 workers: workers.max(1),
                 // From the environment, never a flag: a secret in argv is
                 // visible in `ps` to every user on the box.
-                webhook_secret: std::env::var("ARBOR_WEBHOOK_SECRET")
+                webhook_secret: std::env::var("LEANGRAPH_WEBHOOK_SECRET")
                     .ok()
                     .filter(|s| !s.is_empty()),
                 trigger_label,
@@ -598,7 +598,7 @@ fn graph_path(repo: &Path) -> PathBuf {
     if repo.extension().is_some_and(|e| e == "bin") {
         repo.to_path_buf()
     } else {
-        repo.join(".arbor").join("graph.bin")
+        repo.join(".leangraph").join("graph.bin")
     }
 }
 
@@ -606,7 +606,7 @@ fn load(repo: &Path) -> Result<(Graph, u128)> {
     let p = graph_path(repo);
     if !p.exists() {
         bail!(
-            "no graph at {} — run `arbor index {}` first",
+            "no graph at {} — run `leangraph index {}` first",
             p.display(),
             repo.display()
         );

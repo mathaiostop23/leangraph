@@ -24,8 +24,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from graphjoin import norm_qual  # noqa: E402
 
-ARBOR = os.path.join(HERE, "..", "target", "release", "arbor")
-REPOS = os.environ.get("ARBOR_BENCH_REPOS", os.path.join(HERE, "..", "..", ".bench-repos"))
+LEANGRAPH = os.path.join(HERE, "..", "target", "release", "leangraph")
+REPOS = os.environ.get("LEANGRAPH_BENCH_REPOS", os.path.join(HERE, "..", "..", ".bench-repos"))
 
 PY = (".py", ".pyi")
 JS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts")
@@ -33,7 +33,7 @@ VENDORED = ("vendor", "vendored", "dist", "node_modules", "third_party", "extern
 
 
 def load(repo):
-    raw = subprocess.run([ARBOR, "dump", "-p", repo, "--what", "edges"],
+    raw = subprocess.run([LEANGRAPH, "dump", "-p", repo, "--what", "edges"],
                          capture_output=True, text=True, check=True).stdout
     return [json.loads(l) for l in raw.splitlines()]
 
@@ -157,7 +157,7 @@ SEMANTIC = ("calls", "extends", "references")
 
 
 def fanout(edges):
-    """How many edges arbor emits per (caller, callee name).
+    """How many edges leangraph emits per (caller, callee name).
 
     A name matched to eight definitions emits eight edges. Only one target is
     usually right, so the ratio of groups to edges indicates a bound on
@@ -238,7 +238,7 @@ def main():
         try:
             rows.append(report(t))
         except subprocess.CalledProcessError:
-            print(f"\n  SKIP {t}: no graph — run `arbor index` first")
+            print(f"\n  SKIP {t}: no graph — run `leangraph index` first")
     if len(rows) > 1:
         print("\n\033[1m  floor across corpora (independent rules only)\033[0m")
         for n, sem, bad in rows:

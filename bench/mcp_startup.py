@@ -49,10 +49,10 @@ def main():
     repo = os.path.abspath(sys.argv[1] if len(sys.argv) > 1
                            else "../.bench-repos/django")
     here = os.path.dirname(os.path.abspath(__file__))
-    arbor = os.path.join(here, "..", "target", "release", "arbor")
+    leangraph = os.path.join(here, "..", "target", "release", "leangraph")
 
     targets = [
-        ("arbor", [arbor, "serve", "--mcp", "-p", repo]),
+        ("leangraph", [leangraph, "serve", "--mcp", "-p", repo]),
         ("codegraph", ["npx", "-y", "@colbymchenry/codegraph@1.5.0",
                        "serve", "--mcp", "--path", repo]),
     ]
@@ -65,9 +65,9 @@ def main():
         print(f"  {name:<12} {t*1000:>9.1f} ms" if t != float("inf")
               else f"  {name:<12}   no response within timeout")
 
-    a, c = results.get("arbor"), results.get("codegraph")
+    a, c = results.get("leangraph"), results.get("codegraph")
     if a and c and a > 0 and c != float("inf"):
-        print(f"\n  arbor is {c/a:.0f}x faster to first response\n")
+        print(f"\n  leangraph is {c/a:.0f}x faster to first response\n")
 
 
 if __name__ == "__main__":

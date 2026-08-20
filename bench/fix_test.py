@@ -14,8 +14,8 @@ import json, hashlib, hmac, os, shutil, signal, subprocess, sys, tempfile, time
 import urllib.error, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOG = "/tmp/arbor-fix-test.log"
-ARBOR = os.path.join(ROOT, "target", "release", "arbor")
+LOG = "/tmp/leangraph-fix-test.log"
+LEANGRAPH = os.path.join(ROOT, "target", "release", "leangraph")
 SECRET = b"fix-test-secret"
 PORT, STUB_A, STUB_G = 7791, 7993, 7994
 BASE = f"http://127.0.0.1:{PORT}"
@@ -110,7 +110,7 @@ def cleanup():
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="arbor-fix-")
+    tmp = tempfile.mkdtemp(prefix="leangraph-fix-")
     origin, work, data = (os.path.join(tmp, d) for d in ("origin.git", "work", "data"))
 
     # --- a real remote and a real checkout -----------------------------------
@@ -130,12 +130,12 @@ def main():
     git("push", "-u", "origin", "main", cwd=work)
 
     env = dict(os.environ,
-               ARBOR_ANTHROPIC_BASE=f"http://127.0.0.1:{STUB_A}/v1/messages",
-               ARBOR_GITHUB_API=f"http://127.0.0.1:{STUB_G}",
-               ARBOR_ANTHROPIC_KEY="sk-stub",
-               ARBOR_GITHUB_TOKEN="ghp-stub",
-               ARBOR_MASTER_KEY="00" * 32,
-               ARBOR_WEBHOOK_SECRET=SECRET.decode())
+               LEANGRAPH_ANTHROPIC_BASE=f"http://127.0.0.1:{STUB_A}/v1/messages",
+               LEANGRAPH_GITHUB_API=f"http://127.0.0.1:{STUB_G}",
+               LEANGRAPH_ANTHROPIC_KEY="sk-stub",
+               LEANGRAPH_GITHUB_TOKEN="ghp-stub",
+               LEANGRAPH_MASTER_KEY="00" * 32,
+               LEANGRAPH_WEBHOOK_SECRET=SECRET.decode())
 
     for script, port in ((["bench/stub_api.py", str(STUB_A)], STUB_A),
                          (["bench/stub_github.py", str(STUB_G)], STUB_G)):
@@ -143,7 +143,7 @@ def main():
                                       cwd=ROOT, preexec_fn=os.setsid,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     procs.append(subprocess.Popen(
-        [ARBOR, "server", "--addr", f"127.0.0.1:{PORT}", "--data", data,
+        [LEANGRAPH, "server", "--addr", f"127.0.0.1:{PORT}", "--data", data,
          "--workers", "1"],
         cwd=ROOT, env=env, preexec_fn=os.setsid,
         stdout=open(LOG, "w"), stderr=subprocess.STDOUT))
@@ -158,11 +158,11 @@ def main():
     check("repository indexes from a local path", ready)
 
     # --- switch 1: the label alone does nothing ------------------------------
-    r = webhook(1, ["arbor"])
+    r = webhook(1, ["leangraph"])
     check("no fix label -> no patch requested", r.get("fix") is False, r.get("fix"))
 
     # --- switch 2: the label without the repo opting in does nothing ---------
-    r = webhook(2, ["arbor", "arbor-fix"])
+    r = webhook(2, ["leangraph", "leangraph-fix"])
     check("fix label but fix mode off -> refused", r.get("fix") is False, r.get("fix"))
     time.sleep(2)
     _, seen = req("/_seen", base=f"http://127.0.0.1:{STUB_G}")
@@ -172,7 +172,7 @@ def main():
     # --- both switches open --------------------------------------------------
     st, _ = req("/repos/test%2Ffixdemo/config", {"fix_mode": True})
     check("fix mode can be enabled per repository", st == 200, st)
-    r = webhook(3, ["arbor", "arbor-fix"])
+    r = webhook(3, ["leangraph", "leangraph-fix"])
     check("both switches open -> patch requested", r.get("fix") is True, r.get("fix"))
 
     got_pr = wait(lambda: any(c["path"].endswith("/pulls") for c in
@@ -186,29 +186,29 @@ def main():
         check("the pull request is a draft", pr.get("draft") is True, pr.get("draft"))
         check("it targets the default branch", pr.get("base") == "main", pr.get("base"))
         check("from a branch of its own, not main",
-              pr.get("head") == "arbor/issue-3", pr.get("head"))
+              pr.get("head") == "leangraph/issue-3", pr.get("head"))
         check("the body says it is untested",
               "not been run or tested" in pr.get("body", ""))
 
     # --- the remote actually has the change ----------------------------------
-    branches = git("branch", "--list", "arbor/issue-3", cwd=origin)
-    check("the branch exists on the remote", "arbor/issue-3" in branches, branches)
-    if "arbor/issue-3" in branches:
-        blob = git("show", "arbor/issue-3:src/app.py", cwd=origin)
+    branches = git("branch", "--list", "leangraph/issue-3", cwd=origin)
+    check("the branch exists on the remote", "leangraph/issue-3" in branches, branches)
+    if "leangraph/issue-3" in branches:
+        blob = git("show", "leangraph/issue-3:src/app.py", cwd=origin)
         check("the fix is in it", "return a + b" in blob, blob.split("\n")[1].strip())
-        touched = git("diff", "--name-only", "main", "arbor/issue-3", cwd=origin)
+        touched = git("diff", "--name-only", "main", "leangraph/issue-3", cwd=origin)
         check("and nothing else changed", touched == "src/app.py", touched)
 
     # --- the indexed checkout was not touched --------------------------------
     with open(os.path.join(work, "src", "app.py")) as f:
         check("the indexed checkout is untouched", "return a - b" in f.read())
     check("no worktree was left behind",
-          not any(d.startswith(".arbor-fix") for d in os.listdir(tmp)))
+          not any(d.startswith(".leangraph-fix") for d in os.listdir(tmp)))
     check("still on the default branch", git("rev-parse", "--abbrev-ref", "HEAD", cwd=work) == "main")
 
     # --- a forbidden patch is refused, not applied ---------------------------
     before = len([c for c in seen["calls"] if c["path"].endswith("/pulls")])
-    webhook(4, ["arbor", "arbor-fix"])
+    webhook(4, ["leangraph", "leangraph-fix"])
     time.sleep(6)
     _, seen = req("/_seen", base=f"http://127.0.0.1:{STUB_G}")
     after = [c for c in seen["calls"] if c["path"].endswith("/pulls")]
@@ -218,17 +218,17 @@ def main():
     check("and the issue is told why",
           any("could not be applied" in c["body"].get("body", "") for c in comments))
     check("no branch was pushed for it",
-          "arbor/issue-4" not in git("branch", "--list", "arbor/issue-4", cwd=origin))
+          "leangraph/issue-4" not in git("branch", "--list", "leangraph/issue-4", cwd=origin))
 
     # --- an empty answer is a valid answer -----------------------------------
-    webhook(5, ["arbor", "arbor-fix"])
+    webhook(5, ["leangraph", "leangraph-fix"])
     time.sleep(6)
     _, seen = req("/_seen", base=f"http://127.0.0.1:{STUB_G}")
     comments = [c for c in seen["calls"] if c["path"].endswith("/comments")]
     check("declining to patch still posts the analysis",
           any("could not produce one" in c["body"].get("body", "") for c in comments))
     check("declining pushes nothing",
-          "arbor/issue-5" not in git("branch", "--list", "arbor/issue-5", cwd=origin))
+          "leangraph/issue-5" not in git("branch", "--list", "leangraph/issue-5", cwd=origin))
 
     # --- the token never leaves ---------------------------------------------
     check("the token is not echoed into any comment",

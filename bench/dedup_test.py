@@ -13,8 +13,8 @@ import hashlib, hmac, json, os, shutil, signal, subprocess, sys, tempfile, time
 import urllib.error, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ARBOR = os.path.join(ROOT, "target", "release", "arbor")
-LOG = "/tmp/arbor-dedup-test.log"
+LEANGRAPH = os.path.join(ROOT, "target", "release", "leangraph")
+LOG = "/tmp/leangraph-dedup-test.log"
 SECRET = b"dedup-test-secret"
 PORT, STUB_A, STUB_G = 7793, 7995, 7996
 BASE = f"http://127.0.0.1:{PORT}"
@@ -62,7 +62,7 @@ def webhook(number, title, body):
     payload = {"action": "labeled", "repository": {"full_name": "pallets/flask"},
                "issue": {"number": number, "title": title, "body": body,
                          "author_association": "OWNER",
-                         "labels": [{"name": "arbor"}]}}
+                         "labels": [{"name": "leangraph"}]}}
     raw = json.dumps(payload).encode()
     r = urllib.request.Request(BASE + "/webhook/github", data=raw, method="POST")
     r.add_header("content-type", "application/json")
@@ -107,20 +107,20 @@ def main():
     repo = os.path.join(ROOT, "..", ".bench-repos", "flask")
     if not os.path.isdir(repo):
         print("no repo at .bench-repos/flask"); return 1
-    data = tempfile.mkdtemp(prefix="arbor-dedup-")
+    data = tempfile.mkdtemp(prefix="leangraph-dedup-")
 
     env = dict(os.environ,
-               ARBOR_ANTHROPIC_BASE=f"http://127.0.0.1:{STUB_A}/v1/messages",
-               ARBOR_GITHUB_API=f"http://127.0.0.1:{STUB_G}",
-               ARBOR_ANTHROPIC_KEY="sk-stub", ARBOR_GITHUB_TOKEN="ghp-stub",
-               ARBOR_WEBHOOK_SECRET=SECRET.decode(), ARBOR_MASTER_KEY="00" * 32)
+               LEANGRAPH_ANTHROPIC_BASE=f"http://127.0.0.1:{STUB_A}/v1/messages",
+               LEANGRAPH_GITHUB_API=f"http://127.0.0.1:{STUB_G}",
+               LEANGRAPH_ANTHROPIC_KEY="sk-stub", LEANGRAPH_GITHUB_TOKEN="ghp-stub",
+               LEANGRAPH_WEBHOOK_SECRET=SECRET.decode(), LEANGRAPH_MASTER_KEY="00" * 32)
 
     for script, port in (("bench/stub_api.py", STUB_A), ("bench/stub_github.py", STUB_G)):
         procs.append(subprocess.Popen([sys.executable, os.path.join(ROOT, script), str(port)],
                                       cwd=ROOT, preexec_fn=os.setsid,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     procs.append(subprocess.Popen(
-        [ARBOR, "server", "--addr", f"127.0.0.1:{PORT}", "--data", data, "--workers", "1"],
+        [LEANGRAPH, "server", "--addr", f"127.0.0.1:{PORT}", "--data", data, "--workers", "1"],
         cwd=ROOT, env=env, preexec_fn=os.setsid,
         stdout=open(LOG, "w"), stderr=subprocess.STDOUT))
 

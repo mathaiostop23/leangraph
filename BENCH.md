@@ -21,11 +21,11 @@ agent without a structural index actually does.
 
 | approach | recall | tokens/query | tokens per recall point |
 |---|---:|---:|---:|
-| arbor n=10 | 19.5% | 1,219 | **62** |
-| arbor n=25 | 30.5% | 2,500 | **82** |
-| arbor n=50 | 34.1% | 3,948 | **116** |
-| **arbor n=100** | **50.0%** | **9,479** | 190 |
-| arbor n=200 | 52.4% | 17,520 | 334 |
+| leangraph n=10 | 19.5% | 1,219 | **62** |
+| leangraph n=25 | 30.5% | 2,500 | **82** |
+| leangraph n=50 | 34.1% | 3,948 | **116** |
+| **leangraph n=100** | **50.0%** | **9,479** | 190 |
+| leangraph n=200 | 52.4% | 17,520 | 334 |
 | keyword top-3 | 28.0% | 87,703 | 3,127 |
 | keyword top-5 | 40.2% | 146,296 | 3,635 |
 | keyword top-10 | 52.4% | 261,812 | 4,993 |
@@ -34,10 +34,10 @@ agent without a structural index actually does.
 Two readings, both fair:
 
 - **At matched recall (52.4%): 17,520 tokens against 261,812 — 14.9x fewer.**
-- **arbor at n=100 beats keyword top-5 on recall (50.0% vs 40.2%) while costing
+- **leangraph at n=100 beats keyword top-5 on recall (50.0% vs 40.2%) while costing
   15x less.**
 
-The efficiency column is the durable number: a recall point costs arbor 62–334
+The efficiency column is the durable number: a recall point costs leangraph 62–334
 tokens and keyword search 3,127–6,457. That gap is the product.
 
 ### Co-change: a negative result, then a positive one
@@ -55,8 +55,8 @@ That took n=100 from 45.1% to **50.0% at fewer tokens** (9,479 vs 10,140).
 
 ### Where it stops
 
-Keyword search reaches 63% by brute force at 409k tokens; arbor tops out near
-52%. Raising that is retrieval work, not budget work — arbor at n=200 already
+Keyword search reaches 63% by brute force at 409k tokens; leangraph tops out near
+52%. Raising that is retrieval work, not budget work — leangraph at n=200 already
 leaves most of its budget unspent on the queries it fails.
 
 ### What this measurement changed
@@ -85,7 +85,7 @@ django, 3,038 files:
 
 ### Where the time actually goes
 
-Profiling the phases (`ARBOR_PROFILE=1`) on a one-file sync corrected the design's
+Profiling the phases (`LEANGRAPH_PROFILE=1`) on a one-file sync corrected the design's
 assumption about what the delta overlay would buy:
 
 ```
@@ -119,7 +119,7 @@ That cost 9 ms per sync and is the prerequisite for every remaining optimisation
 
 ### The server path — measured, and narrower than expected
 
-`arbor index --since <sha>` diffs two commits instead of walking the tree, which
+`leangraph index --since <sha>` diffs two commits instead of walking the tree, which
 is what a push webhook can supply.
 
 The first attempt applied it to the local case too and made discovery **worse**:
@@ -210,7 +210,7 @@ A speed number published before this ran would have been meaningless.
 `bench/mcp_startup.py`, median of 5 cold processes:
 
 ```
-arbor          3.9 ms
+leangraph          3.9 ms
 codegraph    561.7 ms        144x
 ```
 
@@ -224,7 +224,7 @@ is the friendly end of their range.
 
 ## Full pipeline — Phase 3
 
-| Repo | Files | arbor | CodeGraph | speedup | arbor nodes/edges | CG nodes/edges | resolved |
+| Repo | Files | leangraph | CodeGraph | speedup | leangraph nodes/edges | CG nodes/edges | resolved |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | flask | 83 | **20 ms** | 0.51 s | 26x | 1,963 / 5,588 | 2,705 / 5,171 | 96.1% |
 | excalidraw | 666 | **140 ms** | 3.06 s | 22x | 9,915 / 38,706 | 11,162 / 48,574 | 99.6% |
@@ -240,7 +240,7 @@ On disk: flask 168 KB / excalidraw 1.3 MB / **django 7.9 MB** — against CodeGr
 Apple M1 Pro (6P + 2E), 16 GB, macOS 14.3. Median of 3 runs, warm page cache.
 CodeGraph timings have its measured 0.50 s process startup subtracted.
 
-| Repo | Files | arbor | CodeGraph | speedup | arbor nodes | CG nodes | arbor edges | CG edges |
+| Repo | Files | leangraph | CodeGraph | speedup | leangraph nodes | CG nodes | leangraph edges | CG edges |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | flask | 83 | **20 ms** | 0.51 s | 26× | 1,963 | 2,705 | 5,161 | 5,171 |
 | excalidraw | 666 | **120 ms** | 3.06 s | 26× | 9,915 | 11,162 | 48,721 | 48,574 |
@@ -248,7 +248,7 @@ CodeGraph timings have its measured 0.50 s process startup subtracted.
 
 Edge counts land within 1% on flask and excalidraw and 69% higher on django — we emit multiple candidates for ambiguous name matches, each carrying its own confidence, where CodeGraph emits one or none.
 
-**arbor does not persist yet.** Phase 2 adds the CSR write, so these numbers will grow. Treat them as a floor, not a product number.
+**leangraph does not persist yet.** Phase 2 adds the CSR write, so these numbers will grow. Treat them as a floor, not a product number.
 
 ### Resolution quality
 
@@ -272,7 +272,7 @@ django   builtin (runtime)   12,920   6.4%     ← language runtime
 
 The question that justified building an engine at all: **is parsing the bottleneck?** It is not.
 
-| Repo | arbor parse+extract only | CodeGraph full | parse's share |
+| Repo | leangraph parse+extract only | CodeGraph full | parse's share |
 |---|---:|---:|---:|
 | flask | 10 ms | 0.49 s | 2.0% |
 | excalidraw | 120 ms | 3.04 s | 3.9% |
@@ -331,7 +331,7 @@ keeps a blank line of context   (see below)
 **End to end** (`bench/fix_test.py`) — a real git repository with a real bare
 remote, stubs only for the two HTTP APIs. What is asserted is the behaviour that
 cannot be checked from the pure functions: 23 assertions, including that the
-pull request is a **draft**, that its head is `arbor/issue-N` and never the
+pull request is a **draft**, that its head is `leangraph/issue-N` and never the
 default branch, that the remote branch contains the fix and *nothing else*, that
 the indexed checkout is untouched, that no worktree is left behind, that a
 forbidden patch opens no pull request and pushes no branch, that declining to
@@ -551,11 +551,11 @@ https://metadata.google.internal/...          refused
 https://github.com/pallets/click              queued
 ```
 
-`ARBOR_ALLOWED_HOSTS` pins cloning to named hosts, and is also how an internal
+`LEANGRAPH_ALLOWED_HOSTS` pins cloning to named hosts, and is also how an internal
 one is permitted deliberately — a GitHub Enterprise install:
 
 ```
-ARBOR_ALLOWED_HOSTS=ghe.internal.test,github.com
+LEANGRAPH_ALLOWED_HOSTS=ghe.internal.test,github.com
 
 https://codeload.github.com/o/n     queued    (subdomains are covered)
 https://evil-github.com/o/n         refused   (a suffix match would allow this)
@@ -580,7 +580,7 @@ edges and 83.5% of its call edges were name matches** — a name found somewhere
 the repository, with no scope and no import behind it. If those were mostly
 wrong, the graph was mostly noise and every claim resting on it was worthless.
 
-Worse, the confidence score itself was untested. arbor puts a confidence and a
+Worse, the confidence score itself was untested. leangraph puts a confidence and a
 provenance on every edge and argues that ranking by them is *why* it returns
 fewer tokens at equal recall. Nobody had ever asked whether a confidence-100
 edge is right more often than a confidence-45 one.
@@ -769,7 +769,7 @@ above does.
 
 ```
 observed edges                       2,712
-both endpoints are arbor nodes       2,682
+both endpoints are leangraph nodes       2,682
 of those, direct calls               2,101
 and 581 attributed by walking up past foreign frames
 
@@ -780,7 +780,7 @@ and 581 attributed by walking up past foreign frames
 ```
 
 The staged ladder is printed rather than summarised: each rule makes matching
-easier, and a reader who sees only the last number cannot tell how much is arbor
+easier, and a reader who sees only the last number cannot tell how much is leangraph
 being right and how much is the comparison being generous.
 
 **The walked column is reported second and never as the headline.** When a
@@ -827,7 +827,7 @@ been silently moving published numbers.
 terms with `list(set(tokenize(text)))[:12]`. Set iteration order for strings
 depends on `PYTHONHASHSEED`, so every run selected a different twelve tokens —
 the same command on the same repository gave keyword top-3 at 24.3% and then
-27.8%. arbor was being compared against one sample from a distribution.
+27.8%. leangraph was being compared against one sample from a distribution.
 
 **The ground truth moved.** The case list is harvested with `git log --name-only`
 and rename detection was on. django's corpus is a shallow clone; rename detection

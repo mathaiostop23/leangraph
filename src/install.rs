@@ -69,7 +69,7 @@ fn exe() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(str::to_string))
-        .unwrap_or_else(|| "arbor".into())
+        .unwrap_or_else(|| "leangraph".into())
 }
 
 fn server_entry(repo: &Path) -> Value {
@@ -106,10 +106,10 @@ fn install_json(path: &Path, repo: &Path) -> Result<Outcome> {
     let Some(map) = servers.as_object_mut() else {
         return Ok(Outcome::Skipped("mcpServers is not an object"));
     };
-    if map.get("arbor") == Some(&entry) {
+    if map.get("leangraph") == Some(&entry) {
         return Ok(Outcome::Unchanged(path.to_path_buf()));
     }
-    map.insert("arbor".into(), entry);
+    map.insert("leangraph".into(), entry);
     write_json(path, &doc)?;
     Ok(Outcome::Installed(path.to_path_buf()))
 }
@@ -122,7 +122,7 @@ fn uninstall_json(path: &Path) -> Result<Outcome> {
     let removed = doc
         .get_mut("mcpServers")
         .and_then(Value::as_object_mut)
-        .map(|m| m.remove("arbor").is_some())
+        .map(|m| m.remove("leangraph").is_some())
         .unwrap_or(false);
     if !removed {
         return Ok(Outcome::Unchanged(path.to_path_buf()));
@@ -131,13 +131,13 @@ fn uninstall_json(path: &Path) -> Result<Outcome> {
     Ok(Outcome::Removed(path.to_path_buf()))
 }
 
-/// Codex uses TOML. We only touch our own `[mcp_servers.arbor]` table and leave
+/// Codex uses TOML. We only touch our own `[mcp_servers.leangraph]` table and leave
 /// every sibling line byte-identical — a hand-rolled edit rather than a parse
 /// and re-emit, so user comments and formatting survive.
 fn install_toml(path: &Path, repo: &Path) -> Result<Outcome> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let block = format!(
-        "[mcp_servers.arbor]\ncommand = \"{}\"\nargs = [\"serve\", \"--mcp\", \"-p\", \"{}\"]\n",
+        "[mcp_servers.leangraph]\ncommand = \"{}\"\nargs = [\"serve\", \"--mcp\", \"-p\", \"{}\"]\n",
         exe(),
         repo.to_string_lossy()
     );
@@ -166,7 +166,7 @@ fn strip_toml_block(src: &str) -> String {
     for line in src.lines() {
         let t = line.trim_start();
         if t.starts_with('[') {
-            skipping = t.starts_with("[mcp_servers.arbor]");
+            skipping = t.starts_with("[mcp_servers.leangraph]");
         }
         if !skipping {
             out.push_str(line);

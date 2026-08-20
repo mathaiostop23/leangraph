@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # Two stages. The runtime is debian-slim rather than scratch or distroless,
-# because arbor shells out to `git` for cloning, history and change detection —
+# because leangraph shells out to `git` for cloning, history and change detection —
 # an honest runtime dependency that earlier drafts of SERVER.md glossed over by
 # claiming a static binary with nothing to ship alongside it.
 
@@ -17,7 +17,7 @@ RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
 
 COPY src ./src
 RUN touch src/main.rs && cargo build --release --locked \
- && strip target/release/arbor
+ && strip target/release/leangraph
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -26,14 +26,14 @@ RUN apt-get update \
 
 # Unprivileged: the agent has no tools, but the process still clones untrusted
 # repositories and runs a parser over their contents.
-RUN useradd --system --create-home --uid 10001 arbor
-USER arbor
+RUN useradd --system --create-home --uid 10001 leangraph
+USER leangraph
 
-COPY --from=build --chown=arbor:arbor /src/target/release/arbor /usr/local/bin/arbor
+COPY --from=build --chown=leangraph:leangraph /src/target/release/leangraph /usr/local/bin/leangraph
 
 # Everything mutable lives here: clones, graphs, the database. One volume is the
 # whole backup story.
-ENV ARBOR_DATA=/data
+ENV LEANGRAPH_DATA=/data
 VOLUME ["/data"]
 WORKDIR /data
 
@@ -42,8 +42,8 @@ EXPOSE 7777
 # 0.0.0.0 because the container's loopback is not reachable from outside it.
 # Put a reverse proxy in front; the webhook endpoint expects to be public but
 # the repo-management API does not.
-ENTRYPOINT ["arbor"]
+ENTRYPOINT ["leangraph"]
 CMD ["server", "--addr", "0.0.0.0:7777", "--data", "/data"]
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
-  CMD ["arbor", "health", "--addr", "127.0.0.1:7777"]
+  CMD ["leangraph", "health", "--addr", "127.0.0.1:7777"]

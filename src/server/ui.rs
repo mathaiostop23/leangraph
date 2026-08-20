@@ -107,7 +107,7 @@ fn ago(secs: i64) -> String {
 const TEMPLATE: &str = r#"<!doctype html>
 <html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>arbor</title>
+<title>leangraph</title>
 <style>
 :root{--bg:#fbfbfa;--fg:#1a1a19;--dim:#6b6b66;--line:#e6e5e1;--card:#fff;--acc:#3d6b4f}
 @media(prefers-color-scheme:dark){:root{--bg:#131312;--fg:#e8e8e4;--dim:#8a8a84;--line:#2a2a27;--card:#1b1b19;--acc:#7fb894}}
@@ -145,7 +145,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 </style></head><body><main>
 
 <header>
-  <h1>arbor <span>v{{VERSION}}</span></h1>
+  <h1>leangraph <span>v{{VERSION}}</span></h1>
   <div class=stats>
     <div class=stat><b>{{READY}}</b><span>indexed</span></div>
     <div class=stat><b>{{QUEUED}}</b><span>queued</span></div>

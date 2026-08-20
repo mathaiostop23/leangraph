@@ -45,7 +45,7 @@ pub fn check_url(url: &str) -> Result<()> {
     let host = check_shape(url)?;
     if let Some(allowed) = allowlist() {
         if !allowed.iter().any(|a| host_matches(&host, a)) {
-            bail!("{host} is not in ARBOR_ALLOWED_HOSTS");
+            bail!("{host} is not in LEANGRAPH_ALLOWED_HOSTS");
         }
         // An explicit allowlist is a deliberate statement about where this
         // install may reach, including somewhere private. It overrides the
@@ -90,7 +90,7 @@ fn host_matches(host: &str, pattern: &str) -> bool {
 }
 
 fn allowlist() -> Option<Vec<String>> {
-    let raw = std::env::var("ARBOR_ALLOWED_HOSTS").ok()?;
+    let raw = std::env::var("LEANGRAPH_ALLOWED_HOSTS").ok()?;
     let hosts: Vec<String> = raw
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
@@ -104,7 +104,7 @@ fn allowlist() -> Option<Vec<String>> {
 /// This resolves now and git resolves again when it connects, so a name whose
 /// answer changes in between would slip past — DNS rebinding. Closing that
 /// needs a resolver the connection itself is pinned to, which git does not
-/// offer. Stated rather than papered over; `ARBOR_ALLOWED_HOSTS` is the
+/// offer. Stated rather than papered over; `LEANGRAPH_ALLOWED_HOSTS` is the
 /// airtight control, and a network policy on the container is the real one.
 fn check_public(host: &str) -> Result<()> {
     use std::net::{IpAddr, ToSocketAddrs};
@@ -128,7 +128,7 @@ fn check_public(host: &str) -> Result<()> {
             } else {
                 format!("{host} resolves to {ip}, which is not a public address")
             };
-            bail!("{what}; set ARBOR_ALLOWED_HOSTS to permit an internal host deliberately");
+            bail!("{what}; set LEANGRAPH_ALLOWED_HOSTS to permit an internal host deliberately");
         }
     }
     Ok(())

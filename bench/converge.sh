@@ -16,16 +16,16 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARBOR="$ROOT/target/release/arbor"
+LEANGRAPH="$ROOT/target/release/leangraph"
 REPO="${1:-$ROOT/../.bench-repos/django}"
 REPO="$(cd "$REPO" && pwd)"
-GRAPH="$REPO/.arbor/graph.bin"
+GRAPH="$REPO/.leangraph/graph.bin"
 
-[[ -x "$ARBOR" ]] || { echo "build first: cargo build --release" >&2; exit 1; }
+[[ -x "$LEANGRAPH" ]] || { echo "build first: cargo build --release" >&2; exit 1; }
 
-hash_graph() { "$ARBOR" dump -p "$REPO" --what semantic | shasum -a 256 | cut -c1-16; }
-full()  { "$ARBOR" index "$REPO" --force >/dev/null 2>&1; }
-sync()  { "$ARBOR" index "$REPO"         >/dev/null 2>&1; }
+hash_graph() { "$LEANGRAPH" dump -p "$REPO" --what semantic | shasum -a 256 | cut -c1-16; }
+full()  { "$LEANGRAPH" index "$REPO" --force >/dev/null 2>&1; }
+sync()  { "$LEANGRAPH" index "$REPO"         >/dev/null 2>&1; }
 
 pass=0; fail=0
 check() {
@@ -46,7 +46,7 @@ check "full index is reproducible" "$A" "$B"
 
 # --- modify then revert -------------------------------------------------------
 VICTIM=$(cd "$REPO" && git ls-files '*.py' '*.ts' | head -1)
-printf '\n# arbor convergence probe\n' >> "$REPO/$VICTIM"
+printf '\n# leangraph convergence probe\n' >> "$REPO/$VICTIM"
 sync
 (cd "$REPO" && git checkout -- "$VICTIM")
 sync; C=$(hash_graph)
@@ -54,8 +54,8 @@ full; D=$(hash_graph)
 check "modify + revert converges" "$C" "$D"
 
 # --- add a file ---------------------------------------------------------------
-NEW="$REPO/zz_arbor_probe.py"
-printf 'class ArborProbe:\n    def ping(self):\n        return 1\n' > "$NEW"
+NEW="$REPO/zz_leangraph_probe.py"
+printf 'class LeanGraphProbe:\n    def ping(self):\n        return 1\n' > "$NEW"
 sync; E=$(hash_graph)
 full; F=$(hash_graph)
 check "added file converges" "$E" "$F"

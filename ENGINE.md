@@ -1,8 +1,8 @@
-# arbor — engine design
+# leangraph — engine design
 
 Native code-graph indexer. Target: **match CodeGraph's graph quality on a narrow language set, at 5–20× the indexing speed and sub-100ms incremental.**
 
-Working name `arbor`. Binary `arbor`. Changeable.
+Working name `leangraph`. Binary `leangraph`. Changeable.
 
 ---
 
@@ -50,7 +50,7 @@ Our bet: **a single-process, zero-FFI Rust pipeline where resolution is native a
 ```
 ┌── 1. DISCOVER ─────────────────────────────────────────┐
 │  ignore::WalkBuilder (ripgrep's walker)                │
-│  parallel, gitignore-aware, .arborignore overlay       │
+│  parallel, gitignore-aware, .leangraphignore overlay       │
 │  → Vec<FileEntry { path, len, mtime }>                 │
 └────────────────────────────────────────────────────────┘
                           ↓
@@ -134,7 +134,7 @@ Multi-hop traversal is where the gap compounds. We keep **both directions**: for
 The file layout is designed to be `mmap`'d and used **without deserialization**:
 
 ```
-arbor.graph
+leangraph.graph
   [header: magic, version, n_nodes, n_edges, section offsets]
   [fwd.offsets : u32 × (n+1)]
   [fwd.targets : u32 × m]
@@ -265,7 +265,7 @@ We cannot ship a fast wrong graph. CodeGraph is MIT-licensed and runnable, which
 ```
 scripts/bench.sh <repo>
   ├─ run codegraph index   → time, node/edge counts, sqlite dump
-  ├─ run arbor index       → time, node/edge counts
+  ├─ run leangraph index       → time, node/edge counts
   └─ diff
        nodes we miss that they find   ← recall gap (must → 0)
        nodes we find that they miss   ← either better or wrong (inspect)
@@ -280,7 +280,7 @@ Plus a golden-fixture suite: hand-built micro-repos per language with hand-verif
 
 ## 6. Code layout
 
-Modules now, crates when compile time demands it — a workspace split buys nothing until the grammar count makes rebuilds hurt (expect that around 10+ languages, then split `arbor-lang` out first).
+Modules now, crates when compile time demands it — a workspace split buys nothing until the grammar count makes rebuilds hurt (expect that around 10+ languages, then split `leangraph-lang` out first).
 
 ```
 src/
@@ -300,7 +300,7 @@ src/
 Every relevant agent (Claude Code, Cursor, Codex, Windsurf, Zed, Continue, Kiro) speaks MCP. Integration is one config entry per target plus a writer to emit it (~50 lines each).
 
 ```jsonc
-{ "mcpServers": { "arbor": { "command": "arbor", "args": ["serve", "--mcp"] } } }
+{ "mcpServers": { "leangraph": { "command": "leangraph", "args": ["serve", "--mcp"] } } }
 ```
 
 **The one place we win by construction.** From CodeGraph's own CLAUDE.md:
@@ -312,9 +312,9 @@ Their mitigation is a pre-warmed daemon with sockets and an env var to skip a re
 **Tool surface — one primary tool.** Their hardest-won finding is that agents under-pick secondary tools; they *removed* `codegraph_context` and `codegraph_trace` for this reason. Copy the conclusion:
 
 ```
-arbor_explore(symbols[])   PRIMARY   — symbol bag → verbatim source,
+leangraph_explore(symbols[])   PRIMARY   — symbol bag → verbatim source,
                                        call path between them, blast radius
-arbor_node(symbol)         SECONDARY — full body + caller/callee trail
+leangraph_node(symbol)         SECONDARY — full body + caller/callee trail
 ```
 
 Two additions they do not have: every edge carries **confidence + provenance** so the agent can distinguish proven from guessed, and **co-change edges** from git history catch coupling no static analyzer sees.
@@ -343,7 +343,7 @@ Full results and methodology: **[BENCH.md](./BENCH.md)**. Reproduce with `./benc
 
 Gate was: *proceed if parse+extract is under 20% of CodeGraph's total.* **Measured at 2–6%.**
 
-| Repo | Files | arbor (parse+extract) | CodeGraph (full) | share | headroom |
+| Repo | Files | leangraph (parse+extract) | CodeGraph (full) | share | headroom |
 |---|---:|---:|---:|---:|---:|
 | flask | 83 | 10 ms | 0.49 s | 2.0% | 49× |
 | excalidraw | 666 | 120 ms | 3.04 s | 3.9% | 25× |
@@ -396,7 +396,7 @@ So the target is precise: **fewer tokens at equal-or-better answer quality.** Th
 Mirror `bench/run.sh` with `bench/cost.sh`:
 
 1. 40 closed issues with linked merged PRs → ground truth = files changed
-2. For arbor context, CodeGraph explore, and plain embedding RAG, measure **recall@k vs tokens returned**
+2. For leangraph context, CodeGraph explore, and plain embedding RAG, measure **recall@k vs tokens returned**
 3. Publish the curve
 
 The headline claim is one sentence and it must be earned: **"same file recall, N% fewer context tokens."** Nobody in this space publishes that number.

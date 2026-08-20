@@ -12,12 +12,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
-CORPUS=${ARBOR_BENCH_REPOS:-$ROOT/../.bench-repos}
+CORPUS=${LEANGRAPH_BENCH_REPOS:-$ROOT/../.bench-repos}
 
-[ -x target/release/arbor ] || { echo "build first: cargo build --release"; exit 1; }
+[ -x target/release/leangraph ] || { echo "build first: cargo build --release"; exit 1; }
 
 echo
-echo "  arbor    $(git rev-parse --short HEAD 2>/dev/null || echo '?')$([ -n "$(git status --porcelain 2>/dev/null)" ] && echo ' +dirty')"
+echo "  leangraph    $(git rev-parse --short HEAD 2>/dev/null || echo '?')$([ -n "$(git status --porcelain 2>/dev/null)" ] && echo ' +dirty')"
 echo "  python   $(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:3])))')"
 
 echo
@@ -32,7 +32,7 @@ if [ -d "$FLASK/src/flask" ] && python3 -c 'import pytest' 2>/dev/null; then
   # diagnose.
   find "$FLASK" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
   find "$FLASK" -name .pytest_cache -type d -prune -exec rm -rf {} + 2>/dev/null
-  TRACE=$(mktemp -t arbor-trace).jsonl
+  TRACE=$(mktemp -t leangraph-trace).jsonl
   echo
   echo "──────────  running flask's own test suite under a tracer  ──────────"
   ( cd "$FLASK" && PYTHONPATH=src python3 "$ROOT/bench/edgetrace.py" \

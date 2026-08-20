@@ -24,7 +24,7 @@ use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const MAGIC: [u8; 8] = *b"ARBORG\x00\x03";
+const MAGIC: [u8; 8] = *b"LGRPHG\x00\x03";
 const N_SECTIONS: usize = 24;
 
 // section ids
@@ -339,7 +339,7 @@ impl Graph {
         let header: Header = *bytemuck::from_bytes(&mmap[..std::mem::size_of::<Header>()]);
         if header.magic != MAGIC {
             bail!(
-                "{}: not an arbor graph, or written by an incompatible version",
+                "{}: not an leangraph graph, or written by an incompatible version",
                 path.display()
             );
         }

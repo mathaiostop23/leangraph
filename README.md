@@ -1,8 +1,8 @@
-# arbor
+# leangraph
 
 **Give a coding agent the relevant code instead of making it grep for it.**
 
-arbor reads a repository once and builds a graph of what calls what — every
+leangraph reads a repository once and builds a graph of what calls what — every
 function, class, import and reference, with a confidence score on each link.
 That graph then answers the question an agent actually has: *given this bug
 report, which forty lines should I read?*
@@ -13,8 +13,8 @@ that is the difference between **9,563 tokens and 158,685** for a better answer.
 
 ```bash
 cargo build --release
-arbor index /path/to/repo        # django, 3,038 files → 0.75 s
-arbor install                    # wire it into Claude Code, Cursor, Codex
+leangraph index /path/to/repo        # django, 3,038 files → 0.75 s
+leangraph install                    # wire it into Claude Code, Cursor, Codex
 ```
 
 **Status: early.** Python and TypeScript only. The numbers below are measured
@@ -29,9 +29,9 @@ can run yourself. The language coverage is not yet competitive; see
 ### In your editor, as an MCP server
 
 ```bash
-arbor install                      # Claude Code, Cursor, Codex
-arbor install cursor -p ~/myrepo   # or just one
-arbor install --uninstall
+leangraph install                      # Claude Code, Cursor, Codex
+leangraph install cursor -p ~/myrepo   # or just one
+leangraph install --uninstall
 ```
 
 Config edits merge rather than overwrite — those files hold your other MCP
@@ -39,8 +39,8 @@ servers. Two tools are exposed, deliberately:
 
 | tool | what it returns |
 |---|---|
-| `arbor_explore(symbols[])` | the path between the named symbols plus surrounding code, ranked by confidence |
-| `arbor_node(symbol)` | one symbol's source, its callers and its callees |
+| `leangraph_explore(symbols[])` | the path between the named symbols plus surrounding code, ranked by confidence |
+| `leangraph_node(symbol)` | one symbol's source, its callers and its callees |
 
 Agents reliably call the first tool offered and under-pick the rest. CodeGraph
 *removed* two of its own tools after measuring this. There is no third tool here
@@ -55,7 +55,7 @@ curl -X POST localhost:7777/repos -H 'content-type: application/json' \
 ```
 
 One binary, one volume, **no database container** — SQLite is compiled in. Point
-a GitHub webhook at `/webhook/github`, label an issue `arbor`, and the answer
+a GitHub webhook at `/webhook/github`, label an issue `leangraph`, and the answer
 arrives as a comment with what it cost. Dashboard at `/`.
 
 The label is the point. Nothing happens on an unlabelled issue, and nothing
@@ -102,8 +102,8 @@ index actually does: tokenise, `git grep`, read the top *k*.
 
 | approach | recall | tokens / query |
 |---|---:|---:|
-| **arbor, 100 nodes** | **40.9%** | **9,563** |
-| arbor, 25 nodes | 23.5% | 2,364 |
+| **leangraph, 100 nodes** | **40.9%** | **9,563** |
+| leangraph, 25 nodes | 23.5% | 2,364 |
 | keyword, top 5 | 35.7% | 158,685 |
 | keyword, top 10 | 45.2% | 259,328 |
 

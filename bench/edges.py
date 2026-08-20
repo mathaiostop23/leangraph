@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Edge correctness: does confidence predict it?
 
-arbor puts a confidence and a provenance on every edge and argues that this is
+leangraph puts a confidence and a provenance on every edge and argues that this is
 not decoration — that ranking by confidence is why it returns fewer tokens at
 equal recall. That argument has never been tested. If a scope-resolved edge and
 a name-matched one are right equally often, the ranking is sorting noise.
@@ -28,8 +28,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from graphjoin import norm_qual, norm_path  # noqa: E402
 
-ARBOR = os.path.join(HERE, "..", "target", "release", "arbor")
-REPOS = os.environ.get("ARBOR_BENCH_REPOS", os.path.join(HERE, "..", "..", ".bench-repos"))
+LEANGRAPH = os.path.join(HERE, "..", "target", "release", "leangraph")
+REPOS = os.environ.get("LEANGRAPH_BENCH_REPOS", os.path.join(HERE, "..", "..", ".bench-repos"))
 
 BUCKETS = [(100, "scope"), (95, "import"), (80, "name"), (60, "name"), (45, "name")]
 
@@ -136,8 +136,8 @@ def monotone(rates):
 
 # ----------------------------------------------------------------------- input
 
-def arbor_edges(repo):
-    raw = subprocess.run([ARBOR, "dump", "-p", repo, "--what", "edges"],
+def leangraph_edges(repo):
+    raw = subprocess.run([LEANGRAPH, "dump", "-p", repo, "--what", "edges"],
                          capture_output=True, text=True, check=True).stdout
     return [json.loads(l) for l in raw.splitlines()]
 
@@ -170,11 +170,11 @@ def population(e):
 # -------------------------------------------------------------- runtime labels
 
 class Runtime:
-    """Match arbor's static edges against what actually ran.
+    """Match leangraph's static edges against what actually ran.
 
     The staged rules matter as much as the result. Each one makes matching
     easier, so a reader who only sees the final number cannot tell how much of
-    it is arbor being right and how much is the comparison being generous. The
+    it is leangraph being right and how much is the comparison being generous. The
     ladder is printed.
     """
 
@@ -187,7 +187,7 @@ class Runtime:
             self.by_caller[(e["cf"], cq)].add((e["df"], dq))
         self.ran = {(f, norm_qual(q)) for (f, q) in ran}
         self.flags = {(f, norm_qual(q)): r["flag"] for (f, q), r in ran.items()}
-        # Runtime MRO, both directions: arbor may name a base where the
+        # Runtime MRO, both directions: leangraph may name a base where the
         # subclass's override actually executed, or the reverse.
         self.kin = defaultdict(set)
         for q, bs in bases.items():
@@ -208,7 +208,7 @@ class Runtime:
             return True
         seen = self.by_caller.get(src, ())
         if stage >= 2 and e["dk"] in ("class", "iface"):
-            # `X()` is a call to the class in arbor's model and a call to
+            # `X()` is a call to the class in leangraph's model and a call to
             # `X.__init__` at runtime. Same edge, two spellings.
             for ctor in ("__init__", "__new__"):
                 if (dst[0], f"{dst[1]}.{ctor}") in seen:
@@ -227,8 +227,8 @@ class Runtime:
 class Static:
     """The same matching rules, pointed the other way.
 
-    Recall asks whether arbor has an observed edge; calibration asks whether an
-    arbor edge was observed. They must use the same rules or the two numbers are
+    Recall asks whether leangraph has an observed edge; calibration asks whether an
+    leangraph edge was observed. They must use the same rules or the two numbers are
     not about the same thing — the first version of this file applied the
     constructor and MRO rules to one and not the other, which made recall look
     worse than the calibration table it sat above.
@@ -252,7 +252,7 @@ class Static:
             return True
         out = self.by_caller.get((cf, cq), ())
         if stage >= 2:
-            # Runtime enters `X.__init__`; arbor records a call to the class.
+            # Runtime enters `X.__init__`; leangraph records a call to the class.
             for ctor in (".__init__", ".__new__"):
                 if dq.endswith(ctor):
                     owner = dq[: -len(ctor)]
@@ -359,7 +359,7 @@ def main():
     root = args.repo if os.path.isdir(args.repo) else os.path.join(REPOS, args.repo)
     name = os.path.basename(root.rstrip("/"))
 
-    edges = arbor_edges(root)
+    edges = leangraph_edges(root)
     calls = [e for e in edges if e["ek"] == "calls"]
     print(f"\n\033[1medge correctness — {name}\033[0m")
     print(f"  {len(edges):,} edges, {len(calls):,} of them calls")
@@ -372,7 +372,7 @@ def main():
               f"{len(ran):,} executed functions, python "
               f"{'.'.join(map(str, header.get('python', [])))}\033[0m")
 
-        # Recall, restricted to observed edges whose BOTH ends arbor knows as
+        # Recall, restricted to observed edges whose BOTH ends leangraph knows as
         # nodes — a missing node is a node-level failure and is measured
         # elsewhere; counting it here would be counting it twice.
         known = {(e["sf"], norm_qual(e["sq"])) for e in edges} | \
@@ -385,7 +385,7 @@ def main():
         walked = [o for o in joinable if o[4] > 0]
         print(f"\n  \033[1mrecall against execution\033[0m")
         print(f"    observed edges                     {len(obs):>8,}")
-        print(f"    both endpoints are arbor nodes     {len(joinable):>8,}")
+        print(f"    both endpoints are leangraph nodes     {len(joinable):>8,}")
         print(f"    of those, direct calls             {len(direct):>8,}")
         print(f"    \033[2mand {len(walked):,} attributed by walking up past foreign "
               f"frames\033[0m")
@@ -403,7 +403,7 @@ def main():
         # the hop counter blames the nearest in-repo frame above — which did not
         # make that call. flask's `save_session -> _lazy_sha1` at seven hops is
         # a call `itsdangerous` made, and nothing in `save_session` names
-        # `_lazy_sha1`. Those edges are not arbor's to have.
+        # `_lazy_sha1`. Those edges are not leangraph's to have.
         wk = sum(1 for o in walked if static.has(o, 3))
         print(f"    \033[2mthe walked edges alone: {100*wk/max(len(walked),1):.1f}% — "
               f"they are mostly calls a library made, not ones we missed\033[0m")

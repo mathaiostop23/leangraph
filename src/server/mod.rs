@@ -129,14 +129,14 @@ pub async fn run(cfg: Config) -> Result<()> {
         .with_context(|| format!("bind {}", app.cfg.addr))?;
 
     println!(
-        "\n  \x1b[1marbor server\x1b[0m  http://{}\n  data      {}\n  workers   {}\n  webhook   {}\n  trigger   `{}` label\n  fix       `{}` label, and only where the repo has opted in\n",
+        "\n  \x1b[1mleangraph server\x1b[0m  http://{}\n  data      {}\n  workers   {}\n  webhook   {}\n  trigger   `{}` label\n  fix       `{}` label, and only where the repo has opted in\n",
         app.cfg.addr,
         app.cfg.data_dir.display(),
         app.cfg.workers,
         if app.cfg.webhook_secret.is_some() {
             "\x1b[32mverified\x1b[0m"
         } else {
-            "\x1b[33mdisabled — set ARBOR_WEBHOOK_SECRET\x1b[0m"
+            "\x1b[33mdisabled — set LEANGRAPH_WEBHOOK_SECRET\x1b[0m"
         },
         app.cfg.trigger_label,
         app.cfg.fix_label
@@ -145,7 +145,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         tracing_line(
             "warn",
             "master key is stored beside the database — anyone who can read one can \
-usually read the other. Set ARBOR_MASTER_KEY to keep it out of the volume.",
+usually read the other. Set LEANGRAPH_MASTER_KEY to keep it out of the volume.",
         );
     }
 
@@ -585,7 +585,7 @@ If that is wrong, say so on the issue and I will look properly.\n",
     let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
         app.db.finish_run(run_id, "skipped", Some("no api key"), "", 0, 0.0,
             started.elapsed().as_millis() as i64, None)?;
-        tracing_line("warn", "no ARBOR_ANTHROPIC_KEY — issue skipped");
+        tracing_line("warn", "no LEANGRAPH_ANTHROPIC_KEY — issue skipped");
         return Ok(());
     };
 
@@ -681,7 +681,7 @@ willing to propose from the context available._\n",
         tracing_line(
             "info",
             &format!(
-                "{}#{} — no ARBOR_GITHUB_TOKEN, comment not posted:\n{comment}",
+                "{}#{} — no LEANGRAPH_GITHUB_TOKEN, comment not posted:\n{comment}",
                 repo.full_name, issue.number
             ),
         );
@@ -721,7 +721,7 @@ struct Built {
 /// Fingerprint an issue. Opens the graph so the seed half is real; a repository
 /// without one still gets the text half, which is the stronger signal anyway.
 fn fingerprint_of(repo_path: &std::path::Path, title: &str, body: &str) -> dedup::Fingerprint {
-    let g = crate::graph::Graph::open(&repo_path.join(".arbor").join("graph.bin")).ok();
+    let g = crate::graph::Graph::open(&repo_path.join(".leangraph").join("graph.bin")).ok();
     dedup::fingerprint(g.as_ref(), title, body)
 }
 
@@ -729,7 +729,7 @@ fn fingerprint_of(repo_path: &std::path::Path, title: &str, body: &str) -> dedup
 /// like indexing does.
 fn build_context(repo_path: &std::path::Path, text: &str) -> Result<Built> {
     use crate::{graph::Graph, query};
-    let g = Graph::open(&repo_path.join(".arbor").join("graph.bin"))
+    let g = Graph::open(&repo_path.join(".leangraph").join("graph.bin"))
         .context("repository has no graph yet")?;
     let ctx = query::build_from_text(&g, text, &query::Budget::default());
     let preamble = g.preamble_at_least(agent::CACHE_MIN_CHARS, 60);
@@ -840,7 +840,7 @@ async fn post_comment(
         .post(&url)
         .header("authorization", format!("Bearer {token}"))
         .header("accept", "application/vnd.github+json")
-        .header("user-agent", "arbor")
+        .header("user-agent", "leangraph")
         .json(&serde_json::json!({ "body": body }))
         .send()
         .await?;
@@ -863,9 +863,9 @@ fn git_head(root: &std::path::Path) -> Option<String> {
 
 /// Deliberately minimal: one line, one level, no key-value ceremony. A
 /// self-hosted binary's log is read by a person tailing it, not by a pipeline.
-/// `anthropic_key` -> `ARBOR_ANTHROPIC_KEY`.
+/// `anthropic_key` -> `LEANGRAPH_ANTHROPIC_KEY`.
 fn env_name(name: &str) -> String {
-    format!("ARBOR_{}", name.to_ascii_uppercase())
+    format!("LEANGRAPH_{}", name.to_ascii_uppercase())
 }
 
 pub fn tracing_line(level: &str, msg: &str) {

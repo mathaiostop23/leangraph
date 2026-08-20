@@ -39,7 +39,7 @@ def check(name, got, want):
     passed, failed = passed + ok, failed + (not ok)
 
 
-def issue(number=1, assoc="OWNER", labels=("arbor",), repo="pallets/flask", pr=False):
+def issue(number=1, assoc="OWNER", labels=("leangraph",), repo="pallets/flask", pr=False):
     body = {
         "action": "labeled",
         "repository": {"full_name": repo},

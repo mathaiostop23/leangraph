@@ -1,33 +1,33 @@
 # One service, one volume. There is no database container: SQLite is compiled
 # into the binary, so this is the entire deployment.
 services:
-  arbor:
+  leangraph:
     build: .
-    image: arbor:latest
+    image: leangraph:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:7777:7777"
     volumes:
-      - arbor-data:/data
+      - leangraph-data:/data
     environment:
       # Required. Without it the webhook endpoint refuses everything, which is
       # the correct failure mode for an unauthenticated door into an agent.
-      ARBOR_WEBHOOK_SECRET: ${ARBOR_WEBHOOK_SECRET:?set this in .env}
+      LEANGRAPH_WEBHOOK_SECRET: ${LEANGRAPH_WEBHOOK_SECRET:?set this in .env}
       # Your key. It is spent on your issues; nothing here proxies it anywhere.
-      ARBOR_ANTHROPIC_KEY: ${ARBOR_ANTHROPIC_KEY:?set this in .env}
+      LEANGRAPH_ANTHROPIC_KEY: ${LEANGRAPH_ANTHROPIC_KEY:?set this in .env}
       # Only needed for private repos and for posting comments back.
-      ARBOR_GITHUB_TOKEN: ${ARBOR_GITHUB_TOKEN:-}
+      LEANGRAPH_GITHUB_TOKEN: ${LEANGRAPH_GITHUB_TOKEN:-}
       # Encrypts secrets at rest in the database.
-      ARBOR_MASTER_KEY: ${ARBOR_MASTER_KEY:-}
-      # Optional egress allowlist for repository URLs. Unset, arbor still
+      LEANGRAPH_MASTER_KEY: ${LEANGRAPH_MASTER_KEY:-}
+      # Optional egress allowlist for repository URLs. Unset, leangraph still
       # refuses any URL resolving to a private, loopback or link-local address
       # — including 169.254.169.254, the metadata endpoint that hands out this
       # container's cloud credentials. Set it to pin cloning to named hosts, or
       # to permit an internal one deliberately (GitHub Enterprise):
-      #   ARBOR_ALLOWED_HOSTS: github.com,ghe.internal.example
-      ARBOR_ALLOWED_HOSTS: ${ARBOR_ALLOWED_HOSTS:-}
+      #   LEANGRAPH_ALLOWED_HOSTS: github.com,ghe.internal.example
+      LEANGRAPH_ALLOWED_HOSTS: ${LEANGRAPH_ALLOWED_HOSTS:-}
       # GitHub Enterprise: the API root to post comments and pull requests to.
-      ARBOR_GITHUB_API: ${ARBOR_GITHUB_API:-}
+      LEANGRAPH_GITHUB_API: ${LEANGRAPH_GITHUB_API:-}
     # Indexing saturates whatever it is given. Bound it, or a large repository
     # will starve the reactor that has to answer webhooks.
     deploy:
@@ -43,4 +43,4 @@ services:
     # and the connection.
 
 volumes:
-  arbor-data:
+  leangraph-data:

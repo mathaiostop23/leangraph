@@ -28,9 +28,9 @@ pub struct Vault {
 fn decode_key(s: &str) -> Result<[u8; 32]> {
     let s = s.trim();
     let bytes = if s.len() == 64 {
-        hex::decode(s).context("ARBOR_MASTER_KEY is not valid hex")?
+        hex::decode(s).context("LEANGRAPH_MASTER_KEY is not valid hex")?
     } else {
-        bail!("ARBOR_MASTER_KEY must be 64 hex characters (32 bytes)");
+        bail!("LEANGRAPH_MASTER_KEY must be 64 hex characters (32 bytes)");
     };
     let mut k = [0u8; 32];
     k.copy_from_slice(&bytes);
@@ -41,7 +41,7 @@ impl Vault {
     /// Environment first, then a file beside the database, generating one if
     /// neither exists.
     pub fn open(data_dir: &Path) -> Result<Vault> {
-        if let Ok(env) = std::env::var("ARBOR_MASTER_KEY") {
+        if let Ok(env) = std::env::var("LEANGRAPH_MASTER_KEY") {
             if !env.trim().is_empty() {
                 return Ok(Vault {
                     cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&decode_key(&env)?)),

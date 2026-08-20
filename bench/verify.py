@@ -16,8 +16,8 @@ import json, os, sqlite3, subprocess, sys
 from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ARBOR = os.path.join(HERE, "..", "target", "release", "arbor")
-REPOS = os.environ.get("ARBOR_BENCH_REPOS", os.path.join(HERE, "..", "..", ".bench-repos"))
+LEANGRAPH = os.path.join(HERE, "..", "target", "release", "leangraph")
+REPOS = os.environ.get("LEANGRAPH_BENCH_REPOS", os.path.join(HERE, "..", "..", ".bench-repos"))
 
 # CodeGraph models far more node kinds than we do. Comparing on kinds we do not
 # claim to extract would measure our scope, not our correctness, so we fold both
@@ -54,8 +54,8 @@ def codegraph_nodes(db, root):
     return out
 
 
-def arbor_nodes(repo, root):
-    raw = subprocess.run([ARBOR, "dump", "-p", repo, "--what", "nodes"],
+def leangraph_nodes(repo, root):
+    raw = subprocess.run([LEANGRAPH, "dump", "-p", repo, "--what", "nodes"],
                          capture_output=True, text=True, check=True).stdout
     out = set()
     for line in raw.splitlines():
@@ -113,9 +113,9 @@ def main():
         if not os.path.exists(db):
             print(f"\n{r}: no CodeGraph index — run bench/run.sh first")
             continue
-        if not os.path.exists(os.path.join(repo, ".arbor", "graph.bin")):
-            subprocess.run([ARBOR, "index", repo], capture_output=True, check=True)
-        recalls.append(report(r, arbor_nodes(repo, repo), codegraph_nodes(db, repo)))
+        if not os.path.exists(os.path.join(repo, ".leangraph", "graph.bin")):
+            subprocess.run([LEANGRAPH, "index", repo], capture_output=True, check=True)
+        recalls.append(report(r, leangraph_nodes(repo, repo), codegraph_nodes(db, repo)))
 
     if recalls:
         print(f"\n\033[1mpresence recall across {len(recalls)} repos: "

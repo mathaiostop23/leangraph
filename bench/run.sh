@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Differential benchmark: arbor vs CodeGraph, same repos, same machine.
+# Differential benchmark: leangraph vs CodeGraph, same repos, same machine.
 #
 # Compares both wall clock AND graph size, because a speed number without a
 # graph-size number next to it is meaningless — anyone can be fast by
@@ -9,10 +9,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPOS_DIR="${ARBOR_BENCH_REPOS:-$ROOT/../.bench-repos}"
-ARBOR="$ROOT/target/release/arbor"
+REPOS_DIR="${LEANGRAPH_BENCH_REPOS:-$ROOT/../.bench-repos}"
+LEANGRAPH="$ROOT/target/release/leangraph"
 CG="npx -y @colbymchenry/codegraph@1.5.0"
-RUNS="${ARBOR_BENCH_RUNS:-3}"
+RUNS="${LEANGRAPH_BENCH_RUNS:-3}"
 export CODEGRAPH_TELEMETRY=0
 
 # Associative arrays need bash 4; macOS ships 3.2. Keep it portable.
@@ -27,7 +27,7 @@ clone_url() {
 
 if [[ $# -gt 0 ]]; then TARGETS=("$@"); else TARGETS=(flask excalidraw django); fi
 
-[[ -x "$ARBOR" ]] || { echo "build first: cargo build --release" >&2; exit 1; }
+[[ -x "$LEANGRAPH" ]] || { echo "build first: cargo build --release" >&2; exit 1; }
 mkdir -p "$REPOS_DIR"
 
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
@@ -47,7 +47,7 @@ STARTUP=$(median_wall 3 "$CG --version")
 echo "  startup overhead: ${STARTUP}s (subtracted from codegraph totals below)"
 echo
 
-printf '%-12s %7s %19s %19s %8s\n' "" "" "--------- arbor ---------" "------- codegraph -------" ""
+printf '%-12s %7s %19s %19s %8s\n' "" "" "--------- leangraph ---------" "------- codegraph -------" ""
 printf '%-12s %7s %9s %9s %9s %9s %8s\n' REPO FILES TIME NODES TIME NODES SPEEDUP
 printf '%.0s-' {1..70}; echo
 
@@ -62,8 +62,8 @@ for r in "${TARGETS[@]}"; do
   # Quoted: `median_wall` hands the string to `bash -c`, so an unquoted path
   # word-splits. A checkout under "Coding Projects" made every row divide by a
   # blank timing and awk reported "division by zero" with no other clue.
-  a=$(median_wall "$RUNS" "'$ARBOR' index '$path'")
-  out=$("$ARBOR" index "$path" 2>/dev/null | strip_ansi)
+  a=$(median_wall "$RUNS" "'$LEANGRAPH' index '$path'")
+  out=$("$LEANGRAPH" index "$path" 2>/dev/null | strip_ansi)
   files=$(awk '/^  files/{print $2}' <<<"$out")
   a_nodes=$(awk '/^  graph/{print $2}' <<<"$out")
   a_edges=$(awk '/^  graph/{print $5}' <<<"$out")
@@ -77,7 +77,7 @@ for r in "${TARGETS[@]}"; do
   c_edges=$(awk '/edges/{for(i=1;i<=NF;i++) if($(i+1)=="edges") print $i}' <<<"$cg_out" | head -1)
 
   if [[ -z "${a:-}" || "$a" == "0" ]]; then
-    echo "  $r: arbor produced no timing — is the binary runnable at '$ARBOR'?" >&2
+    echo "  $r: leangraph produced no timing — is the binary runnable at '$LEANGRAPH'?" >&2
     continue
   fi
   awk -v r="$r" -v f="$files" -v a="$a" -v an="$a_nodes" -v ae="$a_edges" -v ar="$a_res" \
@@ -90,7 +90,7 @@ done
 
 cat <<'EOF'
 
-arbor      discover + extract + resolve.  NOT YET PERSISTED — Phase 2 adds CSR
+leangraph      discover + extract + resolve.  NOT YET PERSISTED — Phase 2 adds CSR
            write, so this number will grow. Treat it as a floor, not a product
            number.
 codegraph  full index: extract + resolve + persist, minus process startup.

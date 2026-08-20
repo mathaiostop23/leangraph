@@ -1,4 +1,4 @@
-# arbor server — self-hosted issue agent
+# leangraph server — self-hosted issue agent
 
 Webhook → issue → graph context → agent → comment. Self-hosted, bring-your-own API key.
 
@@ -36,8 +36,8 @@ tokens at equal recall is not something you can bolt onto someone else's graph.
               ┌──────────────┐  ┌──────────────────────────┐
               │ IndexWorker  │  │      IssueWorker         │
               │ git fetch    │  │ 1. ensure graph fresh    │
-              │ arbor index  │  │ 2. build_context()       │
-              │ arbor sync   │  │ 3. triage (Haiku)        │
+              │ leangraph index  │  │ 2. build_context()       │
+              │ leangraph sync   │  │ 3. triage (Haiku)        │
               └──────┬───────┘  │ 4. solve (Sonnet/Opus)   │
                      │          │ 5. post comment          │
                      ▼          └───────────┬──────────────┘
@@ -57,11 +57,11 @@ tokens at equal recall is not something you can bolt onto someone else's graph.
 
 | Layer | Choice | Reason |
 |---|---|---|
-| Runtime | **Rust** everywhere | arbor links in as a crate: zero IPC, zero FFI, one static binary. Using Node here would reintroduce exactly the boundary cost we beat CodeGraph on. |
+| Runtime | **Rust** everywhere | leangraph links in as a crate: zero IPC, zero FFI, one static binary. Using Node here would reintroduce exactly the boundary cost we beat CodeGraph on. |
 | HTTP | axum + tokio | raw-body access for HMAC verification |
 | Queue | **Postgres** `FOR UPDATE SKIP LOCKED` | drops Redis entirely. At issue-bot volume it is more than adequate, and self-hosted users get two containers instead of four. |
 | App DB | Postgres 16 + pgvector | tenants, repos, runs, cost ledger, issue dedup embeddings |
-| Graph | arbor CSR (mmap, per repo) | **do not conflate with the app DB** |
+| Graph | leangraph CSR (mmap, per repo) | **do not conflate with the app DB** |
 | Git | `simple-git` shelling to real `git` | mirror + worktree; libgit2 bindings add nothing here |
 | LLM | `reqwest` → Anthropic Messages API, BYO key | no official Rust SDK; raw HTTP is the sanctioned path. Provider adapter trait for others later. |
 | Container | multi-stage, `scratch`/`distroless` | static binary, no runtime to ship |
@@ -71,7 +71,7 @@ tokens at equal recall is not something you can bolt onto someone else's graph.
 ```
 /var/lib/issuegraph/repos/<repo_uuid>/
   mirror.git/          # git clone --mirror — cheap fetches, no working tree
-  worktree/            # git worktree — the checkout arbor indexes
+  worktree/            # git worktree — the checkout leangraph indexes
   .codegraph/          # codegraph.db (WAL), daemon.sock, lock
 ```
 
@@ -96,7 +96,7 @@ Issues arriving while a repo is `indexing` are **queued**, not failed, and post 
 
 ### 2.2 Git-driven sync — replace the file watcher
 
-A laptop-oriented indexer syncs via FSEvents/inotify. On a server there are no local edits, only remote pushes, so arbor's sync is git-driven by design — there is no watcher to disable.
+A laptop-oriented indexer syncs via FSEvents/inotify. On a server there are no local edits, only remote pushes, so leangraph's sync is git-driven by design — there is no watcher to disable.
 
 ```ts
 async function syncRepo(repo: Repo) {
@@ -111,7 +111,7 @@ async function syncRepo(repo: Repo) {
 
 **Debounce**: a push burst (10 commits in 30s) should trigger one sync, not ten. Use BullMQ's `jobId: \`sync:${repo.id}\`` — an existing queued job with the same ID is deduplicated for free.
 
-**Force full reindex** when: branch changed, force-push detected (`git merge-base --is-ancestor` fails), >30% of files changed, or the arbor index format version bumped.
+**Force full reindex** when: branch changed, force-push detected (`git merge-base --is-ancestor` fails), >30% of files changed, or the leangraph index format version bumped.
 
 ### 2.3 Warm handle pool
 
@@ -138,7 +138,7 @@ A 12-minute index of a monorepo must not block a 3-second issue response.
 
 | Queue | Concurrency | Why |
 |---|---|---|
-| `index` | `max(1, floor(cores/2))` | CPU-saturating. arbor already saturates cores with rayon — running 4 indexes at once makes all 4 slower. |
+| `index` | `max(1, floor(cores/2))` | CPU-saturating. leangraph already saturates cores with rayon — running 4 indexes at once makes all 4 slower. |
 | `sync` | 4 | short, bursty |
 | `issue` | 20+ | almost entirely waiting on the LLM API |
 
@@ -146,7 +146,7 @@ A 12-minute index of a monorepo must not block a 3-second issue response.
 
 ### 2.5 Container CPU must be real
 
-arbor sizes its rayon pool from the **cgroup quota**. A container with no `cpus` limit sees the host's core count and may oversubscribe; a container limited to 0.5 CPU will index the Linux kernel but slowly.
+leangraph sizes its rayon pool from the **cgroup quota**. A container with no `cpus` limit sees the host's core count and may oversubscribe; a container limited to 0.5 CPU will index the Linux kernel but slowly.
 
 ```yaml
 # docker-compose.yml
@@ -376,7 +376,7 @@ unspecified, and IPv4-mapped forms of all of them. Every address is checked, not
 the first — a name returning one public and one private answer is precisely how
 this gets bypassed.
 
-`ARBOR_ALLOWED_HOSTS` pins cloning to named hosts. An entry covers the host and
+`LEANGRAPH_ALLOWED_HOSTS` pins cloning to named hosts. An entry covers the host and
 its subdomains (`github.com` allows `codeload.github.com`) and nothing that
 merely looks like it (`evil-github.com` is refused). Setting it is also how you
 deliberately permit an internal host — a GitHub Enterprise install — since an
@@ -386,7 +386,7 @@ overrides the address check rather than stacking with it.
 **What this is not.** The check resolves now; git resolves again when it
 connects, so a name whose answer changes in between would slip past. Closing
 that needs a resolver the connection itself is pinned to, which git does not
-offer. `ARBOR_ALLOWED_HOSTS` is the airtight in-process control, and a network
+offer. `LEANGRAPH_ALLOWED_HOSTS` is the airtight in-process control, and a network
 policy on the container is the real one — the compose file says where to put it.
 
 ### 4.5 Fix mode — **built, opt-in** (`src/server/fix.rs`)
@@ -396,7 +396,7 @@ they are gated differently. Fix mode is off in three independent ways, and all
 three must be open before a single line is written:
 
 1. the repository has `fix_mode` set — `POST /repos/{owner/name}/config`;
-2. the issue carries `arbor-fix`, a **second** label distinct from the `arbor`
+2. the issue carries `leangraph-fix`, a **second** label distinct from the `leangraph`
    one that triggers analysis;
 3. a token with write access exists.
 
@@ -408,7 +408,7 @@ What it does:
 ```
 clean the model's diff (fences, stray prose)
   → vet the paths before applying anything
-  → git worktree add --force -B arbor/issue-N  (isolated; never the indexed checkout)
+  → git worktree add --force -B leangraph/issue-N  (isolated; never the indexed checkout)
   → git apply --check, then apply
   → stage only the vetted paths — never `git add -A`
   → push a fresh branch, no --force

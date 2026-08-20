@@ -6,7 +6,7 @@ honest as this file. Getting it subtly wrong does not produce an error, it
 produces a plausible number — which is the failure mode that matters here,
 because a plausible number is one you publish.
 
-    arbor       Flask.send_file          dotted, from Contains edges
+    leangraph       Flask.send_file          dotted, from Contains edges
     CodeGraph   Flask::send_file         double colon
     CPython     Flask.send_file          co_qualname, but nested functions
                                          become  outer.<locals>.inner
@@ -73,7 +73,7 @@ def in_repo(path, root):
 class Lines:
     """Byte offset to 1-based line number.
 
-    arbor stores spans as byte offsets into the file; CodeGraph and CPython both
+    leangraph stores spans as byte offsets into the file; CodeGraph and CPython both
     speak in line numbers. Cached per file because a large repository is asked
     this tens of thousands of times.
     """
