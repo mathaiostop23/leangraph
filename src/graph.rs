@@ -436,11 +436,6 @@ impl Graph {
 
     /// Repository root the graph was built from. Paths are stored relative to
     /// it; join through here to touch the working tree.
-    #[inline]
-    pub fn root(&self) -> &str {
-        self.root
-    }
-
     /// Absolute path for a file id.
     pub fn abs_path(&self, f: u32) -> PathBuf {
         Path::new(self.root).join(self.path(f))

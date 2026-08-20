@@ -116,7 +116,6 @@ pub fn vet(patch: &str) -> Result<Vec<String>> {
 pub struct Proposal {
     pub branch: String,
     pub files: Vec<String>,
-    pub pr_url: Option<String>,
 }
 
 /// Apply in a throwaway worktree, commit, push a fresh branch, open a PR.
@@ -202,8 +201,7 @@ pub fn propose(
         Ok(Proposal {
             branch: branch.clone(),
             files: files.clone(),
-            pr_url: None,
-        })
+            })
     })();
 
     // Always clean up, success or not: a leftover worktree makes the next

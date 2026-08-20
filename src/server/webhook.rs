@@ -22,10 +22,6 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-/// Deliveries older than this are refused. A captured-and-replayed payload is
-/// otherwise valid forever, since the signature does not expire on its own.
-const MAX_AGE_SECS: i64 = 300;
-
 /// Who is allowed to make the bot act. A drive-by issue on a public repo must
 /// not be able to spend the owner's API budget, let alone steer an agent.
 const TRUSTED: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
@@ -225,11 +221,4 @@ fn on_issue(app: &App, p: &Value) -> ApiResult<Value> {
         Some(&format!("issue:{}:{number}", repo.id)),
     )?;
     Ok(json!({ "status": "queued", "issue": number, "collapsed": !fresh, "fix": fix }))
-}
-
-/// Timestamp freshness, applied by the caller when a provider supplies one.
-/// GitHub does not send a timestamp header, so this guards the providers that
-/// do rather than being dead code for the one that does not.
-pub fn fresh_enough(sent_at: i64) -> bool {
-    (db::now() - sent_at).abs() <= MAX_AGE_SECS
 }

@@ -191,7 +191,6 @@ impl Recv {
 #[derive(Clone, Copy, Debug)]
 pub struct Import {
     pub module: SymId,
-    pub alias: Option<SymId>,
     pub span: Span,
 }
 

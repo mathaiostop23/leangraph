@@ -11,7 +11,7 @@
 //! All access goes through `spawn_blocking`: rusqlite is synchronous, and
 //! pretending otherwise inside an async runtime is how you stall a reactor.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,7 @@ impl Db {
         Ok(db)
     }
 
+    #[cfg(test)]
     pub fn memory() -> Result<Db> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -83,6 +84,17 @@ impl Db {
                 add_column(c, "issues", "fingerprint", "TEXT NOT NULL DEFAULT ''")?;
                 have = 3;
                 c.pragma_update(None, "user_version", have)?;
+            }
+            // The constant is the ladder's top step. Asserting it here is what
+            // makes it a guard rather than a comment: add a migration without
+            // bumping it, or bump it without adding one, and this fires on the
+            // next open instead of on someone's data months later.
+            debug_assert_eq!(
+                have, SCHEMA,
+                "migration ladder stops at {have} but SCHEMA says {SCHEMA}"
+            );
+            if have > SCHEMA {
+                bail!("database is at schema {have}; this build only knows {SCHEMA}");
             }
             Ok(())
         })
@@ -336,7 +348,6 @@ pub struct Job {
     pub kind: String,
     pub repo_id: i64,
     pub payload: String,
-    pub attempts: i64,
 }
 
 impl Db {
@@ -361,7 +372,9 @@ impl Db {
                 .query_row(
                     "UPDATE jobs SET state='running', started_at=?1, attempts = attempts + 1
                      WHERE id = (SELECT id FROM jobs WHERE state='queued' ORDER BY id LIMIT 1)
-                     RETURNING id, kind, repo_id, payload, attempts",
+                     RETURNING id, kind, repo_id, payload",  // attempts is
+                     // incremented for the record; nothing retries a failed
+                     // job, so nothing reads it back.
                     params![now()],
                     |r| {
                         Ok(Job {
@@ -369,7 +382,6 @@ impl Db {
                             kind: r.get(1)?,
                             repo_id: r.get(2)?,
                             payload: r.get(3)?,
-                            attempts: r.get(4)?,
                         })
                     },
                 )

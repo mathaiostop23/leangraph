@@ -26,7 +26,6 @@ pub struct Summary {
     pub files: usize,
     pub nodes: u32,
     pub edges: usize,
-    pub reused: u64,
 }
 
 pub struct Config {
@@ -648,6 +647,5 @@ pub fn run(cfg: &Config) -> Result<Summary> {
         files: units.len(),
         nodes: resolved.as_ref().map_or(0, |r| r.space.total),
         edges: resolved.as_ref().map_or(0, |r| r.edges.len()),
-        reused,
     })
 }

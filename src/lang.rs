@@ -49,7 +49,6 @@ impl Lang {
 }
 
 pub struct Spec {
-    pub lang: Lang,
     /// node-kind id -> our definition kind
     defs: Vec<(u16, DefKind)>,
     /// node-kind id -> our reference kind
@@ -119,7 +118,6 @@ pub fn spec_for(lang: Lang) -> Spec {
     let l = lang.ts_language();
     match lang {
         Lang::Python => Spec {
-            lang,
             defs: tagged(
                 &l,
                 &[
@@ -144,7 +142,6 @@ pub fn spec_for(lang: Lang) -> Spec {
             f_object: fields(&l, &["object"]),
         },
         Lang::TypeScript | Lang::Tsx => Spec {
-            lang,
             defs: tagged(
                 &l,
                 &[
@@ -261,11 +258,6 @@ impl Spec {
     #[inline]
     pub fn is_dotted(&self, k: u16) -> bool {
         self.dotted.contains(&k)
-    }
-
-    #[inline]
-    pub fn dotted_member<'t>(&self, node: &Node<'t>) -> Option<Node<'t>> {
-        first_field(node, &self.f_member)
     }
 
     /// The identifier naming a dotted base class.

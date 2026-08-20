@@ -49,10 +49,6 @@ impl IdTable {
         self.keys.len() as u32
     }
 
-    pub fn key_at(&self, id: NodeId) -> NodeKey {
-        self.keys.get(id.0 as usize).copied().unwrap_or_default()
-    }
-
     /// Assign ids for exactly this set of keys, retiring anything absent.
     ///
     /// Order matters for reproducibility: new keys are taken in the order given,

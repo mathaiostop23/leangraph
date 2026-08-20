@@ -113,7 +113,6 @@ pub struct FileMeta {
 
 pub struct Entry {
     pub path: PathBuf,
-    pub lang: Lang,
     pub meta: FileMeta,
     pub unit: FileUnit,
 }
@@ -150,14 +149,6 @@ fn kind_of_ref(k: u32) -> RefKind {
         2 => RefKind::Extends,
         3 => RefKind::Read,
         _ => RefKind::Call,
-    }
-}
-
-fn lang_of(v: u32) -> Lang {
-    match v {
-        1 => Lang::TypeScript,
-        2 => Lang::Tsx,
-        _ => Lang::Python,
     }
 }
 
@@ -386,7 +377,6 @@ pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>>
                 .iter()
                 .map(|m| Import {
                     module: map(m.module),
-                    alias: None,
                     span: Span {
                         start: m.span_s,
                         end: m.span_e,
@@ -396,7 +386,6 @@ pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>>
         };
         out.push(Entry {
             path: root.join(rel),
-            lang: lang_of(cf.lang),
             meta: FileMeta {
                 hash: cf.hash,
                 size: cf.size,

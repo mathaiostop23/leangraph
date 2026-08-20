@@ -151,7 +151,6 @@ fn walk(
                 if let Some(txt) = node_text(&mn, src) {
                     unit.imports.push(Import {
                         module: interner.get_or_intern(txt),
-                        alias: None,
                         span: Span::of(&node),
                     });
                 }
@@ -300,18 +299,4 @@ pub fn extract_file(
     t.ns_walk = clock.elapsed().as_nanos() as u64;
 
     Some((unit, t, meta))
-}
-
-/// Identity of a file without parsing it: the cheap half of change detection.
-/// `stat` is a syscall; hashing needs the bytes. Compare size and mtime first
-/// and only hash what looks suspect.
-pub fn quick_meta(path: &Path) -> Option<(u64, i64)> {
-    let md = std::fs::metadata(path).ok()?;
-    let mtime = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    Some((md.len(), mtime))
 }
