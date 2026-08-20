@@ -67,6 +67,13 @@ jobs:
       - name: convergence
         run: bash bench/converge.sh .
 
+      # A rate limit must not lose the issue and a killed process must not
+      # strand its job. Both failed silently before this existed, and neither
+      # is visible from a unit test — it takes a real server, a real queue,
+      # and an API that actually refuses.
+      - name: retry and recovery
+        run: python3 bench/retry_test.py .
+
       # Every language must still extract and resolve. A fixture rather than a
       # corpus, but it is the difference between "the spec compiles" and "the
       # spec works".

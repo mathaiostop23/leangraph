@@ -111,7 +111,7 @@ impl Client {
             .json(&body)
             .send()
             .await
-            .context("calling the model")?;
+            .map_err(|e| Transient(format!("calling the model: {e}")))?;
 
         let status = res.status();
         let v: Value = res.json().await.context("decoding the response")?;
@@ -121,6 +121,12 @@ impl Client {
                 .and_then(|e| e.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
+            // 429 is a rate limit and 5xx is the other end having a bad
+            // minute; both clear on their own. A 400 or a 401 will not, and
+            // retrying it is four times the cost for the same answer.
+            if status.as_u16() == 429 || status.is_server_error() {
+                return Err(Transient(format!("model returned {status}: {msg}")).into());
+            }
             bail!("model returned {status}: {msg}");
         }
 
@@ -358,6 +364,22 @@ pub async fn propose_fix(
     });
     c.call(req, model).await
 }
+
+/// A failure that is worth trying again.
+///
+/// Typed rather than a string the worker greps for: the worker holds the
+/// `anyhow::Error` and can ask what it is, and a marker in a message survives
+/// exactly until someone reworders it.
+#[derive(Debug)]
+pub struct Transient(pub String);
+
+impl std::fmt::Display for Transient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for Transient {}
 
 /// Roughly the smallest prefix worth a cache breakpoint.
 ///

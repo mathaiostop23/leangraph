@@ -65,6 +65,14 @@ requests, so it does not default to open — send `Authorization: Bearer …`, o
 open the dashboard at `/?token=…`. `--no-auth` turns the gate off for anyone who
 already has one in front.
 
+A rate limit is not a verdict on the issue, so it is not treated as one. Only
+failures that are actually transient — 429, 5xx, a connection that never landed
+— go back on the queue, backing off 30 s, 2 m, 8 m before giving up; a malformed
+request fails once and stays failed. And because a job is claimed before it runs,
+killing the process mid-run used to strand it in `running` for the life of the
+database: never claimed again, never reported, shown as permanently in progress.
+Startup requeues those now.
+
 The label is the point. Nothing happens on an unlabelled issue, and nothing
 happens on an issue from someone outside the repository. An issue body is
 attacker-controlled text that ends up in front of a model, so it is wrapped and
@@ -187,10 +195,11 @@ repository is Rust, which the indexer supports, so it can be its own corpus.
 ```
 29  unit                 vetting rules, dedup scoring, SSRF, schema migration
  5  convergence          incremental sync equals a full reindex
-12  webhook gates        signature, replay, authorship, labels
-30  agent assertions     prompt safety, cache correctness
+21  webhook gates        signature, replay, authorship, labels
+38  agent assertions     prompt safety, cache correctness
 23  fix mode, end-to-end against a real git remote
 10  deduplication, end-to-end
+ 7  retry and recovery, end-to-end against a rate-limited API
 13  languages, each connecting two methods on a fixture
 ```
 

@@ -195,6 +195,15 @@ pub async fn run(cfg: Config) -> Result<()> {
         vault: Arc::new(vault),
     };
 
+    match app.db.reclaim_orphans() {
+        Ok(n) if n > 0 => tracing_line(
+            "warn",
+            &format!("requeued {n} job(s) left running by a previous process"),
+        ),
+        Err(e) => tracing_line("error", &format!("reclaiming orphaned jobs: {e}")),
+        _ => {}
+    }
+
     for i in 0..app.cfg.workers {
         let w = app.clone();
         tokio::spawn(async move { worker(w, i).await });
@@ -509,13 +518,32 @@ async fn worker(app: App, id: usize) {
 
         let outcome = run_job(&app, &job).await;
         let err = outcome.as_ref().err().map(|e| e.to_string());
+        // Ask the error what it is rather than reading its message.
+        let retry = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.chain().any(|c| c.is::<agent::Transient>()))
+            && job.attempts < Db::MAX_ATTEMPTS;
         if let Some(e) = &err {
             tracing_line(
-                "error",
-                &format!("job {} ({}) failed: {e}", job.id, job.kind),
+                if retry { "warn" } else { "error" },
+                &format!(
+                    "job {} ({}) failed: {e}{}",
+                    job.id,
+                    job.kind,
+                    if retry {
+                        format!(
+                            " — attempt {} of {}, will retry",
+                            job.attempts,
+                            Db::MAX_ATTEMPTS
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
             );
         }
-        if let Err(e) = app.db.finish_job(job.id, err.as_deref()) {
+        if let Err(e) = app.db.finish_job(job.id, err.as_deref(), retry) {
             tracing_line("error", &format!("worker {id}: finish failed: {e}"));
         }
     }

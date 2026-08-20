@@ -7,11 +7,15 @@ assertions below can check what actually reached the model.
 
 Usage: bench/stub_api.py [port]
 """
-import json, sys
+import json, os, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 7999
 SEEN = []
+# Return 429 for the first N calls, so a caller's retry path can be exercised
+# against the shape a real rate limit takes.
+FAIL_FIRST = int(os.environ.get("STUB_FAIL_FIRST", "0"))
+REFUSED = []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -24,6 +28,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/_seen":
             return self._json({"calls": SEEN})
+
+        if len(REFUSED) < FAIL_FIRST:
+            REFUSED.append(1)
+            body = json.dumps({"error": {"message": "rate limited"}}).encode()
+            self.send_response(429)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         SEEN.append(req)
         model = req.get("model", "")

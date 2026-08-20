@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Schema version. Bump alongside a step in `migrate`.
-const SCHEMA: u32 = 3;
+const SCHEMA: u32 = 4;
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -54,8 +54,13 @@ impl Db {
     fn migrate(&self) -> Result<()> {
         self.with(|c| {
             let mut have: u32 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            // Every statement in DDL is `IF NOT EXISTS`, so running it on each
+            // open is free and it is the only thing that creates a *table*
+            // added after schema 1. Running it only on an empty database left
+            // those missing forever on an existing one, and the ALTER below
+            // would then fail against a table that was never created.
+            c.execute_batch(DDL)?;
             if have == 0 {
-                c.execute_batch(DDL)?;
                 have = 1;
                 c.pragma_update(None, "user_version", have)?;
             }
@@ -77,6 +82,11 @@ impl Db {
                 add_column(c, "repos", "config_json", "TEXT NOT NULL DEFAULT '{}'")?;
                 add_column(c, "issues", "fingerprint", "TEXT NOT NULL DEFAULT ''")?;
                 have = 3;
+                c.pragma_update(None, "user_version", have)?;
+            }
+            if have < 4 {
+                add_column(c, "jobs", "run_after", "INTEGER NOT NULL DEFAULT 0")?;
+                have = 4;
                 c.pragma_update(None, "user_version", have)?;
             }
             // The constant is the ladder's top step. Asserting it here is what
@@ -139,6 +149,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   state       TEXT    NOT NULL DEFAULT 'queued',
   dedupe_key  TEXT,
   attempts    INTEGER NOT NULL DEFAULT 0,
+  -- Not before this time. A retry that comes straight back does not wait out
+  -- whatever it was that failed.
+  run_after   INTEGER NOT NULL DEFAULT 0,
   error       TEXT,
   created_at  INTEGER NOT NULL,
   started_at  INTEGER,
@@ -342,6 +355,8 @@ pub struct Job {
     pub kind: String,
     pub repo_id: i64,
     pub payload: String,
+    /// How many times this has been claimed, this one included.
+    pub attempts: i64,
 }
 
 impl Db {
@@ -371,10 +386,10 @@ impl Db {
             let job = c
                 .query_row(
                     "UPDATE jobs SET state='running', started_at=?1, attempts = attempts + 1
-                     WHERE id = (SELECT id FROM jobs WHERE state='queued' ORDER BY id LIMIT 1)
-                     RETURNING id, kind, repo_id, payload", // attempts is
-                    // incremented for the record; nothing retries a failed
-                    // job, so nothing reads it back.
+                     WHERE id = (SELECT id FROM jobs
+                                 WHERE state='queued' AND run_after <= ?1
+                                 ORDER BY id LIMIT 1)
+                     RETURNING id, kind, repo_id, payload, attempts",
                     params![now()],
                     |r| {
                         Ok(Job {
@@ -382,6 +397,7 @@ impl Db {
                             kind: r.get(1)?,
                             repo_id: r.get(2)?,
                             payload: r.get(3)?,
+                            attempts: r.get(4)?,
                         })
                     },
                 )
@@ -390,8 +406,50 @@ impl Db {
         })
     }
 
-    pub fn finish_job(&self, id: i64, error: Option<&str>) -> Result<()> {
+    /// How many times a job is tried before it is given up on.
+    ///
+    /// Four attempts spread over about ten minutes. A rate limit clears well
+    /// inside that; a bad API key never will, which is why only errors the
+    /// caller judged transient come back here at all.
+    pub const MAX_ATTEMPTS: i64 = 4;
+
+    /// Seconds before the next attempt. Exponential, because whatever failed is
+    /// usually busy rather than broken, and hammering it is how a rate limit
+    /// becomes a longer one.
+    fn backoff(attempts: i64) -> i64 {
+        // The right first wait depends on the provider, so it is tunable rather
+        // than a constant someone has to fork the binary to change. The tests
+        // set it to a second; nothing else should need to.
+        let base: i64 = std::env::var("LEANGRAPH_RETRY_BASE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(30);
+        base * 4i64.saturating_pow(attempts.clamp(1, 4) as u32 - 1)
+    }
+
+    /// Mark a job done, failed, or due for another attempt.
+    ///
+    /// `retry` is true only when the caller judged the failure transient.
+    /// Everything else lands as `failed`: a permanent error tried four times is
+    /// four times the cost and the same answer.
+    pub fn finish_job(&self, id: i64, error: Option<&str>, retry: bool) -> Result<()> {
         self.with(|c| {
+            if retry {
+                let attempts: i64 = c.query_row(
+                    "SELECT attempts FROM jobs WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )?;
+                if attempts < Self::MAX_ATTEMPTS {
+                    let due = now() + Self::backoff(attempts);
+                    c.execute(
+                        "UPDATE jobs SET state='queued', run_after=?2, error=?3 WHERE id=?1",
+                        params![id, due, error],
+                    )?;
+                    return Ok(());
+                }
+            }
             c.execute(
                 "UPDATE jobs SET state = ?2, finished_at = ?3, error = ?4 WHERE id = ?1",
                 params![
@@ -402,6 +460,23 @@ impl Db {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    /// Put back anything a stopped process left mid-flight.
+    ///
+    /// One process owns this database, so a job still marked `running` at
+    /// startup was interrupted — a deploy, an OOM, a Ctrl-C. Nothing picked
+    /// those up again: not queued, so never claimed; not failed, so never
+    /// reported. They sat in the dashboard as permanently running while the
+    /// work they stood for was quietly lost.
+    pub fn reclaim_orphans(&self) -> Result<usize> {
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE jobs SET state='queued', run_after=0 WHERE state='running'",
+                [],
+            )?;
+            Ok(n)
         })
     }
 
@@ -736,6 +811,16 @@ mod tests {
         assert!(
             !repos[0].fix_mode(),
             "fix mode must default to off on upgrade"
+        );
+
+        // A table introduced after schema 1 must exist too — `jobs` is only
+        // ever created by DDL, so an upgrade that skipped DDL left the queue
+        // missing and every enqueue failing.
+        db.enqueue("sync", repos[0].id, "{}", None)
+            .expect("the job queue must exist after an upgrade");
+        assert!(
+            db.claim().expect("claiming must work").is_some(),
+            "an upgraded database must be able to run jobs"
         );
 
         // Idempotent: opening again re-runs migrate and must not error on a
