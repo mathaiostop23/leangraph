@@ -29,6 +29,7 @@ LEANGRAPH_ANTHROPIC_KEY=sk-stub \
 LEANGRAPH_GITHUB_TOKEN=ghp-stub \
 LEANGRAPH_WEBHOOK_SECRET=$SECRET \
 LEANGRAPH_MASTER_KEY=$(printf '0%.0s' {1..64}) \
+  LEANGRAPH_ADMIN_TOKEN=test-admin-token \
   target/release/leangraph server --addr "127.0.0.1:$PORT" --data "$DATA" --workers 2 \
   >"$DATA/server.log" 2>&1 & PIDS+=($!)
 
@@ -38,10 +39,11 @@ for _ in $(seq 60); do
 done
 
 curl -sf -X POST "http://127.0.0.1:$PORT/repos" -H 'content-type: application/json' \
+  -H "authorization: Bearer test-admin-token" \
   -d "{\"path\":\"$(cd "$REPO" && pwd)\",\"full_name\":\"pallets/flask\",\"branch\":\"main\"}" >/dev/null
 
 for _ in $(seq 120); do
-  curl -sf "http://127.0.0.1:$PORT/repos" | grep -q '"state":"ready"' && break
+  curl -sf -H "authorization: Bearer test-admin-token" "http://127.0.0.1:$PORT/repos" | grep -q '"state":"ready"' && break
   sleep 0.5
 done
 

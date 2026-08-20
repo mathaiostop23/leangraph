@@ -180,6 +180,12 @@ enum Cmd {
         /// Additional label that requests a patch, where fix mode is enabled
         #[arg(long, default_value = "leangraph-fix")]
         fix_label: String,
+        /// Serve the management API to anyone who can reach the port.
+        ///
+        /// Only sane behind something that authenticates for you. Without it a
+        /// token is generated on first run and printed at startup.
+        #[arg(long)]
+        no_auth: bool,
     },
     /// Probe a running server. Exits non-zero when it is not serving, so it
     /// works as a container healthcheck.
@@ -532,14 +538,16 @@ fn main() -> Result<()> {
             workers,
             trigger_label,
             fix_label,
+            no_auth,
         } => {
+            let data_for_token = data.clone();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             rt.block_on(server::run(server::Config {
                 addr: addr.parse().context("parsing --addr")?,
                 db_path: data.join("leangraph.db"),
-                data_dir: data,
+                data_dir: data.clone(),
                 workers: workers.max(1),
                 // From the environment, never a flag: a secret in argv is
                 // visible in `ps` to every user on the box.
@@ -548,6 +556,11 @@ fn main() -> Result<()> {
                     .filter(|s| !s.is_empty()),
                 trigger_label,
                 fix_label,
+                admin_token: if no_auth {
+                    None
+                } else {
+                    Some(server::admin_token(&data_for_token)?)
+                },
             }))
         }
 

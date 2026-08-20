@@ -26,7 +26,7 @@ use db::Db;
 use serde::Deserialize;
 use serde_json::json;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -48,6 +48,14 @@ pub struct Config {
     /// Worker concurrency. Indexing saturates cores on its own, so more than a
     /// couple of concurrent indexes makes all of them slower.
     pub workers: usize,
+    /// Gate on everything except the webhook and the health probe.
+    ///
+    /// `None` means the operator passed `--no-auth` and accepts that anyone who
+    /// can reach the port can register repositories against their API budget
+    /// and turn on the mode that opens pull requests. Absent that flag one is
+    /// generated on first run, because a default that depends on the operator
+    /// placing the port correctly is not a security model.
+    pub admin_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -96,6 +104,86 @@ impl App {
     }
 }
 
+/// Read the admin token from the environment, or mint and persist one.
+///
+/// Generated rather than defaulted-open: the management surface can register a
+/// repository against the owner's API budget, write a secret, and enable the
+/// mode that pushes pull requests. The one endpoint that must be public — the
+/// webhook — carries its own signature, so it is the only one this does not
+/// cover.
+pub fn admin_token(data_dir: &Path) -> Result<String> {
+    if let Ok(t) = std::env::var("LEANGRAPH_ADMIN_TOKEN") {
+        if !t.trim().is_empty() {
+            return Ok(t);
+        }
+    }
+    let path = data_dir.join("admin.token");
+    if let Ok(t) = std::fs::read_to_string(&path) {
+        if !t.trim().is_empty() {
+            return Ok(t.trim().to_string());
+        }
+    }
+    use aes_gcm::aead::rand_core::RngCore;
+    let mut raw = [0u8; 24];
+    aes_gcm::aead::OsRng.fill_bytes(&mut raw);
+    let token = hex::encode(raw);
+    std::fs::create_dir_all(data_dir).ok();
+    std::fs::write(&path, &token).with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(token)
+}
+
+/// Reject anything that does not carry the token.
+///
+/// Three ways to present it, because two different clients need it: a script
+/// sends a header, and a browser opening the dashboard can only put it in the
+/// URL. The query form is documented as the weaker one — it lands in browser
+/// history and in any proxy log on the way.
+async fn require_token(
+    State(app): State<App>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Some(want) = app.cfg.admin_token.as_deref() else {
+        return next.run(req).await;
+    };
+    let h = req.headers();
+    let bearer = h
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let custom = h.get("x-leangraph-token").and_then(|v| v.to_str().ok());
+    let query = req.uri().query().and_then(|q| {
+        form_urlencoded::parse(q.as_bytes())
+            .find(|(k, _)| k == "token")
+            .map(|(_, v)| v.into_owned())
+    });
+
+    let given = bearer.or(custom).map(str::to_string).or(query);
+    // Constant time: a byte-at-a-time comparison leaks the prefix to anyone
+    // willing to time the responses.
+    let ok = given.as_deref().is_some_and(|g| {
+        g.len() == want.len()
+            && g.bytes()
+                .zip(want.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    });
+    if ok {
+        next.run(req).await
+    } else {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            "this endpoint needs the admin token — see the line printed at startup".into(),
+        )
+        .into_response()
+    }
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.data_dir).ok();
     let db = Db::open(&cfg.db_path)?;
@@ -112,17 +200,29 @@ pub async fn run(cfg: Config) -> Result<()> {
         tokio::spawn(async move { worker(w, i).await });
     }
 
-    let router = Router::new()
+    // Everything that manages the install. The dashboard is in here too: it
+    // lists repository names, error strings and what each answer cost.
+    let managed = Router::new()
         .route("/", get(ui::page))
-        .route("/health", get(health))
         .route("/repos", get(list_repos).post(add_repo))
         .route("/repos/{name}", get(get_repo))
         .route("/repos/{name}/sync", post(sync_repo))
         .route("/repos/{name}/config", post(set_config))
-        .route("/webhook/github", post(webhook::github))
         .route("/secrets", get(list_secrets))
         .route("/secrets/{name}", post(put_secret).delete(delete_secret))
-        .with_state(app.clone());
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            require_token,
+        ));
+
+    // The webhook carries its own signature and has to be reachable by the
+    // provider; the health probe is what the container healthcheck calls and
+    // reports counts rather than contents.
+    let open = Router::new()
+        .route("/health", get(health))
+        .route("/webhook/github", post(webhook::github));
+
+    let router = managed.merge(open).with_state(app.clone());
 
     let listener = tokio::net::TcpListener::bind(app.cfg.addr)
         .await
@@ -141,6 +241,18 @@ pub async fn run(cfg: Config) -> Result<()> {
         app.cfg.trigger_label,
         app.cfg.fix_label
     );
+    match app.cfg.admin_token.as_deref() {
+        Some(t) => println!(
+            "  \x1b[1madmin\x1b[0m     {t}\n            \x1b[2msend it as `Authorization: Bearer …`, or open the \
+dashboard at\n            http://{}/?token={t}\x1b[0m\n",
+            app.cfg.addr
+        ),
+        None => tracing_line(
+            "warn",
+            "--no-auth: anyone who can reach this port can register repositories \
+against your API budget, write secrets, and enable the mode that opens pull requests",
+        ),
+    }
     if key_on_disk {
         tracing_line(
             "warn",

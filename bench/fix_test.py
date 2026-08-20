@@ -40,6 +40,8 @@ def req(path, data=None, method=None, base=BASE):
     body = json.dumps(data).encode() if data is not None else None
     r = urllib.request.Request(base + path, data=body, method=method or ("POST" if body else "GET"))
     r.add_header("content-type", "application/json")
+    # The management API is gated; the webhook is not.
+    r.add_header("authorization", "Bearer test-admin-token")
     try:
         with urllib.request.urlopen(r, timeout=20) as res:
             return res.status, json.loads(res.read() or b"{}")
@@ -135,6 +137,7 @@ def main():
                LEANGRAPH_ANTHROPIC_KEY="sk-stub",
                LEANGRAPH_GITHUB_TOKEN="ghp-stub",
                LEANGRAPH_MASTER_KEY="00" * 32,
+               LEANGRAPH_ADMIN_TOKEN="test-admin-token",
                LEANGRAPH_WEBHOOK_SECRET=SECRET.decode())
 
     for script, port in ((["bench/stub_api.py", str(STUB_A)], STUB_A),

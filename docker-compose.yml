@@ -19,6 +19,11 @@ services:
       LEANGRAPH_GITHUB_TOKEN: ${LEANGRAPH_GITHUB_TOKEN:-}
       # Encrypts secrets at rest in the database.
       LEANGRAPH_MASTER_KEY: ${LEANGRAPH_MASTER_KEY:-}
+      # Gates every endpoint except the webhook and the health probe. Left
+      # unset, one is generated on first run and printed to the log — the
+      # management API can register repositories against your API budget and
+      # enable the mode that opens pull requests, so it is not left open.
+      LEANGRAPH_ADMIN_TOKEN: ${LEANGRAPH_ADMIN_TOKEN:-}
       # Optional egress allowlist for repository URLs. Unset, leangraph still
       # refuses any URL resolving to a private, loopback or link-local address
       # — including 169.254.169.254, the metadata endpoint that hands out this

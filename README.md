@@ -56,7 +56,14 @@ curl -X POST localhost:7777/repos -H 'content-type: application/json' \
 
 One binary, one volume, **no database container** — SQLite is compiled in. Point
 a GitHub webhook at `/webhook/github`, label an issue `leangraph`, and the answer
-arrives as a comment with what it cost. Dashboard at `/`.
+arrives as a comment with what it cost.
+
+Everything except the webhook and the health probe needs an admin token, printed
+at startup and generated on first run. That surface can register a repository
+against your API budget, write a secret, and enable the mode that opens pull
+requests, so it does not default to open — send `Authorization: Bearer …`, or
+open the dashboard at `/?token=…`. `--no-auth` turns the gate off for anyone who
+already has one in front.
 
 The label is the point. Nothing happens on an unlabelled issue, and nothing
 happens on an issue from someone outside the repository. An issue body is

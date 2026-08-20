@@ -360,6 +360,30 @@ Anyone can open an issue on a public repo. That text goes into the agent's promp
 
 Envelope encryption. Per-tenant DEK, wrapped by a KEK from `IG_MASTER_KEY` env (or a KMS in Phase 5). AES-256-GCM. Decrypt only in the worker, only into memory, never logged. Redact keys from all log lines and error traces.
 
+### 4.4a Access control
+
+Seven of the nine endpoints manage the install: they register repositories,
+write secrets, and turn on the mode that pushes pull requests. All of them were
+unauthenticated, and the security model was a sentence in this document telling
+the operator to put a proxy in front — which is a plan, not a control.
+
+They now require a token. It comes from `LEANGRAPH_ADMIN_TOKEN`, or is generated
+on first run into `admin.token` beside the master key and printed at startup.
+Three ways to present it, because two different clients need it: `Authorization:
+Bearer`, `X-Leangraph-Token`, or `?token=` for a browser opening the dashboard.
+The query form is the weak one — it lands in history and in any proxy log on the
+way — and it exists because a browser cannot send a header.
+
+Comparison is constant-time. A byte-at-a-time check hands the prefix to anyone
+willing to time the responses.
+
+Two endpoints stay open, deliberately. The **webhook** must be reachable by the
+provider and carries its own HMAC over the raw body. The **health probe** is what
+the container healthcheck calls, and it reports counts rather than contents.
+
+`--no-auth` restores the old behaviour for an operator who genuinely has
+authentication in front, and says what it costs in the startup log.
+
 ### 4.4b Egress — where a repository URL can point
 
 A repository URL is the only user-supplied value in this product that causes an

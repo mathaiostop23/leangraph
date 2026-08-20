@@ -148,5 +148,34 @@ check("form-encoded delivery is accepted",
 check("form-encoded with a bad signature is still refused",
       post_form(issue(91), secret=b"wrong")[1], "bad signature")
 
+# --- access control -----------------------------------------------------------
+# The management surface can register a repository against the owner's API
+# budget, write a secret, and enable the mode that opens pull requests. The
+# webhook is the one endpoint that must be public, and it carries its own
+# signature, so it is the only one the token does not cover.
+def managed(path, token=None, method="GET", body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(f"{BASE}{path}", data=data, method=method)
+    r.add_header("content-type", "application/json")
+    if token:
+        r.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(r) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+TOKEN = "test-admin-token"
+check("management API refuses an unauthenticated read", managed("/repos"), "401")
+check("management API refuses a wrong token", managed("/repos", "nope"), "401")
+check("management API accepts the token", managed("/repos", TOKEN), "200")
+check("secrets cannot be written without it",
+      managed("/secrets/anthropic_key", method="POST", body={"value": "x"}), "401")
+check("fix mode cannot be enabled without it",
+      managed("/repos/pallets%2Fflask/config", method="POST", body={"fix_mode": True}), "401")
+check("the dashboard is not public either", managed("/"), "401")
+check("health stays open for the container probe", managed("/health"), "200")
+
 print(f"\n  \033[1m{passed}/{passed + failed} gates hold\033[0m\n")
 sys.exit(1 if failed else 0)
