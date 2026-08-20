@@ -782,11 +782,19 @@ fn walk_scopes(
 /// TypeScript, TSX and JavaScript share a module system and routinely reference
 /// each other. Python and that family do not, in either direction.
 fn same_family(a: Lang, b: Lang) -> bool {
+    // TypeScript, TSX and JavaScript share a module system and reference each
+    // other constantly. C and C++ share headers the same way. Everything else
+    // only matches itself.
+    //
+    // This listed the two families explicitly and returned false for every
+    // other pair, which silently disabled tier-3 name matching for all eleven
+    // languages added later — they extracted definitions and calls and resolved
+    // nothing beyond the current file.
+    use Lang::*;
     matches!(
         (a, b),
-        (Lang::Python, Lang::Python)
-            | (Lang::TypeScript | Lang::Tsx, Lang::TypeScript | Lang::Tsx)
-    )
+        (TypeScript | Tsx, TypeScript | Tsx) | (C | Cpp, C | Cpp)
+    ) || a == b
 }
 
 /// The class a reference sits inside, if any.
