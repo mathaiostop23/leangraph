@@ -186,6 +186,13 @@ impl Recv {
     }
 }
 
+/// A local name bound to something imported under a different name.
+///
+/// `from M import a as b` binds `b`; `import numpy as np` binds `np`. Without
+/// this the local name resolves to nothing, because the resolver only knows the
+/// names the target module exports — and `b` is not one of them.
+pub type Alias = (SymId, SymId); // (local, original)
+
 /// A raw import statement. The module string is interned verbatim; turning it
 /// into a `FileId` is the resolver's job and is language-specific.
 #[derive(Clone, Copy, Debug)]
@@ -203,6 +210,8 @@ pub struct FileUnit {
     pub refs: Vec<Ref>,
     pub imports: Vec<Import>,
     pub had_parse_error: bool,
+    /// Local bindings introduced by `as`.
+    pub aliases: Vec<Alias>,
 }
 
 /// Global node id.

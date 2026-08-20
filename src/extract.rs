@@ -146,6 +146,21 @@ fn walk(
                     });
                 }
             }
+        } else if spec.is_aliased(kind) {
+            // `from m import a as b` binds `b` to whatever `a` names. Recorded
+            // as a pair rather than resolved here, because the target lives in
+            // another file and the extractor does not know about other files.
+            if let Some((l, o)) = spec.alias_pair(&node) {
+                if let (Some(lt), Some(ot)) = (node_text(&l, src), node_text(&o, src)) {
+                    if lt != ot {
+                        consumed.insert(l.id());
+                        unit.aliases.push((
+                            interner.get_or_intern(lt),
+                            interner.get_or_intern(ot),
+                        ));
+                    }
+                }
+            }
         } else if spec.is_import(kind) {
             if let Some(mn) = spec.import_module_node(&node) {
                 if let Some(txt) = node_text(&mn, src) {

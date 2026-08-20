@@ -85,6 +85,12 @@ pub struct Spec {
     dotted: Vec<u16>,
     /// field ids holding the receiver of a dotted access
     f_object: Vec<u16>,
+    /// nodes that bind a local name to something imported under another name
+    aliased: Vec<u16>,
+    /// nodes that bind a whole module to one local name (`import * as ns`)
+    namespaced: Vec<u16>,
+    /// field id holding that local name
+    f_alias: Vec<u16>,
 }
 
 fn kinds(l: &Language, names: &[&str]) -> Vec<u16> {
@@ -116,7 +122,7 @@ fn fields(l: &Language, names: &[&str]) -> Vec<u16> {
 
 pub fn spec_for(lang: Lang) -> Spec {
     let l = lang.ts_language();
-    match lang {
+    let spec = match lang {
         Lang::Python => Spec {
             defs: tagged(
                 &l,
@@ -140,6 +146,11 @@ pub fn spec_for(lang: Lang) -> Spec {
             heritage: kinds(&l, &["argument_list"]),
             dotted: kinds(&l, &["attribute"]),
             f_object: fields(&l, &["object"]),
+            // Covers both `import numpy as np` and `from m import a as b`;
+            // Python spells them with the same node.
+            aliased: kinds(&l, &["aliased_import"]),
+            namespaced: Vec::new(),
+            f_alias: fields(&l, &["alias"]),
         },
         Lang::TypeScript | Lang::Tsx => Spec {
             defs: tagged(
@@ -184,8 +195,20 @@ pub fn spec_for(lang: Lang) -> Spec {
             heritage: kinds(&l, &["class_heritage", "extends_clause", "implements_clause"]),
             dotted: kinds(&l, &["member_expression", "nested_type_identifier"]),
             f_object: fields(&l, &["object", "module"]),
+            aliased: kinds(&l, &["import_specifier", "namespace_import"]),
+            namespaced: kinds(&l, &["namespace_import"]),
+            f_alias: fields(&l, &["alias"]),
         },
-    }
+    };
+    // `kinds` drops names the grammar does not know, so a typo here produces an
+    // empty list and a feature that silently does nothing. Fail at startup
+    // instead, where it is one line to find.
+    debug_assert!(
+        !spec.aliased.is_empty() && !spec.f_alias.is_empty(),
+        "{:?}: alias node kinds did not resolve against the grammar",
+        lang
+    );
+    spec
 }
 
 impl Spec {
@@ -337,6 +360,48 @@ impl Spec {
             Some(t) if t == "super" || t.starts_with("super(") => Recv::Super,
             _ => Recv::Other,
         }
+    }
+
+    #[inline]
+    pub fn is_aliased(&self, k: u16) -> bool {
+        self.aliased.contains(&k)
+    }
+
+    /// `(local, original)` for an aliasing import node.
+    ///
+    /// `import numpy as np` gives `(np, numpy)`; `from m import a as b` gives
+    /// `(b, a)`. The resolver treats both the same, because either way a local
+    /// name has to be pointed at whatever the original names.
+    ///
+    /// `import * as ns from "m"` names no symbol, so the module path stands in
+    /// as the original — which is what a receiver check needs anyway.
+    pub fn alias_pair<'t>(&self, node: &Node<'t>) -> Option<(Node<'t>, Node<'t>)> {
+        // A rename: `as` is present and names both ends.
+        if let (Some(l), Some(o)) = (
+            first_field(node, &self.f_alias),
+            first_field(node, &self.f_name),
+        ) {
+            return Some((l, o));
+        }
+        // A whole-module binding: `import * as ns from "m"` names no symbol, so
+        // the module path stands in as the original.
+        if !self.namespaced.contains(&node.kind_id()) {
+            // Anything else reaching here is a plain `import { a }` specifier.
+            // It introduces no second name, and treating it as one would both
+            // invent a binding and swallow a real reference: 2,926 edges in
+            // excalidraw when this branch was not guarded.
+            return None;
+        }
+        let l = node.named_child(0)?;
+        let mut cur = node.parent();
+        for _ in 0..4 {
+            let n = cur?;
+            if let Some(m) = first_field(&n, &self.f_module) {
+                return Some((l, m));
+            }
+            cur = n.parent();
+        }
+        None
     }
 
     /// The receiver expression of a call, if it has one.

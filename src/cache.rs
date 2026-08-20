@@ -24,8 +24,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAGIC: [u8; 8] = *b"LGRPHC\x00\x04";
-const N_SECTIONS: usize = 10;
+const MAGIC: [u8; 8] = *b"LGRPHC\x00\x05";
+const N_SECTIONS: usize = 11;
 
 const S_FILES: usize = 0;
 const S_DEFS: usize = 1;
@@ -36,6 +36,7 @@ const S_SYM_BLOB: usize = 5;
 const S_PATH_OFF: usize = 6;
 const S_PATH_BLOB: usize = 7;
 const S_HEAD: usize = 8;
+const S_ALIASES: usize = 9;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -62,6 +63,8 @@ struct CFile {
     imp_n: u32,
     lang: u32,
     had_error: u32,
+    alias_at: u32,
+    alias_n: u32,
 }
 
 #[repr(C)]
@@ -92,6 +95,15 @@ struct CRef {
     /// The receiver's interned name; `u32::MAX` for none.
     recv_name: u32,
     _pad: u32,
+}
+
+/// A local name and what it was imported as. Two interned ids, nothing else —
+/// the resolver reconstructs the binding from the module tables it already has.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct CAlias {
+    local: u32,
+    original: u32,
 }
 
 #[repr(C)]
@@ -190,6 +202,7 @@ pub fn write(
     let mut defs = Vec::new();
     let mut refs = Vec::new();
     let mut imports = Vec::new();
+    let mut aliases: Vec<CAlias> = Vec::new();
 
     for (i, u) in units.iter().enumerate() {
         files.push(CFile {
@@ -202,6 +215,8 @@ pub fn write(
             ref_n: u.refs.len() as u32,
             imp_at: imports.len() as u32,
             imp_n: u.imports.len() as u32,
+            alias_at: aliases.len() as u32,
+            alias_n: u.aliases.len() as u32,
             lang: lang_id(langs[i]),
             had_error: u32::from(u.had_parse_error),
         });
@@ -227,6 +242,12 @@ pub fn write(
                 recv: r.recv as u32,
                 recv_name: r.recv_name.map_or(u32::MAX, |n| n.into_usize() as u32),
                 _pad: 0,
+            });
+        }
+        for &(local, original) in &u.aliases {
+            aliases.push(CAlias {
+                local: local.into_usize() as u32,
+                original: original.into_usize() as u32,
             });
         }
         for m in &u.imports {
@@ -277,6 +298,7 @@ pub fn write(
     section!(S_DEFS, &defs[..]);
     section!(S_REFS, &refs[..]);
     section!(S_IMPORTS, &imports[..]);
+    section!(S_ALIASES, &aliases[..]);
     section!(S_SYM_OFF, &sym_off[..]);
     section!(S_SYM_BLOB, &sym_blob[..]);
     section!(S_PATH_OFF, &path_off[..]);
@@ -316,6 +338,7 @@ pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>>
     let defs: &[CDef] = bytemuck::cast_slice(sec(S_DEFS));
     let refs: &[CRef] = bytemuck::cast_slice(sec(S_REFS));
     let imports: &[CImport] = bytemuck::cast_slice(sec(S_IMPORTS));
+    let aliases: &[CAlias] = bytemuck::cast_slice(sec(S_ALIASES));
     let sym_off: &[u32] = bytemuck::cast_slice(sec(S_SYM_OFF));
     let sym_blob = sec(S_SYM_BLOB);
     let path_off: &[u32] = bytemuck::cast_slice(sec(S_PATH_OFF));
@@ -341,6 +364,10 @@ pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>>
         let (a, b) = (path_off[i] as usize, path_off[i + 1] as usize);
         let rel = std::str::from_utf8(&path_blob[a..b]).unwrap_or("");
         let unit = FileUnit {
+            aliases: aliases[cf.alias_at as usize..(cf.alias_at + cf.alias_n) as usize]
+                .iter()
+                .map(|a| (map(a.local), map(a.original)))
+                .collect(),
             file: i as u32,
             had_parse_error: cf.had_error != 0,
             defs: defs[cf.def_at as usize..(cf.def_at + cf.def_n) as usize]

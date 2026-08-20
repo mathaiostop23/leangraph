@@ -438,9 +438,33 @@ pub fn resolve(
                 }
             }
 
+            // `from m import a as b` puts `a` in scope above, under its own
+            // name. The local binding is `b`, which is not a name the module
+            // exports, so without this the reference resolves to nothing and
+            // falls through to a global name match. 305 of these in django.
+            //
+            // Sorted, because the map above is a hash map and an alias pointing
+            // at a name that two modules both export would otherwise bind in
+            // whichever order iteration happened to take.
+            let mut aliases: Vec<(SymId, SymId)> = unit.aliases.clone();
+            aliases.sort_unstable_by_key(|(l, o)| (l.into_usize(), o.into_usize()));
+            for (local, original) in aliases {
+                if let Some(&dst) = imported.get(&original) {
+                    imported.entry(local).or_insert(dst);
+                }
+            }
+
             // Module paths this file imports, so a dotted call through one can
             // be told apart from a dotted call through an object.
-            let import_names: FxHashSet<SymId> = unit.imports.iter().map(|i| i.module).collect();
+            let mut import_names: FxHashSet<SymId> =
+                unit.imports.iter().map(|i| i.module).collect();
+            // `import numpy as np` makes `np` a module receiver too. Without
+            // this every `np.array()` looks like a call through an object.
+            for &(local, original) in &unit.aliases {
+                if import_names.contains(&original) {
+                    import_names.insert(local);
+                }
+            }
 
             // What each class in this file declares as a base. The heritage
             // list is inside the class node, so its Extends refs carry that

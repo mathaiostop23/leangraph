@@ -9,7 +9,7 @@ report, which forty lines should I read?*
 
 Without it, an agent greps. Grep returns every file containing the word, the
 agent reads them all, and you pay for the ones that were irrelevant. On django
-that is the difference between **9,563 tokens and 158,685** for a better answer.
+that is the difference between **9,444 tokens and 158,685** for a better answer.
 
 ```bash
 cargo build --release
@@ -103,8 +103,8 @@ index actually does: tokenise, `git grep`, read the top *k*.
 
 | approach | recall | tokens / query |
 |---|---:|---:|
-| **leangraph, 100 nodes** | **40.9%** | **9,563** |
-| leangraph, 25 nodes | 23.5% | 2,364 |
+| **leangraph, 100 nodes** | **40.0%** | **9,444** |
+| leangraph, 25 nodes | 23.5% | 2,365 |
 | keyword, top 5 | 35.7% | 158,685 |
 | keyword, top 10 | 45.2% | 259,328 |
 
