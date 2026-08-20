@@ -90,7 +90,9 @@ impl Vault {
             // GCM authenticates: this fails if the ciphertext was altered *or*
             // if the master key changed. Both mean the same thing to a caller —
             // the secret is unreadable and must be set again.
-            .map_err(|_| anyhow::anyhow!("secret could not be decrypted; was the master key changed?"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("secret could not be decrypted; was the master key changed?")
+            })?;
         String::from_utf8(pt).context("decrypted secret is not valid UTF-8")
     }
 }

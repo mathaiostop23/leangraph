@@ -85,11 +85,11 @@ const SEED_MIN: f32 = 0.50;
 const GRAMMAR: &[&str] = &[
     "the", "and", "for", "not", "but", "with", "from", "this", "that", "these", "those", "when",
     "then", "than", "have", "has", "had", "was", "were", "are", "been", "being", "you", "your",
-    "all", "any", "can", "could", "may", "might", "will", "would", "should", "does", "did",
-    "done", "its", "it's", "our", "their", "there", "here", "what", "which", "who", "why", "how",
-    "some", "each", "more", "most", "other", "such", "only", "also", "into", "over", "off",
-    "out", "about", "after", "before", "again", "very", "still", "just", "even", "because",
-    "while", "where", "both", "same", "every",
+    "all", "any", "can", "could", "may", "might", "will", "would", "should", "does", "did", "done",
+    "its", "it's", "our", "their", "there", "here", "what", "which", "who", "why", "how", "some",
+    "each", "more", "most", "other", "such", "only", "also", "into", "over", "off", "out", "about",
+    "after", "before", "again", "very", "still", "just", "even", "because", "while", "where",
+    "both", "same", "every",
 ];
 
 /// How far back to compare. Bounded because this runs on every issue, and
@@ -331,7 +331,10 @@ routed to different database aliases on a multi-database setup, QuerySet",
         // Seeds follow the text, so they agree — which is exactly why the
         // shortcut can require weak seed agreement without losing this case.
         let x = fp(A, &[1, 2, 3, 4]);
-        let y = fp(&format!("{A}\n\nAny update on this? Still seeing it on 5.1."), &[1, 2, 3, 4]);
+        let y = fp(
+            &format!("{A}\n\nAny update on this? Still seeing it on 5.1."),
+            &[1, 2, 3, 4],
+        );
         let s = compare(&x, &y).expect("enough text");
         assert!(s.copy >= 0.6, "copy {:.2}", s.copy);
         assert!(s.is_duplicate());
@@ -378,7 +381,11 @@ fails with EMFILE.",
             &[1, 2, 3, 5],
         );
         let s = compare(&x, &y).expect("enough text");
-        assert!(s.copy < 0.3, "shingles should not carry this: {:.2}", s.copy);
+        assert!(
+            s.copy < 0.3,
+            "shingles should not carry this: {:.2}",
+            s.copy
+        );
         assert!(s.text >= 0.5, "vocabulary must: {:.2}", s.text);
         assert!(s.is_duplicate());
     }
@@ -418,7 +425,11 @@ SELECT before every INSERT instead of using an upsert",
     fn a_short_issue_is_not_judged_at_all() {
         // "Crashes on startup" is not evidence of anything. `None` is a
         // different answer from "not a duplicate", and the caller treats it so.
-        assert!(compare(&fp("crashes on startup", &[1]), &fp("crashes on startup", &[1])).is_none());
+        assert!(compare(
+            &fp("crashes on startup", &[1]),
+            &fp("crashes on startup", &[1])
+        )
+        .is_none());
     }
 
     #[test]
@@ -439,14 +450,24 @@ validates the session before the server retries the upload",
         // Vocabulary is order-blind by construction; the shingles are what
         // carry order, and this is the assertion that keeps them honest.
         assert_eq!(s.text, 1.0, "same words, so vocabulary must agree");
-        assert!(s.copy < 0.5, "reordered text scored {:.2} on shingles", s.copy);
+        assert!(
+            s.copy < 0.5,
+            "reordered text scored {:.2} on shingles",
+            s.copy
+        );
     }
 
     #[test]
     fn best_match_picks_the_strongest_and_ignores_the_rest() {
         let new = fp(A, &[1, 2, 3, 4]);
         let prior = vec![
-            (10, fp("something else entirely about template rendering and jinja", &[7, 8])),
+            (
+                10,
+                fp(
+                    "something else entirely about template rendering and jinja",
+                    &[7, 8],
+                ),
+            ),
             (11, fp(A, &[1, 2, 3, 4])),
             (12, fp(A, &[1, 2, 3])),
         ];

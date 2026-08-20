@@ -18,9 +18,9 @@ use anyhow::{bail, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use memmap2::Mmap;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::Write;
-use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -124,7 +124,11 @@ pub struct Graph {
 /// Sort edges into CSR form. `par_sort_unstable_by_key` on a few hundred
 /// thousand edges is a handful of milliseconds; the resulting arrays are the
 /// on-disk format verbatim, so there is no separate serialization step.
-fn build_dir(edges: &mut [Edge], n_nodes: u32, by_src: bool) -> (Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>, Vec<u8>) {
+fn build_dir(
+    edges: &mut [Edge],
+    n_nodes: u32,
+    by_src: bool,
+) -> (Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>, Vec<u8>) {
     // Total order, not just by the CSR key: an unstable sort leaves ties in
     // arbitrary order, which would make the file differ run to run.
     if by_src {
@@ -401,7 +405,10 @@ impl Graph {
             path_blob: sec_u8(S_PATH_BLOB),
             root: std::str::from_utf8(sec_u8(S_ROOT)).unwrap_or(""),
             node_key: {
-                let (o, l) = (header.off[S_NODE_KEY] as usize, header.len[S_NODE_KEY] as usize);
+                let (o, l) = (
+                    header.off[S_NODE_KEY] as usize,
+                    header.len[S_NODE_KEY] as usize,
+                );
                 if l == 0 {
                     &[]
                 } else {
@@ -614,8 +621,10 @@ impl Graph {
             e.0 += 1;
             e.1 += self.rev.range(n).len() as u32;
         }
-        let mut ranked: Vec<(u32, u32, u32)> =
-            per_file.into_iter().map(|(f, (d, r))| (d + r / 4, f, d)).collect();
+        let mut ranked: Vec<(u32, u32, u32)> = per_file
+            .into_iter()
+            .map(|(f, (d, r))| (d + r / 4, f, d))
+            .collect();
         ranked.sort_unstable_by_key(|&(score, f, _)| (std::cmp::Reverse(score), f));
 
         let mut out = String::with_capacity(8192);

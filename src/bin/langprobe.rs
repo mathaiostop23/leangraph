@@ -14,7 +14,10 @@ use tree_sitter::Language;
 fn langs() -> Vec<(&'static str, Language)> {
     vec![
         ("python", tree_sitter_python::LANGUAGE.into()),
-        ("typescript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        (
+            "typescript",
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        ),
         ("rust", tree_sitter_rust::LANGUAGE.into()),
         ("go", tree_sitter_go::LANGUAGE.into()),
         ("java", tree_sitter_java::LANGUAGE.into()),
@@ -74,12 +77,31 @@ fn check(path: &str) {
                 }
             }
         };
-        for f in ["defs", "refs", "imports", "cond_defs", "fn_values", "var_defs",
-                  "idents", "heritage", "dotted", "aliased", "namespaced"] {
+        for f in [
+            "defs",
+            "refs",
+            "imports",
+            "cond_defs",
+            "fn_values",
+            "var_defs",
+            "idents",
+            "heritage",
+            "dotted",
+            "aliased",
+            "namespaced",
+        ] {
             want_kind(&spec[f], f);
         }
-        for f in ["f_name", "f_callee", "f_member", "f_module", "f_value",
-                  "f_var_name", "f_object", "f_alias"] {
+        for f in [
+            "f_name",
+            "f_callee",
+            "f_member",
+            "f_module",
+            "f_value",
+            "f_var_name",
+            "f_object",
+            "f_alias",
+        ] {
             for k in spec[f].as_array().into_iter().flatten() {
                 let k = k.as_str().unwrap_or_default().to_string();
                 if !k.is_empty() && !fields.contains(&k) {
@@ -92,7 +114,11 @@ fn check(path: &str) {
             println!("  \x1b[32m✓\x1b[0m {name:<10} every name resolves");
         } else {
             bad += missing.len();
-            println!("  \x1b[31m✗\x1b[0m {name:<10} {} unknown: {}", missing.len(), missing.join(" "));
+            println!(
+                "  \x1b[31m✗\x1b[0m {name:<10} {} unknown: {}",
+                missing.len(),
+                missing.join(" ")
+            );
         }
     }
     println!("\n  {bad} names would have been silently dropped");
@@ -107,7 +133,10 @@ fn check(path: &str) {
 /// thing I want" — the question a Spec is entirely made of.
 fn tree(lang_name: &str, path: &str) {
     let all = langs();
-    let (_, lang) = all.iter().find(|(n, _)| *n == lang_name).expect("unknown language");
+    let (_, lang) = all
+        .iter()
+        .find(|(n, _)| *n == lang_name)
+        .expect("unknown language");
     let src = std::fs::read_to_string(path).expect("read source");
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(lang).expect("set language");
@@ -120,7 +149,12 @@ fn tree(lang_name: &str, path: &str) {
             let field = c.field_name().map(|f| format!("{f}: ")).unwrap_or_default();
             let text = &src[n.start_byte()..n.end_byte().min(n.start_byte() + 42)];
             let text = text.replace('\n', " ");
-            println!("{:indent$}{field}{} — {text}", "", n.kind(), indent = depth * 2);
+            println!(
+                "{:indent$}{field}{} — {text}",
+                "",
+                n.kind(),
+                indent = depth * 2
+            );
         }
         if c.goto_first_child() {
             depth += 1;

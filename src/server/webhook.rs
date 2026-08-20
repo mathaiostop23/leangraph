@@ -74,7 +74,10 @@ pub async fn github(
         .unwrap_or_default()
         .to_string();
     if delivery.is_empty() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "missing delivery id".into()));
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "missing delivery id".into(),
+        ));
     }
     // A retry carries the same delivery id. Claiming it is what stops a second
     // comment on the same issue.
@@ -82,7 +85,9 @@ pub async fn github(
         return Ok((StatusCode::OK, Json(json!({ "status": "duplicate" }))));
     }
 
-    let event = header(&headers, "x-github-event").unwrap_or_default().to_string();
+    let event = header(&headers, "x-github-event")
+        .unwrap_or_default()
+        .to_string();
     let payload: Value = serde_json::from_slice(&body)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "malformed payload".into()))?;
 
@@ -119,9 +124,12 @@ fn on_push(app: &App, p: &Value) -> ApiResult<Value> {
     // git will reject the range and the sync falls back to a walk on its own.
     let before = p.get("before").and_then(Value::as_str).unwrap_or_default();
     let payload = json!({ "since": before }).to_string();
-    let fresh = app
-        .db
-        .enqueue("sync", repo.id, &payload, Some(&format!("sync:{}", repo.id)))?;
+    let fresh = app.db.enqueue(
+        "sync",
+        repo.id,
+        &payload,
+        Some(&format!("sync:{}", repo.id)),
+    )?;
     Ok(json!({ "status": "queued", "collapsed": !fresh }))
 }
 
@@ -180,7 +188,10 @@ fn on_issue(app: &App, p: &Value) -> ApiResult<Value> {
         // comment.
         tracing_line(
             "info",
-            &format!("{}#{number}: repo is {}, queueing anyway", repo.full_name, repo.state),
+            &format!(
+                "{}#{number}: repo is {}, queueing anyway",
+                repo.full_name, repo.state
+            ),
         );
     }
 

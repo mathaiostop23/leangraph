@@ -13,8 +13,8 @@ use crate::core::{
     Recv, RefKind, SymId, NO_SCOPE,
 };
 use crate::idtable::IdTable;
-use lasso::Key;
 use crate::lang::Lang;
+use lasso::Key;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
@@ -75,27 +75,153 @@ impl ResolveStats {
 /// Counting these as failures understates resolution; emitting edges for them
 /// would be worse — they would point nowhere.
 const PY_BUILTINS: &[&str] = &[
-    "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple", "print", "isinstance",
-    "issubclass", "super", "type", "range", "enumerate", "zip", "map", "filter", "sorted", "sum",
-    "min", "max", "abs", "any", "all", "open", "getattr", "setattr", "hasattr", "delattr", "repr",
-    "id", "hash", "iter", "next", "format", "bytes", "bytearray", "object", "property",
-    "staticmethod", "classmethod", "callable", "vars", "dir", "round", "divmod", "pow", "chr",
-    "ord", "hex", "oct", "bin", "frozenset", "complex", "slice", "reversed", "input", "eval",
-    "exec", "compile", "globals", "locals", "Exception", "BaseException", "ValueError",
-    "TypeError", "KeyError", "IndexError", "AttributeError", "RuntimeError", "NotImplementedError",
-    "StopIteration", "ImportError", "OSError", "IOError", "ZeroDivisionError", "AssertionError",
-    "KeyboardInterrupt", "SystemExit", "UnicodeDecodeError", "UnicodeEncodeError",
+    "len",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "print",
+    "isinstance",
+    "issubclass",
+    "super",
+    "type",
+    "range",
+    "enumerate",
+    "zip",
+    "map",
+    "filter",
+    "sorted",
+    "sum",
+    "min",
+    "max",
+    "abs",
+    "any",
+    "all",
+    "open",
+    "getattr",
+    "setattr",
+    "hasattr",
+    "delattr",
+    "repr",
+    "id",
+    "hash",
+    "iter",
+    "next",
+    "format",
+    "bytes",
+    "bytearray",
+    "object",
+    "property",
+    "staticmethod",
+    "classmethod",
+    "callable",
+    "vars",
+    "dir",
+    "round",
+    "divmod",
+    "pow",
+    "chr",
+    "ord",
+    "hex",
+    "oct",
+    "bin",
+    "frozenset",
+    "complex",
+    "slice",
+    "reversed",
+    "input",
+    "eval",
+    "exec",
+    "compile",
+    "globals",
+    "locals",
+    "Exception",
+    "BaseException",
+    "ValueError",
+    "TypeError",
+    "KeyError",
+    "IndexError",
+    "AttributeError",
+    "RuntimeError",
+    "NotImplementedError",
+    "StopIteration",
+    "ImportError",
+    "OSError",
+    "IOError",
+    "ZeroDivisionError",
+    "AssertionError",
+    "KeyboardInterrupt",
+    "SystemExit",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
 ];
 
 const JS_BUILTINS: &[&str] = &[
-    "console", "Object", "Array", "String", "Number", "Boolean", "Promise", "Math", "JSON", "Date",
-    "Map", "Set", "WeakMap", "WeakSet", "Error", "TypeError", "RangeError", "SyntaxError",
-    "RegExp", "Symbol", "Proxy", "Reflect", "BigInt", "parseInt", "parseFloat", "isNaN",
-    "isFinite", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI", "require",
-    "setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask", "structuredClone",
-    "fetch", "URL", "URLSearchParams", "Buffer", "process", "globalThis", "Function", "ArrayBuffer",
-    "Uint8Array", "Int32Array", "Float64Array", "DataView", "Intl", "AbortController", "TextEncoder",
-    "TextDecoder", "Headers", "Request", "Response", "FormData", "Blob", "File", "Event",
+    "console",
+    "Object",
+    "Array",
+    "String",
+    "Number",
+    "Boolean",
+    "Promise",
+    "Math",
+    "JSON",
+    "Date",
+    "Map",
+    "Set",
+    "WeakMap",
+    "WeakSet",
+    "Error",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+    "RegExp",
+    "Symbol",
+    "Proxy",
+    "Reflect",
+    "BigInt",
+    "parseInt",
+    "parseFloat",
+    "isNaN",
+    "isFinite",
+    "encodeURIComponent",
+    "decodeURIComponent",
+    "encodeURI",
+    "decodeURI",
+    "require",
+    "setTimeout",
+    "setInterval",
+    "clearTimeout",
+    "clearInterval",
+    "queueMicrotask",
+    "structuredClone",
+    "fetch",
+    "URL",
+    "URLSearchParams",
+    "Buffer",
+    "process",
+    "globalThis",
+    "Function",
+    "ArrayBuffer",
+    "Uint8Array",
+    "Int32Array",
+    "Float64Array",
+    "DataView",
+    "Intl",
+    "AbortController",
+    "TextEncoder",
+    "TextDecoder",
+    "Headers",
+    "Request",
+    "Response",
+    "FormData",
+    "Blob",
+    "File",
+    "Event",
 ];
 
 /// Mapping from (file, definition) to global node id.
@@ -189,12 +315,7 @@ fn node_keys(units: &[FileUnit], rel_paths: &[String], interner: &Interner) -> V
 /// Writes into a reused buffer instead of returning a `String`. The guard
 /// bounds a cycle that a malformed parent chain could otherwise turn into a
 /// hang.
-fn qualified_into<'a>(
-    unit: &FileUnit,
-    def: &Def,
-    interner: &'a Interner,
-    out: &mut Vec<&'a str>,
-) {
+fn qualified_into<'a>(unit: &FileUnit, def: &Def, interner: &'a Interner, out: &mut Vec<&'a str>) {
     out.clear();
     out.push(interner.resolve(&def.name));
     let mut p = def.parent;
@@ -238,7 +359,9 @@ fn module_keys(root: &Path, path: &Path, lang: Lang) -> Vec<String> {
     if parts.is_empty() {
         return Vec::new();
     }
-    (0..parts.len()).map(|i| parts[i..].join(lang.module_sep())).collect()
+    (0..parts.len())
+        .map(|i| parts[i..].join(lang.module_sep()))
+        .collect()
 }
 
 /// Resolve one import statement to a file.
@@ -367,7 +490,10 @@ pub fn resolve(
         let fid = f as FileId;
         let mut top: FxHashMap<SymId, DefIdx> = FxHashMap::default();
         for (d, def) in unit.defs.iter().enumerate() {
-            by_name.entry(def.name).or_default().push((fid, d as DefIdx));
+            by_name
+                .entry(def.name)
+                .or_default()
+                .push((fid, d as DefIdx));
             if def.parent == NO_SCOPE {
                 top.insert(def.name, d as DefIdx);
             }
@@ -508,9 +634,7 @@ pub fn resolve(
                 // `flask.redirect()` loses nothing by being dotted. Only a call
                 // through an *object* is opaque, because nothing here says what
                 // the object is.
-                let via_module = r
-                    .recv_name
-                    .is_some_and(|n| import_names.contains(&n));
+                let via_module = r.recv_name.is_some_and(|n| import_names.contains(&n));
 
                 if r.recv.lexical() || via_module {
                     // tier 1 — lexical scope chain. Never for a module
@@ -643,16 +767,15 @@ pub fn resolve(
                 // wins and never contains the base at all.
                 let mut cands = cands;
                 if r.recv == Recv::Super {
-                    if let Some(names) = enclosing_class(&unit.defs, r.scope)
-                        .and_then(|c| bases.get(&c))
+                    if let Some(names) =
+                        enclosing_class(&unit.defs, r.scope).and_then(|c| bases.get(&c))
                     {
                         let narrowed: Vec<&(FileId, DefIdx)> = cands
                             .iter()
                             .filter(|&&&(cf, cd)| {
                                 let owner = units[cf as usize].defs[cd as usize].parent;
                                 owner != NO_SCOPE
-                                    && names
-                                        .contains(&units[cf as usize].defs[owner as usize].name)
+                                    && names.contains(&units[cf as usize].defs[owner as usize].name)
                             })
                             .copied()
                             .collect();
@@ -690,7 +813,6 @@ pub fn resolve(
                         continue;
                     }
                 }
-
 
                 if top.len() > MAX_AMBIGUITY {
                     st.too_ambiguous += 1;

@@ -90,23 +90,30 @@ pub fn vet(patch: &str) -> Result<Vec<String>> {
         bail!("the model produced no patch");
     }
     if patch.len() > MAX_PATCH_BYTES {
-        bail!("patch is {} bytes; refusing anything over {MAX_PATCH_BYTES}", patch.len());
+        bail!(
+            "patch is {} bytes; refusing anything over {MAX_PATCH_BYTES}",
+            patch.len()
+        );
     }
     let files = touched_files(patch);
     if files.is_empty() {
         bail!("patch names no files");
     }
     if files.len() > MAX_FILES {
-        bail!("patch touches {} files; refusing anything over {MAX_FILES}", files.len());
+        bail!(
+            "patch touches {} files; refusing anything over {MAX_FILES}",
+            files.len()
+        );
     }
     for f in &files {
         if f.starts_with('/') || f.contains("..") {
             bail!("patch reaches outside the repository: {f}");
         }
         let lower = f.to_ascii_lowercase();
-        if let Some(hit) = FORBIDDEN.iter().find(|p| lower.starts_with(&p.to_lowercase())
-            || lower.contains(&format!("/{}", p.to_lowercase())))
-        {
+        if let Some(hit) = FORBIDDEN.iter().find(|p| {
+            lower.starts_with(&p.to_lowercase())
+                || lower.contains(&format!("/{}", p.to_lowercase()))
+        }) {
             bail!("patch touches {f}, which fix mode never edits (matched `{hit}`)");
         }
     }
@@ -143,7 +150,11 @@ pub fn propose(
         .parent()
         .unwrap_or(repo_dir)
         .join(format!(".leangraph-fix-{issue_number}"));
-    let _ = git(repo_dir, None, &["worktree", "remove", "--force", &work.to_string_lossy()]);
+    let _ = git(
+        repo_dir,
+        None,
+        &["worktree", "remove", "--force", &work.to_string_lossy()],
+    );
     let _ = std::fs::remove_dir_all(&work);
 
     git(
@@ -166,9 +177,22 @@ pub fn propose(
         std::fs::write(&patch_path, patch)?;
 
         // Check before apply, so a bad patch leaves the worktree untouched.
-        git(&work, None, &["apply", "--check", "--whitespace=nowarn", ".leangraph-patch"])
-            .context("the patch does not apply cleanly to the current tree")?;
-        git(&work, None, &["apply", "--whitespace=nowarn", ".leangraph-patch"])?;
+        git(
+            &work,
+            None,
+            &[
+                "apply",
+                "--check",
+                "--whitespace=nowarn",
+                ".leangraph-patch",
+            ],
+        )
+        .context("the patch does not apply cleanly to the current tree")?;
+        git(
+            &work,
+            None,
+            &["apply", "--whitespace=nowarn", ".leangraph-patch"],
+        )?;
         std::fs::remove_file(&patch_path).ok();
 
         // Stage only what was vetted. `git add -A` would sweep up anything the
@@ -201,12 +225,16 @@ pub fn propose(
         Ok(Proposal {
             branch: branch.clone(),
             files: files.clone(),
-            })
+        })
     })();
 
     // Always clean up, success or not: a leftover worktree makes the next
     // attempt fail for an unrelated reason.
-    let _ = git(repo_dir, None, &["worktree", "remove", "--force", &work.to_string_lossy()]);
+    let _ = git(
+        repo_dir,
+        None,
+        &["worktree", "remove", "--force", &work.to_string_lossy()],
+    );
     let _ = std::fs::remove_dir_all(&work);
     let _ = full_name;
     result
@@ -258,7 +286,9 @@ pub async fn open_pr(
     if !status.is_success() {
         bail!(
             "github refused the pull request ({status}): {}",
-            v.get("message").and_then(|m| m.as_str()).unwrap_or("unknown")
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown")
         );
     }
     v.get("html_url")
@@ -266,7 +296,6 @@ pub async fn open_pr(
         .map(str::to_string)
         .context("github returned no pull request url")
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -322,7 +351,13 @@ mod tests {
 
     #[test]
     fn rejects_build_and_container_definitions() {
-        for p in ["Dockerfile", "docker-compose.yml", "Makefile", ".env", "deploy/Dockerfile"] {
+        for p in [
+            "Dockerfile",
+            "docker-compose.yml",
+            "Makefile",
+            ".env",
+            "deploy/Dockerfile",
+        ] {
             assert!(vet(&patch_for(&[p])).is_err(), "{p} should be rejected");
         }
     }
@@ -370,8 +405,14 @@ def add(a, b):\n-    return a - b\n+    return a + b\n \n```";
         let body: Vec<&str> = cleaned.lines().skip(3).collect();
         assert_eq!(body.len(), 4, "hunk body lost a line: {body:?}");
         assert_eq!(body[3], " ");
-        let old = body.iter().filter(|l| l.starts_with(' ') || l.starts_with('-')).count();
-        let new = body.iter().filter(|l| l.starts_with(' ') || l.starts_with('+')).count();
+        let old = body
+            .iter()
+            .filter(|l| l.starts_with(' ') || l.starts_with('-'))
+            .count();
+        let new = body
+            .iter()
+            .filter(|l| l.starts_with(' ') || l.starts_with('+'))
+            .count();
         assert_eq!((old, new), (3, 3), "counts do not match the @@ header");
     }
 

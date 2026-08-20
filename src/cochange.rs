@@ -157,7 +157,6 @@ pub fn edges(
     (out_edges, out_pairs, stats)
 }
 
-
 // ------------------------------------------------------------------- cache
 //
 // `git log -n 3000 --name-only` costs ~150 ms on django — by far the largest

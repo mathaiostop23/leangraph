@@ -1,9 +1,9 @@
 //! Indexing pipeline: discover -> extract -> resolve -> persist.
 
-use crate::core::{FileUnit, Interner};
-use crate::extract::{extract_file, Timings};
 use crate::cache;
 use crate::cochange;
+use crate::core::{FileUnit, Interner};
+use crate::extract::{extract_file, Timings};
 use crate::graph;
 use crate::idtable::IdTable;
 use crate::lang::{spec_for, Lang, Spec, ALL_LANGS};
@@ -12,9 +12,9 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::sync::{Arc, Mutex};
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tree_sitter::Parser as TsParser;
 
@@ -116,8 +116,7 @@ fn out_dir(cfg: &Config, root: &std::path::Path) -> PathBuf {
 }
 
 pub fn run(cfg: &Config) -> Result<Summary> {
-
-        let threads = cfg
+    let threads = cfg
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
     rayon::ThreadPoolBuilder::new()
@@ -140,7 +139,6 @@ pub fn run(cfg: &Config) -> Result<Summary> {
         .incremental
         .then(|| cache::read_head(&cache_path_early))
         .flatten();
-
 
     // Parallel walk, and size+mtime captured in the same `stat` the walker
     // already performs. Doing it twice — once for the size limit, once for the
@@ -171,9 +169,11 @@ pub fn run(cfg: &Config) -> Result<Summary> {
                     // listing that disagrees with the walk produces a different
                     // graph depending on which path ran — which the convergence
                     // test caught immediately.
-                    if p.strip_prefix(&root).unwrap_or(&p).components().any(|c| {
-                        c.as_os_str().to_str().is_some_and(|s| s.starts_with('.'))
-                    }) {
+                    if p.strip_prefix(&root)
+                        .unwrap_or(&p)
+                        .components()
+                        .any(|c| c.as_os_str().to_str().is_some_and(|s| s.starts_with('.')))
+                    {
                         return None;
                     }
                     let lang = p
@@ -345,7 +345,9 @@ pub fn run(cfg: &Config) -> Result<Summary> {
     let reused_flag: Vec<bool> = found
         .iter()
         .map(|(path, _, size, mtime)| {
-            let Some(e) = prior.get(path) else { return false };
+            let Some(e) = prior.get(path) else {
+                return false;
+            };
             match &git_touched {
                 Some(touched) => !touched.contains(path),
                 None => e.meta.size == *size && e.meta.mtime == *mtime,
@@ -383,7 +385,9 @@ pub fn run(cfg: &Config) -> Result<Summary> {
             reused += 1;
             (e.unit, e.meta.size, e.meta)
         } else {
-            let Some((unit, t, meta)) = slot else { continue };
+            let Some((unit, t, meta)) = slot else {
+                continue;
+            };
             agg.ns_read += t.ns_read;
             agg.ns_hash += t.ns_hash;
             agg.ns_parse += t.ns_parse;
@@ -511,13 +515,22 @@ pub fn run(cfg: &Config) -> Result<Summary> {
             &ids.raw_keys(),
             &metas.iter().map(|m| (m.size, m.mtime)).collect::<Vec<_>>(),
         )
-            .context("writing graph")?;
+        .context("writing graph")?;
         let ms_graph = tg.elapsed().as_secs_f64() * 1e3;
         graph_bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
         let tc = Instant::now();
         let head = cochange::head(&root).unwrap_or_default();
-        cache::write(&cache_path, &units, &paths, &langs, &metas, &interner, &root, &head)
-            .context("writing extraction cache")?;
+        cache::write(
+            &cache_path,
+            &units,
+            &paths,
+            &langs,
+            &metas,
+            &interner,
+            &root,
+            &head,
+        )
+        .context("writing extraction cache")?;
         if std::env::var_os("LEANGRAPH_PROFILE").is_some() {
             eprintln!(
                 "      persist: graph {ms_graph:.0}ms · unit cache {:.0}ms",
@@ -637,26 +650,44 @@ pub fn run(cfg: &Config) -> Result<Summary> {
             } else {
                 println!(
                     "  co-change        {} edges from {} of {} commits",
-                    cochange_stats.edges, cochange_stats.commits_used, cochange_stats.commits_scanned
+                    cochange_stats.edges,
+                    cochange_stats.commits_used,
+                    cochange_stats.commits_scanned
                 );
             }
         }
 
         println!("\n  \x1b[1mwall clock\x1b[0m");
-        println!("    discover       {:>8.0} ms", d_discover.as_secs_f64() * 1e3);
-        println!("    extract        {:>8.0} ms", d_extract.as_secs_f64() * 1e3);
+        println!(
+            "    discover       {:>8.0} ms",
+            d_discover.as_secs_f64() * 1e3
+        );
+        println!(
+            "    extract        {:>8.0} ms",
+            d_extract.as_secs_f64() * 1e3
+        );
         if resolved.is_some() {
-            println!("    resolve        {:>8.0} ms", d_resolve.as_secs_f64() * 1e3);
+            println!(
+                "    resolve        {:>8.0} ms",
+                d_resolve.as_secs_f64() * 1e3
+            );
         }
         if cochange_stats.edges > 0 || d_cochange.as_millis() > 0 {
-            println!("    co-change      {:>8.0} ms", d_cochange.as_secs_f64() * 1e3);
+            println!(
+                "    co-change      {:>8.0} ms",
+                d_cochange.as_secs_f64() * 1e3
+            );
         }
         if graph_bytes > 0 {
             println!(
                 "    persist        {:>8.0} ms   ({:.1} MB{})",
                 d_persist.as_secs_f64() * 1e3,
                 graph_bytes as f64 / 1_048_576.0,
-                if nothing_changed { ", unchanged — not rewritten" } else { "" }
+                if nothing_changed {
+                    ", unchanged — not rewritten"
+                } else {
+                    ""
+                }
             );
         }
         println!(
@@ -709,7 +740,6 @@ pub fn run(cfg: &Config) -> Result<Summary> {
             }
         }
         println!();
-
     }
 
     Ok(Summary {

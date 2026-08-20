@@ -356,7 +356,9 @@ async fn set_config(
             }
         ),
     );
-    Ok(Json(json!({ "repo": repo.full_name, "fix_mode": req.fix_mode })))
+    Ok(Json(
+        json!({ "repo": repo.full_name, "fix_mode": req.fix_mode }),
+    ))
 }
 
 async fn sync_repo(
@@ -396,7 +398,10 @@ async fn worker(app: App, id: usize) {
         let outcome = run_job(&app, &job).await;
         let err = outcome.as_ref().err().map(|e| e.to_string());
         if let Some(e) = &err {
-            tracing_line("error", &format!("job {} ({}) failed: {e}", job.id, job.kind));
+            tracing_line(
+                "error",
+                &format!("job {} ({}) failed: {e}", job.id, job.kind),
+            );
         }
         if let Err(e) = app.db.finish_job(job.id, err.as_deref()) {
             tracing_line("error", &format!("worker {id}: finish failed: {e}"));
@@ -454,7 +459,8 @@ async fn clone_repo(app: &App, repo_id: i64) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            app.db.set_repo_state(repo_id, "error", Some(&e.to_string()))?;
+            app.db
+                .set_repo_state(repo_id, "error", Some(&e.to_string()))?;
             Err(e)
         }
     }
@@ -503,8 +509,10 @@ async fn index_repo(app: &App, repo_id: i64, full: bool) -> Result<()> {
             db.record_index(repo_id, sha.as_deref(), files, nodes, edges, ms)?;
             tracing_line(
                 "info",
-                &format!("{name}: {} in {ms}ms — {nodes} nodes, {edges} edges",
-                    if full { "indexed" } else { "synced" }),
+                &format!(
+                    "{name}: {} in {ms}ms — {nodes} nodes, {edges} edges",
+                    if full { "indexed" } else { "synced" }
+                ),
             );
             Ok(())
         }
@@ -583,8 +591,16 @@ If that is wrong, say so on the issue and I will look properly.\n",
     }
 
     let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
-        app.db.finish_run(run_id, "skipped", Some("no api key"), "", 0, 0.0,
-            started.elapsed().as_millis() as i64, None)?;
+        app.db.finish_run(
+            run_id,
+            "skipped",
+            Some("no api key"),
+            "",
+            0,
+            0.0,
+            started.elapsed().as_millis() as i64,
+            None,
+        )?;
         tracing_line("warn", "no LEANGRAPH_ANTHROPIC_KEY — issue skipped");
         return Ok(());
     };
@@ -607,10 +623,15 @@ If that is wrong, say so on the issue and I will look properly.\n",
         // Seeds come from both the triage extraction and the raw text: the model
         // is better at spotting names in prose, the graph is better at knowing
         // which of them exist.
-        let seed_text = format!("{} {} {}", issue.title, triage.symbols.join(" "), issue.body);
+        let seed_text = format!(
+            "{} {} {}",
+            issue.title,
+            triage.symbols.join(" "),
+            issue.body
+        );
         let repo_path = PathBuf::from(&repo.path);
-        let built = tokio::task::spawn_blocking(move || build_context(&repo_path, &seed_text))
-            .await??;
+        let built =
+            tokio::task::spawn_blocking(move || build_context(&repo_path, &seed_text)).await??;
         nodes = built.nodes;
         files_json = built.files_json.clone();
 
@@ -651,7 +672,10 @@ it has not been run or tested.\n",
 willing to propose from the context available._\n",
             ),
             Err(e) => {
-                tracing_line("warn", &format!("{}#{}: fix failed: {e}", repo.full_name, issue.number));
+                tracing_line(
+                    "warn",
+                    &format!("{}#{}: fix failed: {e}", repo.full_name, issue.number),
+                );
                 comment.push_str(&format!(
                     "\n\n---\n\n_A patch was requested but could not be applied: {e}_\n"
                 ));

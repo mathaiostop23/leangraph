@@ -157,14 +157,26 @@ identical source differed. Five invariants hold now.
 
 ### Tests
 
+Everything below runs in CI on every push, without the benchmark corpora — this
+repository is Rust, which the indexer supports, so it can be its own corpus.
+
 ```
-27  unit                 vetting rules, dedup scoring, SSRF, schema migration
+29  unit                 vetting rules, dedup scoring, SSRF, schema migration
  5  convergence          incremental sync equals a full reindex
 12  webhook gates        signature, replay, authorship, labels
 30  agent assertions     prompt safety, cache correctness
 23  fix mode, end-to-end against a real git remote
 10  deduplication, end-to-end
+13  languages, each connecting two methods on a fixture
 ```
+
+Two of the unit tests exist because of how this can break silently: every node
+kind and field name a spec asks for must exist in its grammar, and every
+language must define and call something. `kinds()` drops a name the grammar
+does not know, so a spec that a grammar upgrade has outdated still compiles,
+still runs, and quietly stops finding whatever that node was for. The first run
+of that test found a stale entry in the TypeScript spec that had never
+resolved.
 
 ---
 

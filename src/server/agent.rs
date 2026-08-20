@@ -27,10 +27,22 @@ struct Price {
 
 fn price(model: &str) -> Price {
     match model {
-        "claude-haiku-4-5" => Price { input: 1.0, output: 5.0 },
-        "claude-sonnet-5" => Price { input: 3.0, output: 15.0 },
-        "claude-opus-5" => Price { input: 5.0, output: 25.0 },
-        _ => Price { input: 5.0, output: 25.0 }, // unknown: assume the dearest
+        "claude-haiku-4-5" => Price {
+            input: 1.0,
+            output: 5.0,
+        },
+        "claude-sonnet-5" => Price {
+            input: 3.0,
+            output: 15.0,
+        },
+        "claude-opus-5" => Price {
+            input: 5.0,
+            output: 25.0,
+        },
+        _ => Price {
+            input: 5.0,
+            output: 25.0,
+        }, // unknown: assume the dearest
     }
 }
 
@@ -242,8 +254,8 @@ pub async fn triage(c: &Client, title: &str, body: &str) -> Result<(Triage, Repl
         }}},
         "messages": [{ "role": "user", "content": format!(
             "Classify this issue and list any function, method or class names it \
-mentions that would be worth looking up in the codebase. Symbols only — not \
-English words that happen to appear.\n\n{}", wrap_issue(title, body)) }]
+    mentions that would be worth looking up in the codebase. Symbols only — not \
+    English words that happen to appear.\n\n{}", wrap_issue(title, body)) }]
     });
     let reply = c.call(req, model).await?;
     let v: Value = serde_json::from_str(reply.text.trim()).unwrap_or_else(|_| json!({}));
@@ -300,8 +312,8 @@ pub async fn analyse(
         ],
         "messages": [{ "role": "user", "content": format!(
             "## Code selected for this issue\n\n{context}\n\n{}\n\nUsing only the code \
-above, explain the likely cause and where a fix would go. Be specific about files \
-and symbols. If what you were given is insufficient, say what else you would need.",
+    above, explain the likely cause and where a fix would go. Be specific about files \
+    and symbols. If what you were given is insufficient, say what else you would need.",
             wrap_issue(title, body)) }]
     });
     c.call(req, model).await
@@ -341,7 +353,7 @@ pub async fn propose_fix(
         ],
         "messages": [{ "role": "user", "content": format!(
             "## Code selected for this issue\n\n{context}\n\n{}\n\nProduce a minimal \
-unified diff that fixes this. Output the diff and nothing else — no prose, no fences.",
+    unified diff that fixes this. Output the diff and nothing else — no prose, no fences.",
             wrap_issue(title, body)) }]
     });
     c.call(req, model).await
@@ -388,7 +400,7 @@ pub fn clean_patch(raw: &str) -> String {
         .or_else(|| t.strip_prefix("```patch"))
         .or_else(|| t.strip_prefix("```"))
         .unwrap_or(t);
-    let t = t.trim_end_matches(|c: char| c == '\n' || c == '\r');
+    let t = t.trim_end_matches(['\n', '\r']);
     let t = t.trim_end_matches("```");
     // Drop anything before the first file header, which is where stray
     // commentary lands.
@@ -398,7 +410,10 @@ pub fn clean_patch(raw: &str) -> String {
     // Drop wholly empty trailing lines — those are fence padding, not diff
     // content — but keep a line that is a single space.
     let mut lines: Vec<&str> = t[i..].split('\n').collect();
-    while lines.last().is_some_and(|l| l.trim_end_matches('\r').is_empty()) {
+    while lines
+        .last()
+        .is_some_and(|l| l.trim_end_matches('\r').is_empty())
+    {
         lines.pop();
     }
     let mut out = lines.join("\n");

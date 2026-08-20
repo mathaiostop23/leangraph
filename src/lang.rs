@@ -10,6 +10,7 @@
 //! changes when that lands.
 
 use crate::core::{DefKind, Recv, RefKind};
+use std::sync::Mutex;
 use tree_sitter::{Language, Node};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -56,12 +57,11 @@ pub const ALL_LANGS: [Lang; 14] = [
 /// and the user should be told plainly rather than left with a two-node graph
 /// and a success message.
 pub const UNPARSED_SOURCE: &[&str] = &[
-    "ex", "exs", "erl", "hrl", "hs", "lhs", "ml", "mli", "lua", "pl", "pm", "r",
-    "jl", "dart", "groovy", "gradle", "clj", "cljs", "cljc", "edn", "f90", "f95",
-    "f03", "for", "vb", "m", "mm", "zig", "nim", "cr", "sh", "bash", "zsh", "fish",
-    "ps1", "sql", "v", "sv", "elm", "purs", "rkt", "scm", "lisp", "el", "pas",
-    "ada", "adb", "cob", "asm", "s", "d", "tcl", "awk", "vue", "svelte", "astro",
-    "coffee", "hx", "pony", "sol", "move", "wat", "wasm",
+    "ex", "exs", "erl", "hrl", "hs", "lhs", "ml", "mli", "lua", "pl", "pm", "r", "jl", "dart",
+    "groovy", "gradle", "clj", "cljs", "cljc", "edn", "f90", "f95", "f03", "for", "vb", "m", "mm",
+    "zig", "nim", "cr", "sh", "bash", "zsh", "fish", "ps1", "sql", "v", "sv", "elm", "purs", "rkt",
+    "scm", "lisp", "el", "pas", "ada", "adb", "cob", "asm", "s", "d", "tcl", "awk", "vue",
+    "svelte", "astro", "coffee", "hx", "pony", "sol", "move", "wat", "wasm",
 ];
 
 impl Lang {
@@ -218,11 +218,38 @@ pub struct Spec {
     f_alias: Vec<u16>,
 }
 
+/// Names a spec asked for that its grammar does not have.
+///
+/// A dropped name is not an error anywhere — it is an empty list and a feature
+/// that quietly stops working, which is exactly how a grammar upgrade would
+/// break a language without failing a build. Recording the misses lets a check
+/// assert there are none, against the compiled specs rather than against a copy
+/// of them in a file.
+static MISSES: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
+/// Which language `spec_for` is currently assembling, so a miss can name it.
+static BUILDING: Mutex<&'static str> = Mutex::new("?");
+
+fn miss(what: &str, name: &str) {
+    let lang = BUILDING.lock().map(|g| *g).unwrap_or("?");
+    if let Ok(mut m) = MISSES.lock() {
+        m.push((lang, format!("{what}:{name}")));
+    }
+}
+
+/// Every name the last `spec_for` calls could not resolve.
+#[cfg(test)]
+pub fn unresolved_names() -> Vec<(&'static str, String)> {
+    MISSES.lock().map(|m| m.clone()).unwrap_or_default()
+}
+
 fn kinds(l: &Language, names: &[&str]) -> Vec<u16> {
     names
         .iter()
         .filter_map(|n| match l.id_for_node_kind(n, true) {
-            0 => None,
+            0 => {
+                miss("kind", n);
+                None
+            }
             id => Some(id),
         })
         .collect()
@@ -232,7 +259,10 @@ fn tagged<T: Copy>(l: &Language, pairs: &[(&str, T)]) -> Vec<(u16, T)> {
     pairs
         .iter()
         .filter_map(|(n, t)| match l.id_for_node_kind(n, true) {
-            0 => None,
+            0 => {
+                miss("kind", n);
+                None
+            }
             id => Some((id, *t)),
         })
         .collect()
@@ -241,12 +271,21 @@ fn tagged<T: Copy>(l: &Language, pairs: &[(&str, T)]) -> Vec<(u16, T)> {
 fn fields(l: &Language, names: &[&str]) -> Vec<u16> {
     names
         .iter()
-        .filter_map(|n| l.field_id_for_name(n).map(|f| f.get()))
+        .filter_map(|n| match l.field_id_for_name(n) {
+            Some(f) => Some(f.get()),
+            None => {
+                miss("field", n);
+                None
+            }
+        })
         .collect()
 }
 
 pub fn spec_for(lang: Lang) -> Spec {
     let l = lang.ts_language();
+    if let Ok(mut b) = BUILDING.lock() {
+        *b = lang.name();
+    }
     let spec = match lang {
         Lang::Python => Spec {
             defs: tagged(
@@ -308,16 +347,30 @@ pub fn spec_for(lang: Lang) -> Spec {
             f_callee: fields(&l, &["function", "constructor"]),
             f_member: fields(&l, &["property"]),
             f_module: fields(&l, &["source"]),
-            cond_defs: kinds(&l, &["variable_declarator", "public_field_definition", "pair"]),
+            cond_defs: kinds(
+                &l,
+                &["variable_declarator", "public_field_definition", "pair"],
+            ),
             f_value: fields(&l, &["value"]),
             fn_values: kinds(
                 &l,
-                &["arrow_function", "function_expression", "function", "class"],
+                // No `"function"`: it is the anonymous keyword token, not a
+                // named node, so it never resolved. `function_expression` and
+                // `arrow_function` are the real shapes.
+                &[
+                    "arrow_function",
+                    "function_expression",
+                    "generator_function",
+                    "class",
+                ],
             ),
             var_defs: kinds(&l, &["variable_declarator", "public_field_definition"]),
             f_var_name: fields(&l, &["name"]),
             idents: kinds(&l, &["identifier", "type_identifier"]),
-            heritage: kinds(&l, &["class_heritage", "extends_clause", "implements_clause"]),
+            heritage: kinds(
+                &l,
+                &["class_heritage", "extends_clause", "implements_clause"],
+            ),
             dotted: kinds(&l, &["member_expression", "nested_type_identifier"]),
             f_object: fields(&l, &["object", "module"]),
             aliased: kinds(&l, &["import_specifier", "namespace_import"]),
@@ -358,7 +411,14 @@ pub fn spec_for(lang: Lang) -> Spec {
             f_var_name: fields(&l, &["name"]),
             idents: kinds(&l, &["identifier", "type_identifier", "field_identifier"]),
             heritage: kinds(&l, &["trait_bounds"]),
-            dotted: kinds(&l, &["scoped_identifier", "scoped_type_identifier", "field_expression"]),
+            dotted: kinds(
+                &l,
+                &[
+                    "scoped_identifier",
+                    "scoped_type_identifier",
+                    "field_expression",
+                ],
+            ),
             f_object: fields(&l, &["value", "path"]),
             aliased: kinds(&l, &["use_as_clause"]),
             namespaced: Vec::new(),
@@ -376,12 +436,7 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("type_alias", DefKind::Interface),
                 ],
             ),
-            refs: tagged(
-                &l,
-                &[
-                    ("call_expression", RefKind::Call),
-                ],
-            ),
+            refs: tagged(&l, &[("call_expression", RefKind::Call)]),
             imports: kinds(&l, &["import_spec"]),
             f_name: fields(&l, &["name"]),
             f_callee: fields(&l, &["function"]),
@@ -431,8 +486,18 @@ pub fn spec_for(lang: Lang) -> Spec {
             var_defs: kinds(&l, &["variable_declarator", "enum_constant"]),
             f_var_name: fields(&l, &["name"]),
             idents: kinds(&l, &["identifier", "type_identifier"]),
-            heritage: kinds(&l, &["superclass", "super_interfaces", "extends_interfaces"]),
-            dotted: kinds(&l, &["field_access", "scoped_identifier", "scoped_type_identifier"]),
+            heritage: kinds(
+                &l,
+                &["superclass", "super_interfaces", "extends_interfaces"],
+            ),
+            dotted: kinds(
+                &l,
+                &[
+                    "field_access",
+                    "scoped_identifier",
+                    "scoped_type_identifier",
+                ],
+            ),
             f_object: fields(&l, &["object", "scope"]),
             aliased: Vec::new(),
             namespaced: Vec::new(),
@@ -449,12 +514,7 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("enum_specifier", DefKind::Class),
                 ],
             ),
-            refs: tagged(
-                &l,
-                &[
-                    ("call_expression", RefKind::Call),
-                ],
-            ),
+            refs: tagged(&l, &[("call_expression", RefKind::Call)]),
             imports: kinds(&l, &["preproc_include"]),
             f_name: fields(&l, &["name", "declarator"]),
             f_callee: fields(&l, &["function"]),
@@ -503,7 +563,10 @@ pub fn spec_for(lang: Lang) -> Spec {
             fn_values: Vec::new(),
             var_defs: kinds(&l, &["enumerator"]),
             f_var_name: fields(&l, &["name"]),
-            idents: kinds(&l, &["identifier", "type_identifier", "namespace_identifier"]),
+            idents: kinds(
+                &l,
+                &["identifier", "type_identifier", "namespace_identifier"],
+            ),
             heritage: kinds(&l, &["base_class_clause"]),
             dotted: kinds(&l, &["field_expression", "qualified_identifier"]),
             f_object: fields(&l, &["argument", "scope"]),
@@ -543,11 +606,26 @@ pub fn spec_for(lang: Lang) -> Spec {
             cond_defs: Vec::new(),
             f_value: Vec::new(),
             fn_values: Vec::new(),
-            var_defs: kinds(&l, &["variable_declarator", "property_declaration", "enum_member_declaration"]),
+            var_defs: kinds(
+                &l,
+                &[
+                    "variable_declarator",
+                    "property_declaration",
+                    "enum_member_declaration",
+                ],
+            ),
             f_var_name: fields(&l, &["name"]),
             idents: kinds(&l, &["identifier"]),
             heritage: kinds(&l, &["base_list"]),
-            dotted: kinds(&l, &["member_access_expression", "qualified_name", "member_binding_expression", "alias_qualified_name"]),
+            dotted: kinds(
+                &l,
+                &[
+                    "member_access_expression",
+                    "qualified_name",
+                    "member_binding_expression",
+                    "alias_qualified_name",
+                ],
+            ),
             f_object: fields(&l, &["expression", "qualifier"]),
             aliased: Vec::new(),
             namespaced: Vec::new(),
@@ -565,12 +643,7 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("alias", DefKind::Function),
                 ],
             ),
-            refs: tagged(
-                &l,
-                &[
-                    ("call", RefKind::Call),
-                ],
-            ),
+            refs: tagged(&l, &[("call", RefKind::Call)]),
             imports: Vec::new(),
             f_name: fields(&l, &["name", "left"]),
             f_callee: fields(&l, &["method"]),
@@ -626,7 +699,15 @@ pub fn spec_for(lang: Lang) -> Spec {
             f_var_name: fields(&l, &["name"]),
             idents: kinds(&l, &["name"]),
             heritage: kinds(&l, &["base_clause", "class_interface_clause"]),
-            dotted: kinds(&l, &["member_access_expression", "nullsafe_member_access_expression", "scoped_property_access_expression", "qualified_name"]),
+            dotted: kinds(
+                &l,
+                &[
+                    "member_access_expression",
+                    "nullsafe_member_access_expression",
+                    "scoped_property_access_expression",
+                    "qualified_name",
+                ],
+            ),
             f_object: fields(&l, &["object", "scope", "prefix"]),
             aliased: kinds(&l, &["namespace_use_clause"]),
             namespaced: Vec::new(),
@@ -644,12 +725,7 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("type_alias", DefKind::Interface),
                 ],
             ),
-            refs: tagged(
-                &l,
-                &[
-                    ("call_expression", RefKind::Call),
-                ],
-            ),
+            refs: tagged(&l, &[("call_expression", RefKind::Call)]),
             imports: kinds(&l, &["import"]),
             f_name: fields(&l, &["name", "type"]),
             f_callee: Vec::new(),
@@ -658,7 +734,10 @@ pub fn spec_for(lang: Lang) -> Spec {
             cond_defs: Vec::new(),
             f_value: Vec::new(),
             fn_values: Vec::new(),
-            var_defs: kinds(&l, &["property_declaration", "class_parameter", "enum_entry"]),
+            var_defs: kinds(
+                &l,
+                &["property_declaration", "class_parameter", "enum_entry"],
+            ),
             f_var_name: Vec::new(),
             idents: kinds(&l, &["identifier"]),
             heritage: kinds(&l, &["delegation_specifiers"]),
@@ -725,12 +804,7 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("simple_enum_case", DefKind::Variable),
                 ],
             ),
-            refs: tagged(
-                &l,
-                &[
-                    ("call_expression", RefKind::Call),
-                ],
-            ),
+            refs: tagged(&l, &[("call_expression", RefKind::Call)]),
             imports: kinds(&l, &["import_declaration", "export_declaration"]),
             f_name: fields(&l, &["name", "pattern"]),
             f_callee: fields(&l, &["function"]),
@@ -739,11 +813,26 @@ pub fn spec_for(lang: Lang) -> Spec {
             cond_defs: kinds(&l, &["val_definition", "var_definition"]),
             f_value: fields(&l, &["value"]),
             fn_values: kinds(&l, &["lambda_expression"]),
-            var_defs: kinds(&l, &["val_definition", "var_definition", "val_declaration", "var_declaration"]),
+            var_defs: kinds(
+                &l,
+                &[
+                    "val_definition",
+                    "var_definition",
+                    "val_declaration",
+                    "var_declaration",
+                ],
+            ),
             f_var_name: fields(&l, &["pattern", "name"]),
             idents: kinds(&l, &["identifier", "type_identifier"]),
             heritage: kinds(&l, &["extends_clause", "derives_clause", "uses_clause"]),
-            dotted: kinds(&l, &["field_expression", "stable_identifier", "stable_type_identifier"]),
+            dotted: kinds(
+                &l,
+                &[
+                    "field_expression",
+                    "stable_identifier",
+                    "stable_type_identifier",
+                ],
+            ),
             f_object: fields(&l, &["value"]),
             aliased: kinds(&l, &["arrow_renamed_identifier", "as_renamed_identifier"]),
             namespaced: Vec::new(),
@@ -796,7 +885,11 @@ impl Spec {
             return None;
         }
         let n = first_field(node, &self.f_var_name)?;
-        matches!(n.kind(), "identifier" | "property_identifier" | "type_identifier").then_some(n)
+        matches!(
+            n.kind(),
+            "identifier" | "property_identifier" | "type_identifier"
+        )
+        .then_some(n)
     }
 
     #[inline]
@@ -1010,4 +1103,49 @@ pub fn node_text<'a>(node: &Node, src: &'a [u8]) -> Option<&'a str> {
     let raw = src.get(node.start_byte()..node.end_byte())?;
     let s = std::str::from_utf8(raw).ok()?;
     Some(s.trim_matches(|c| c == '"' || c == '\'' || c == '`'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every name every spec asks for must exist in its grammar.
+    ///
+    /// `kinds()` and `fields()` drop a name the grammar does not know, so a spec
+    /// with a typo — or a spec that was right until a grammar upgrade renamed a
+    /// node — still compiles, still runs, and quietly stops finding whatever
+    /// that node was for. Nothing else in the pipeline notices: the language
+    /// keeps producing a graph, just a smaller one.
+    ///
+    /// This is the check that makes a `cargo update` on a tree-sitter crate
+    /// safe to do.
+    #[test]
+    fn every_spec_name_exists_in_its_grammar() {
+        for lang in ALL_LANGS {
+            let _ = spec_for(lang);
+        }
+        let misses = unresolved_names();
+        assert!(
+            misses.is_empty(),
+            "{} name(s) silently dropped: {}",
+            misses.len(),
+            misses
+                .iter()
+                .map(|(l, w)| format!("{l}/{w}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    /// A language that has a spec must extract something. An empty `defs` list
+    /// is the shape a half-written spec takes, and it is invisible at runtime.
+    #[test]
+    fn every_language_defines_and_calls_something() {
+        for lang in ALL_LANGS {
+            let s = spec_for(lang);
+            assert!(!s.defs.is_empty(), "{:?}: no definition kinds", lang);
+            assert!(!s.refs.is_empty(), "{:?}: no reference kinds", lang);
+            assert!(!s.idents.is_empty(), "{:?}: no identifier kinds", lang);
+        }
+    }
 }

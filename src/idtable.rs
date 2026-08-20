@@ -42,7 +42,11 @@ impl IdTable {
                 by_key.insert(NodeKey(k), NodeId(i as u32));
             }
         }
-        IdTable { by_key, keys: ks, free }
+        IdTable {
+            by_key,
+            keys: ks,
+            free,
+        }
     }
 
     pub fn len(&self) -> u32 {

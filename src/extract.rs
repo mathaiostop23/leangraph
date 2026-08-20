@@ -5,12 +5,11 @@
 
 use crate::cache::FileMeta;
 use crate::core::{
-    Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, Recv, Ref, RefKind, Span,
-    NO_SCOPE,
+    Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, Recv, Ref, RefKind, Span, NO_SCOPE,
 };
-use rustc_hash::FxHashSet;
 use crate::lang::{node_text, Lang, Spec};
 use memmap2::Mmap;
+use rustc_hash::FxHashSet;
 use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
@@ -154,10 +153,8 @@ fn walk(
                 if let (Some(lt), Some(ot)) = (node_text(&l, src), node_text(&o, src)) {
                     if lt != ot {
                         consumed.insert(l.id());
-                        unit.aliases.push((
-                            interner.get_or_intern(lt),
-                            interner.get_or_intern(ot),
-                        ));
+                        unit.aliases
+                            .push((interner.get_or_intern(lt), interner.get_or_intern(ot)));
                     }
                 }
             }
@@ -257,7 +254,11 @@ fn reclassify(kind: DefKind, defs: &[Def], scope: DefIdx) -> DefKind {
 /// value is part of the API surface rather than a local temporary.
 #[inline]
 fn at_container_scope(defs: &[Def], scope: DefIdx) -> bool {
-    scope == NO_SCOPE || matches!(defs[scope as usize].kind, DefKind::Class | DefKind::Interface)
+    scope == NO_SCOPE
+        || matches!(
+            defs[scope as usize].kind,
+            DefKind::Class | DefKind::Interface
+        )
 }
 
 pub fn extract_file(

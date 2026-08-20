@@ -21,7 +21,13 @@ use std::process::Command;
 pub fn work_dir(data_dir: &Path, full_name: &str) -> PathBuf {
     let safe: String = full_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '/' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '/' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     data_dir.join("repos").join(safe)
 }
@@ -76,7 +82,11 @@ fn host_of(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://")?;
     let host = rest.split(['/', '?', '#']).next()?;
     let host = host.rsplit_once(':').map_or(host, |(h, p)| {
-        if p.chars().all(|c| c.is_ascii_digit()) { h } else { host }
+        if p.chars().all(|c| c.is_ascii_digit()) {
+            h
+        } else {
+            host
+        }
     });
     let host = host.trim_start_matches('[').trim_end_matches(']');
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
@@ -237,7 +247,11 @@ pub fn fetch(
     run(Some(dir), token, &["fetch", "--prune", "origin", branch])?;
     // Reset rather than merge: this is a mirror of the remote, and a merge
     // conflict in a directory nobody edits is a job that fails forever.
-    run(Some(dir), token, &["reset", "--hard", &format!("origin/{branch}")])?;
+    run(
+        Some(dir),
+        token,
+        &["reset", "--hard", &format!("origin/{branch}")],
+    )?;
     let after = head(dir, token).context("repository has no HEAD after fetch")?;
     Ok((before, after))
 }
@@ -282,7 +296,6 @@ pub fn name_from_url(url: &str) -> Option<String> {
     (path.matches('/').count() == 1 && !path.is_empty()).then(|| path.to_string())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,7 +310,10 @@ mod tests {
         // The shape half only — asserting on `check_url` here would make the
         // test need a working resolver, and a test that fails on a train is a
         // test people learn to ignore.
-        assert_eq!(check_shape("https://github.com/owner/name").unwrap(), "github.com");
+        assert_eq!(
+            check_shape("https://github.com/owner/name").unwrap(),
+            "github.com"
+        );
         for u in [
             "http://github.com/o/n",
             "file:///etc/passwd",
@@ -324,10 +340,23 @@ mod tests {
     #[test]
     fn private_and_local_addresses_are_refused() {
         for a in [
-            "127.0.0.1", "10.0.0.5", "172.16.0.1", "172.31.255.255", "192.168.1.1",
-            "0.0.0.0", "100.64.0.1", "224.0.0.1", "255.255.255.255",
-            "::1", "::", "fc00::1", "fd12:3456::1", "fe80::1", "ff02::1",
-            "::ffff:127.0.0.1", "::ffff:10.0.0.1",
+            "127.0.0.1",
+            "10.0.0.5",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "0.0.0.0",
+            "100.64.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
         ] {
             assert!(!is_public(ip(a)), "{a} should not count as public");
         }
@@ -335,16 +364,31 @@ mod tests {
 
     #[test]
     fn public_addresses_are_allowed() {
-        for a in ["140.82.121.4", "1.1.1.1", "8.8.8.8", "2606:4700::1111", "2001:4860::8888"] {
+        for a in [
+            "140.82.121.4",
+            "1.1.1.1",
+            "8.8.8.8",
+            "2606:4700::1111",
+            "2001:4860::8888",
+        ] {
             assert!(is_public(ip(a)), "{a} should count as public");
         }
     }
 
     #[test]
     fn the_host_is_parsed_the_way_a_client_would() {
-        assert_eq!(host_of("https://github.com/o/n").as_deref(), Some("github.com"));
-        assert_eq!(host_of("https://GitHub.COM/o/n").as_deref(), Some("github.com"));
-        assert_eq!(host_of("https://ghe.example.com:8443/o/n").as_deref(), Some("ghe.example.com"));
+        assert_eq!(
+            host_of("https://github.com/o/n").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            host_of("https://GitHub.COM/o/n").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            host_of("https://ghe.example.com:8443/o/n").as_deref(),
+            Some("ghe.example.com")
+        );
         assert_eq!(host_of("https://[::1]/o/n").as_deref(), Some("::1"));
         assert_eq!(host_of("https://github.com").as_deref(), Some("github.com"));
         assert_eq!(host_of("https://"), None);

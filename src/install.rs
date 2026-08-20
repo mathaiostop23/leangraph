@@ -102,8 +102,10 @@ fn read_json(path: &Path) -> Result<Option<Value>> {
             "{} exists but is not valid JSON ({e}).\n  \
 Refusing to touch it — edit it by hand and add:\n{}",
             path.display(),
-            serde_json::to_string_pretty(&json!({ "mcpServers": { "leangraph": server_entry(Path::new(".")) } }))
-                .unwrap_or_default()
+            serde_json::to_string_pretty(
+                &json!({ "mcpServers": { "leangraph": server_entry(Path::new(".")) } })
+            )
+            .unwrap_or_default()
         ),
     }
 }

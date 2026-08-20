@@ -84,10 +84,10 @@ impl Server {
             {
                 "name": "leangraph_explore",
                 "description": "PRIMARY. Given symbol names you suspect are involved, returns \
-the call path between them plus the relevant surrounding code, ranked by graph \
-confidence. Call this before reading files — its output is the answer to 'how \
-does X reach Y', 'what calls this', and 'what would break'. Treat returned \
-source as already read.",
+        the call path between them plus the relevant surrounding code, ranked by graph \
+        confidence. Call this before reading files — its output is the answer to 'how \
+        does X reach Y', 'what calls this', and 'what would break'. Treat returned \
+        source as already read.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -95,7 +95,7 @@ source as already read.",
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Function, method or class names. Use `Class.method` \
-to pick a specific overload. Two or more names makes the tool find the path between them."
+        to pick a specific overload. Two or more names makes the tool find the path between them."
                         },
                         "max_nodes": {"type": "integer", "description": "Default 25."},
                         "max_bytes": {"type": "integer", "description": "Source budget, default 24000."}
@@ -106,7 +106,7 @@ to pick a specific overload. Two or more names makes the tool find the path betw
             {
                 "name": "leangraph_node",
                 "description": "SECONDARY, use after explore. Full source of one symbol plus \
-everything that calls it and everything it calls, with confidence on each edge.",
+        everything that calls it and everything it calls, with confidence on each edge.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -158,10 +158,7 @@ are involved, e.g. {\"symbols\": [\"QuerySet\", \"SQLCompiler\"]}."
         }
 
         let budget = Budget {
-            max_nodes: args
-                .get("max_nodes")
-                .and_then(Value::as_u64)
-                .unwrap_or(25) as usize,
+            max_nodes: args.get("max_nodes").and_then(Value::as_u64).unwrap_or(25) as usize,
             max_bytes: args
                 .get("max_bytes")
                 .and_then(Value::as_u64)
@@ -197,7 +194,11 @@ index may predate them. Try a different name, or read the files directly."
             ctx.est_tokens
         ));
         for it in &ctx.items {
-            out.push_str(&format!("### {} [{}]\n", describe(g, it.node), it.why.label()));
+            out.push_str(&format!(
+                "### {} [{}]\n",
+                describe(g, it.node),
+                it.why.label()
+            ));
             match read_span(g, it.node, budget.max_node_bytes) {
                 Some(src) => {
                     out.push_str("```\n");
@@ -246,10 +247,7 @@ be stale. Try leangraph_explore with related names."
             None if !g.file_is_current(g.location(n).0) => out.push_str(STALE),
             None => {}
         }
-        for (title, mut ns) in [
-            ("Called by", g.callers(n)),
-            ("Calls", g.callees(n)),
-        ] {
+        for (title, mut ns) in [("Called by", g.callers(n)), ("Calls", g.callees(n))] {
             ns.sort_unstable_by_key(|x| std::cmp::Reverse(x.conf));
             out.push_str(&format!("### {title} ({})\n", ns.len()));
             for x in ns.iter().take(limit) {

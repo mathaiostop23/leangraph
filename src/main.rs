@@ -1,3 +1,14 @@
+// Two clippy lints are switched off deliberately rather than worked around.
+//
+// `too_many_arguments` fires on the persistence entry points, which take the
+// pieces of a graph. Bundling them into a struct would move the argument list
+// somewhere else and add a type whose only job is to be unpacked immediately.
+//
+// `type_complexity` fires on the CSR slices and the co-change return, where the
+// shape *is* the documentation — a named alias would hide that a function
+// returns edges, pairs and stats.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 //! leangraph — native code-graph indexer and query engine.
 
 mod cache;
@@ -290,8 +301,16 @@ fn main() -> Result<()> {
             if !ctx.flow.is_empty() {
                 println!(
                     "\n\x1b[1mflow\x1b[0m  {} → {}",
-                    if ctx.flow_reversed { &symbols[1] } else { &symbols[0] },
-                    if ctx.flow_reversed { &symbols[0] } else { &symbols[1] }
+                    if ctx.flow_reversed {
+                        &symbols[1]
+                    } else {
+                        &symbols[0]
+                    },
+                    if ctx.flow_reversed {
+                        &symbols[0]
+                    } else {
+                        &symbols[1]
+                    }
                 );
                 for (i, n) in ctx.flow.iter().enumerate() {
                     println!("  {}{}", "  ".repeat(i), describe(&g, *n));
@@ -399,7 +418,12 @@ fn main() -> Result<()> {
                 ctx.est_tokens
             );
             for it in &ctx.items {
-                println!("  {:<8} {:>4.2}  {}", it.why.label(), it.score, describe(&g, it.node));
+                println!(
+                    "  {:<8} {:>4.2}  {}",
+                    it.why.label(),
+                    it.score,
+                    describe(&g, it.node)
+                );
             }
             println!();
             Ok(())
@@ -452,10 +476,7 @@ fn main() -> Result<()> {
                             if dk == 0 {
                                 continue;
                             }
-                            lines.push(format!(
-                                "E {k:016x} {dk:016x} {} {}",
-                                nb.kind, nb.conf
-                            ));
+                            lines.push(format!("E {k:016x} {dk:016x} {} {}", nb.kind, nb.conf));
                         }
                     }
                     lines.sort_unstable();
@@ -735,6 +756,10 @@ fn rank_candidate(g: &Graph, n: NodeId) -> (u8, usize) {
     let path = g.path(file);
     let is_test = path.contains("/test") || path.contains("_test.") || path.contains(".test.");
     let kind = g.node_kind(n);
-    let kind_rank = if kind == DefKind::Variable as u8 { 1 } else { 0 };
+    let kind_rank = if kind == DefKind::Variable as u8 {
+        1
+    } else {
+        0
+    };
     ((is_test as u8) * 2 + kind_rank, path.matches('/').count())
 }

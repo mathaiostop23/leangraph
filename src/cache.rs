@@ -12,9 +12,7 @@
 //! live interner and the ids are remapped, so a cache written by one run is
 //! valid for the next even though the interner is rebuilt from scratch.
 
-use crate::core::{
-    Def, DefKind, FileUnit, Import, Interner, Recv, Ref, RefKind, Span, SymId,
-};
+use crate::core::{Def, DefKind, FileUnit, Import, Interner, Recv, Ref, RefKind, Span, SymId};
 use crate::lang::Lang;
 use anyhow::{bail, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -168,7 +166,10 @@ fn kind_of_ref(k: u32) -> RefKind {
 /// update a second list. The value is written to the cache and read by nothing
 /// today, but it costs four bytes and a wrong one would be a silent mislabel.
 fn lang_id(l: Lang) -> u32 {
-    crate::lang::ALL_LANGS.iter().position(|&x| x == l).unwrap_or(0) as u32
+    crate::lang::ALL_LANGS
+        .iter()
+        .position(|&x| x == l)
+        .unwrap_or(0) as u32
 }
 
 fn pad8(v: &mut Vec<u8>) {

@@ -1,0 +1,70 @@
+name: ci
+
+# Everything here runs without the benchmark corpora. Those are ~1 GB of
+# clones and the numbers they produce belong in BENCH.md, measured on one
+# machine; what CI is for is catching the changes that break something
+# silently, and all of those are reachable from this repository alone.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: format
+        run: cargo fmt --check
+
+      - name: build
+        run: cargo build --release --locked
+
+      # Includes the two that matter most for a project with fourteen language
+      # specs: every node kind and field name a spec asks for must exist in its
+      # grammar, and every language must define and call something. A grammar
+      # upgrade that renames a node otherwise breaks a language with no error —
+      # `kinds()` drops the name, the spec still compiles, and that language
+      # quietly stops finding whatever the node was for.
+      - name: test
+        run: cargo test --release --locked
+
+      - name: clippy
+        run: cargo clippy --release --locked -- -D warnings
+
+  behaviour:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+
+      # This repository is Rust, which the indexer now supports, so it can be
+      # its own corpus. Small, always present, and exercises the whole pipeline.
+      - name: index itself
+        run: |
+          ./target/release/leangraph index . > /tmp/out.txt
+          cat /tmp/out.txt
+          grep -qE 'graph +[0-9]{3,}' /tmp/out.txt || {
+            echo "::error::indexing this repository produced a trivial graph"; exit 1; }
+
+      # The invariant that makes incremental sync safe to trust: a sync must
+      # produce a graph semantically identical to a full reindex. It found that
+      # the graph was not reproducible at all the first time it ran.
+      - name: convergence
+        run: bash bench/converge.sh .
+
+      # Every language must still extract and resolve. A fixture rather than a
+      # corpus, but it is the difference between "the spec compiles" and "the
+      # spec works".
+      - name: every language still works
+        run: bash bench/langsmoke.sh

@@ -40,17 +40,11 @@ impl Db {
         Ok(db)
     }
 
-    #[cfg(test)]
-    pub fn memory() -> Result<Db> {
-        let conn = Connection::open_in_memory()?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        let db = Db(Arc::new(Mutex::new(conn)));
-        db.migrate()?;
-        Ok(db)
-    }
-
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        let guard = self.0.lock().map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
+        let guard = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
         f(&guard)
     }
 
@@ -353,7 +347,13 @@ pub struct Job {
 impl Db {
     /// Enqueue, collapsing against anything already queued with the same key.
     /// Returns false when the job was folded into an existing one.
-    pub fn enqueue(&self, kind: &str, repo_id: i64, payload: &str, dedupe: Option<&str>) -> Result<bool> {
+    pub fn enqueue(
+        &self,
+        kind: &str,
+        repo_id: i64,
+        payload: &str,
+        dedupe: Option<&str>,
+    ) -> Result<bool> {
         self.with(|c| {
             let n = c.execute(
                 "INSERT OR IGNORE INTO jobs (kind, repo_id, payload, dedupe_key, created_at)
@@ -372,9 +372,9 @@ impl Db {
                 .query_row(
                     "UPDATE jobs SET state='running', started_at=?1, attempts = attempts + 1
                      WHERE id = (SELECT id FROM jobs WHERE state='queued' ORDER BY id LIMIT 1)
-                     RETURNING id, kind, repo_id, payload",  // attempts is
-                     // incremented for the record; nothing retries a failed
-                     // job, so nothing reads it back.
+                     RETURNING id, kind, repo_id, payload", // attempts is
+                    // incremented for the record; nothing retries a failed
+                    // job, so nothing reads it back.
                     params![now()],
                     |r| {
                         Ok(Job {
@@ -394,7 +394,12 @@ impl Db {
         self.with(|c| {
             c.execute(
                 "UPDATE jobs SET state = ?2, finished_at = ?3, error = ?4 WHERE id = ?1",
-                params![id, if error.is_some() { "failed" } else { "done" }, now(), error],
+                params![
+                    id,
+                    if error.is_some() { "failed" } else { "done" },
+                    now(),
+                    error
+                ],
             )?;
             Ok(())
         })
@@ -402,8 +407,14 @@ impl Db {
 
     pub fn queue_depth(&self) -> Result<(i64, i64)> {
         self.with(|c| {
-            let q: i64 = c.query_row("SELECT COUNT(*) FROM jobs WHERE state='queued'", [], |r| r.get(0))?;
-            let run: i64 = c.query_row("SELECT COUNT(*) FROM jobs WHERE state='running'", [], |r| r.get(0))?;
+            let q: i64 =
+                c.query_row("SELECT COUNT(*) FROM jobs WHERE state='queued'", [], |r| {
+                    r.get(0)
+                })?;
+            let run: i64 =
+                c.query_row("SELECT COUNT(*) FROM jobs WHERE state='running'", [], |r| {
+                    r.get(0)
+                })?;
             Ok((q, run))
         })
     }
@@ -412,7 +423,10 @@ impl Db {
 impl Db {
     pub fn set_repo_config(&self, id: i64, json: &str) -> Result<()> {
         self.with(|c| {
-            c.execute("UPDATE repos SET config_json = ?2 WHERE id = ?1", params![id, json])?;
+            c.execute(
+                "UPDATE repos SET config_json = ?2 WHERE id = ?1",
+                params![id, json],
+            )?;
             Ok(())
         })
     }
@@ -671,7 +685,6 @@ impl Db {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,10 +728,15 @@ mod tests {
         }
 
         let db = Db::open(&path).expect("an existing database must still open");
-        let repos = db.repos().expect("reading repos must not fail after upgrade");
+        let repos = db
+            .repos()
+            .expect("reading repos must not fail after upgrade");
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].config_json, "{}");
-        assert!(!repos[0].fix_mode(), "fix mode must default to off on upgrade");
+        assert!(
+            !repos[0].fix_mode(),
+            "fix mode must default to off on upgrade"
+        );
 
         // Idempotent: opening again re-runs migrate and must not error on a
         // column that is now present.

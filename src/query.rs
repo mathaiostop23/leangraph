@@ -197,6 +197,10 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
 
 /// How much a token looks like it was copied out of source rather than typed
 /// as prose. This is the cheapest reliable signal available in an issue body.
+// snake_case and camelCase deliberately score the same: both are strong
+// evidence the token was copied from source, and there is no reason to rank one
+// above the other. Clippy sees two identical blocks; the comments are the point.
+#[allow(clippy::if_same_then_else)]
 #[inline]
 fn identifier_shape(tok: &str) -> u8 {
     let upper = tok.chars().any(char::is_uppercase);
@@ -331,7 +335,10 @@ fn build_from(g: &Graph, seed_nodes: Vec<NodeId>, budget: &Budget) -> Context {
                 for nb in nbs {
                     // provenance 3 is CoChange; it is scored on its own scale
                     let (why, w) = if nb.prov == 3 {
-                        (Why::CoChange, Why::CoChange.weight() * (nb.conf as f32 / 100.0))
+                        (
+                            Why::CoChange,
+                            Why::CoChange.weight() * (nb.conf as f32 / 100.0),
+                        )
                     } else {
                         (why, why.weight() * (nb.conf as f32 / 100.0) * decay)
                     };
