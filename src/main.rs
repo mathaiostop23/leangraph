@@ -569,6 +569,9 @@ fn main() -> Result<()> {
 /// text, so this is the only place that touches the working tree.
 fn read_span(g: &Graph, n: NodeId) -> Option<String> {
     let (file, start, end) = g.location(n);
+    if !g.file_is_current(file) {
+        return None;
+    }
     let bytes = std::fs::read(g.abs_path(file)).ok()?;
     let s = bytes.get(start as usize..end as usize)?;
     Some(String::from_utf8_lossy(s).into_owned())

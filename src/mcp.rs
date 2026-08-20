@@ -44,13 +44,39 @@ If a symbol is missing, the graph may be stale — say so rather than guessing."
 struct Server {
     root: PathBuf,
     graph: Option<Graph>,
+    /// When the graph file was last opened. `graph::write` renames over the
+    /// path, so a running server keeps the old inode for its whole life — an
+    /// editor session that reindexes would otherwise go on answering from the
+    /// graph it started with until the user restarted their editor.
+    opened: Option<std::time::SystemTime>,
 }
 
 impl Server {
     fn new(root: PathBuf) -> Server {
-        let p = root.join(".leangraph").join("graph.bin");
-        let graph = Graph::open(&p).ok();
-        Server { root, graph }
+        let mut s = Server {
+            root,
+            graph: None,
+            opened: None,
+        };
+        s.refresh();
+        s
+    }
+
+    fn graph_path(&self) -> PathBuf {
+        self.root.join(".leangraph").join("graph.bin")
+    }
+
+    /// Re-open the graph if it has been rewritten since we last looked.
+    ///
+    /// Called before every request. A `stat` per tool call is nothing against
+    /// an answer drawn from a graph two hours out of date.
+    fn refresh(&mut self) {
+        let p = self.graph_path();
+        let stamp = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+        if stamp != self.opened || self.graph.is_none() {
+            self.graph = Graph::open(&p).ok();
+            self.opened = stamp;
+        }
     }
 
     fn tools() -> Value {
@@ -172,10 +198,14 @@ index may predate them. Try a different name, or read the files directly."
         ));
         for it in &ctx.items {
             out.push_str(&format!("### {} [{}]\n", describe(g, it.node), it.why.label()));
-            if let Some(src) = read_span(g, it.node, budget.max_node_bytes) {
-                out.push_str("```\n");
-                out.push_str(&src);
-                out.push_str("\n```\n\n");
+            match read_span(g, it.node, budget.max_node_bytes) {
+                Some(src) => {
+                    out.push_str("```\n");
+                    out.push_str(&src);
+                    out.push_str("\n```\n\n");
+                }
+                None if !g.file_is_current(g.location(it.node).0) => out.push_str(STALE),
+                None => {}
             }
         }
         if ctx.dropped > 0 {
@@ -207,10 +237,14 @@ be stale. Try leangraph_explore with related names."
         };
 
         let mut out = format!("## {}\n\n", describe(g, n));
-        if let Some(src) = read_span(g, n, 8_000) {
-            out.push_str("```\n");
-            out.push_str(&src);
-            out.push_str("\n```\n\n");
+        match read_span(g, n, 8_000) {
+            Some(src) => {
+                out.push_str("```\n");
+                out.push_str(&src);
+                out.push_str("\n```\n\n");
+            }
+            None if !g.file_is_current(g.location(n).0) => out.push_str(STALE),
+            None => {}
         }
         for (title, mut ns) in [
             ("Called by", g.callers(n)),
@@ -226,7 +260,10 @@ be stale. Try leangraph_explore with related names."
         self.guidance(out)
     }
 
-    fn handle(&self, req: &Value) -> Option<Value> {
+    fn handle(&mut self, req: &Value) -> Option<Value> {
+        // Cheap, and it is the difference between an editor session recovering
+        // from a reindex and not.
+        self.refresh();
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let id = req.get("id").cloned();
         // Notifications carry no id and must not be answered.
@@ -269,7 +306,7 @@ be stale. Try leangraph_explore with related names."
 }
 
 pub fn serve(root: &Path) -> Result<()> {
-    let server = Server::new(root.to_path_buf());
+    let mut server = Server::new(root.to_path_buf());
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
@@ -310,8 +347,24 @@ fn describe(g: &Graph, n: crate::core::NodeId) -> String {
     format!("{k} `{}` — {path}@{start}", g.name(n))
 }
 
+/// What to say when a node's file has moved on since indexing.
+///
+/// Saying nothing would be safe but useless: the instructions tell the agent to
+/// treat what it gets as already read, so an absent body reads as "this function
+/// has no source" rather than "go look for yourself".
+const STALE: &str = "_(this file has changed since it was indexed — the graph's \
+byte offsets no longer line up, so the source is withheld. Read the file \
+directly, and run `leangraph index` to refresh.)_\n\n";
+
 fn read_span(g: &Graph, n: crate::core::NodeId, cap: u32) -> Option<String> {
     let (file, start, end) = g.location(n);
+    // The graph stores byte offsets. If the file changed after indexing they
+    // point at whatever now sits at those positions, and the caller is told to
+    // treat what comes back as already read. Returning nothing is recoverable;
+    // returning a fragment of a different function under this one's name is not.
+    if !g.file_is_current(file) {
+        return None;
+    }
     let bytes = std::fs::read(g.abs_path(file)).ok()?;
     let end = end.min(start.saturating_add(cap));
     let s = bytes.get(start as usize..(end as usize).min(bytes.len()))?;

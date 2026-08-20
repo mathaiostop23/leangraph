@@ -747,7 +747,14 @@ fn build_context(repo_path: &std::path::Path, text: &str) -> Result<Built> {
             path,
             a
         ));
+        // Stale spans slice the wrong bytes; better to send the agent a name
+        // and a location than a confidently mislabelled body.
+        let fresh = g.file_is_current(f);
         if let Ok(bytes) = std::fs::read(g.abs_path(f)) {
+            if !fresh {
+                out.push_str("_(file changed since indexing; source omitted)_\n\n");
+                continue;
+            }
             let end = (b as usize).min(bytes.len());
             let start = (a as usize).min(end);
             let src = String::from_utf8_lossy(&bytes[start..end]);

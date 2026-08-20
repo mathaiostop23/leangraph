@@ -592,17 +592,50 @@ pub fn resolve(
                     st.external += 1;
                     continue;
                 };
-                // A Python function cannot call a JavaScript one. The index is
-                // global and has no idea, so the filter belongs here: 14,533
-                // django edges crossed a language boundary without it.
-                let cands: Vec<&(FileId, DefIdx)> = cands
-                    .iter()
-                    .filter(|&&(cf, _)| same_family(langs[fid as usize], langs[cf as usize]))
-                    .collect();
-                if cands.is_empty() {
+                // A name with thousands of definitions costs a pass over all of
+                // them for every reference to it, and the answer is thrown away
+                // anyway once the ambiguity cap fires. So find the best locality
+                // tier and count how many sit at it in ONE pass, allocating
+                // nothing — and give up before materialising anything when the
+                // count is hopeless.
+                //
+                // Measured on two 50k-file repositories identical except that
+                // one names a method `render` everywhere: the old shape spent
+                // 27 seconds in resolve against 41 ms.
+                //
+                // A Python function cannot call a JavaScript one, so the family
+                // filter rides along in the same pass.
+                let my_lang = langs[fid as usize];
+                let mut best = 0u8;
+                let mut n_best = 0usize;
+                let mut any = false;
+                for &(cf, _) in cands.iter() {
+                    if !same_family(my_lang, langs[cf as usize]) {
+                        continue;
+                    }
+                    any = true;
+                    let loc = locality(cf, fid, &dirs);
+                    if loc > best {
+                        best = loc;
+                        n_best = 1;
+                    } else if loc == best {
+                        n_best += 1;
+                    }
+                }
+                if !any {
                     st.external += 1;
                     continue;
                 }
+                // `super()` narrowing can rescue an over-ambiguous set, so it
+                // keeps the old path; nothing else does.
+                if n_best > MAX_AMBIGUITY && r.recv != Recv::Super {
+                    st.too_ambiguous += 1;
+                    continue;
+                }
+                let cands: Vec<&(FileId, DefIdx)> = cands
+                    .iter()
+                    .filter(|&&(cf, _)| same_family(my_lang, langs[cf as usize]))
+                    .collect();
                 // `super().x()` means one of the classes this one declares.
                 // That has to narrow the candidates *before* locality does, or
                 // the answer is thrown away first: `Flask` extends `App`, which

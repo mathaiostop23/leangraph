@@ -456,7 +456,15 @@ pub fn run(cfg: &Config) -> Result<Summary> {
             }
         }
         let tg = Instant::now();
-        graph::write(&out_path, r, &syms, &paths, &root, &ids.raw_keys())
+        graph::write(
+            &out_path,
+            r,
+            &syms,
+            &paths,
+            &root,
+            &ids.raw_keys(),
+            &metas.iter().map(|m| (m.size, m.mtime)).collect::<Vec<_>>(),
+        )
             .context("writing graph")?;
         let ms_graph = tg.elapsed().as_secs_f64() * 1e3;
         graph_bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);

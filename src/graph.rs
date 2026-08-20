@@ -24,8 +24,8 @@ use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const MAGIC: [u8; 8] = *b"LGRPHG\x00\x03";
-const N_SECTIONS: usize = 24;
+const MAGIC: [u8; 8] = *b"LGRPHG\x00\x04";
+const N_SECTIONS: usize = 25;
 
 // section ids
 const S_NODE_NAME: usize = 0;
@@ -49,6 +49,7 @@ const S_PATH_OFF: usize = 17;
 const S_PATH_BLOB: usize = 18;
 const S_ROOT: usize = 19;
 const S_NODE_KEY: usize = 20;
+const S_FILE_STAMP: usize = 21;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -109,6 +110,10 @@ pub struct Graph {
     path_blob: &'static [u8],
     root: &'static str,
     node_key: &'static [u64],
+    /// `(size, mtime)` per file, as of indexing. The only thing that can tell a
+    /// query that the bytes it is about to slice are no longer the bytes that
+    /// were parsed.
+    file_stamp: &'static [u64],
     /// Built on first lookup, not at open time — keeping `open` a pure mmap is
     /// the point of the format, and many callers never search by name.
     name_index: OnceLock<FxHashMap<&'static str, Vec<NodeId>>>,
@@ -167,6 +172,7 @@ pub fn write(
     paths: &[PathBuf],
     root: &Path,
     node_keys: &[u64],
+    stamps: &[(u64, i64)],
 ) -> Result<()> {
     // Canonicalise the symbol table before writing. Two things force this:
     //
@@ -288,6 +294,14 @@ pub fn write(
     let root_bytes = root.to_string_lossy().into_owned();
     section!(S_ROOT, root_bytes.as_bytes());
     section!(S_NODE_KEY, node_keys);
+    // Two u64s per file: size, and mtime reinterpreted. A query that is about to
+    // slice bytes out of a file can then check that they are still the bytes
+    // that were parsed.
+    let stamp_flat: Vec<u64> = stamps
+        .iter()
+        .flat_map(|&(size, mtime)| [size, mtime as u64])
+        .collect();
+    section!(S_FILE_STAMP, &stamp_flat[..]);
 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok();
@@ -394,6 +408,17 @@ impl Graph {
                     bytemuck::cast_slice(&base[o..o + l])
                 }
             },
+            file_stamp: {
+                let (o, l) = (
+                    header.off[S_FILE_STAMP] as usize,
+                    header.len[S_FILE_STAMP] as usize,
+                );
+                if l == 0 {
+                    &[]
+                } else {
+                    bytemuck::cast_slice(&base[o..o + l])
+                }
+            },
             name_index: OnceLock::new(),
             _mmap: mmap,
         })
@@ -436,6 +461,34 @@ impl Graph {
 
     /// Repository root the graph was built from. Paths are stored relative to
     /// it; join through here to touch the working tree.
+    /// Is the file still what it was when the graph was built?
+    ///
+    /// The graph stores byte offsets. If the file has changed since, those
+    /// offsets point at whatever now occupies those positions — which is how a
+    /// query for one function returned a fragment of a different one, under the
+    /// right name, at confidence 100. Size and mtime are a cheap check and the
+    /// same one the extraction cache already trusts.
+    ///
+    /// A graph written before this section existed has no stamps, and reports
+    /// everything fresh rather than everything stale.
+    pub fn file_is_current(&self, f: u32) -> bool {
+        let i = f as usize * 2;
+        let (Some(&size), Some(&mtime)) = (self.file_stamp.get(i), self.file_stamp.get(i + 1))
+        else {
+            return true;
+        };
+        let Ok(md) = std::fs::metadata(self.abs_path(f)) else {
+            return false;
+        };
+        let now = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        md.len() == size && now == mtime as i64
+    }
+
     /// Absolute path for a file id.
     pub fn abs_path(&self, f: u32) -> PathBuf {
         Path::new(self.root).join(self.path(f))
