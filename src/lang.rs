@@ -388,6 +388,9 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("struct_item", DefKind::Class),
                     ("enum_item", DefKind::Class),
                     ("trait_item", DefKind::Interface),
+                    // `type SymId = lasso::Spur;` names something people
+                    // reference, and CodeGraph counts it too.
+                    ("type_item", DefKind::Interface),
                     ("impl_item", DefKind::Class),
                 ],
             ),
@@ -407,7 +410,11 @@ pub fn spec_for(lang: Lang) -> Spec {
             cond_defs: Vec::new(),
             f_value: Vec::new(),
             fn_values: Vec::new(),
-            var_defs: kinds(&l, &["enum_variant", "field_declaration"]),
+            // Module-level constants are API surface people reference by name;
+            // they were missing because the probe's keyword filter hid
+            // `const_item` and `static_item` from the vocabulary the spec was
+            // written against. 72 of them in this project alone.
+            var_defs: kinds(&l, &["const_item", "static_item", "enum_variant", "field_declaration"]),
             f_var_name: fields(&l, &["name"]),
             idents: kinds(&l, &["identifier", "type_identifier", "field_identifier"]),
             heritage: kinds(&l, &["trait_bounds"]),
@@ -885,11 +892,16 @@ impl Spec {
             return None;
         }
         let n = first_field(node, &self.f_var_name)?;
-        matches!(
-            n.kind(),
-            "identifier" | "property_identifier" | "type_identifier"
-        )
-        .then_some(n)
+        // The spec already says which node kinds name things in this language;
+        // a hardcoded list here contradicted it. Ruby spells a constant
+        // `constant`, so every module-level `ANSI_COLORS` was rejected by a
+        // whitelist written for Python and TypeScript — 13 of 37 symbols in one
+        // small library.
+        //
+        // `property_identifier` stays as an addition rather than a member of
+        // `idents`: TypeScript needs it to name a class field, and putting it in
+        // `idents` would turn every property *access* into a reference.
+        (self.is_ident(n.kind_id()) || n.kind() == "property_identifier").then_some(n)
     }
 
     #[inline]

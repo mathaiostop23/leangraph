@@ -123,9 +123,26 @@ work, not budget work.
 
 Three independent checks, because a fast graph that is wrong is just wrong.
 
-**Nodes** — differential against CodeGraph (`bench/verify.py`): 100% presence
-recall on flask and django, 85.1% on excalidraw, **95.0% overall**. The gap is
-function-local variables we skip deliberately.
+**Nodes** — differential against CodeGraph (`bench/verify.py`), on a real
+repository per language rather than a fixture:
+
+| corpus | language | presence recall |
+|---|---|---:|
+| flask | python | 100.0% |
+| django | python | 100.0% |
+| excalidraw | typescript | 85.1% |
+| leangraph | rust | 100.0% |
+| pkg/errors | go | 100.0% |
+| JSON-java | java | 98.7% |
+| paint | ruby | 97.3% |
+
+excalidraw's gap is function-local variables, skipped deliberately. The other
+six are within two points of an independent implementation.
+
+Doing this found three gaps a fixture never would: Rust module constants and
+type aliases were not extracted at all, and `var_def_name` carried a hardcoded
+list of identifier node kinds — written for Python and TypeScript — that
+rejected every Ruby constant. Rust went 83.6% → 100%, Ruby 62.2% → 97.3%.
 
 **Edges** — flask's own test suite is run under `sys.monitoring` and every call
 that actually happened is recorded (`bench/edgetrace.py`). An observed edge
@@ -211,12 +228,11 @@ measured it.
 
 ## What it does not do
 
-- **Fourteen languages, two of them verified.** Python, TypeScript, Rust, Go,
-  Java, C, C++, C#, Ruby, PHP, Kotlin, Swift and Scala all extract definitions
-  and resolve calls, and each spec was checked against its grammar's own
-  vocabulary. But only Python and TypeScript have been measured against an
-  external oracle; the other twelve are verified on a fixture, not on a corpus.
-  CodeGraph has 30+ with framework awareness.
+- **Fourteen languages, six measured against an oracle.** Python, TypeScript,
+  Rust, Go and Java and Ruby have been checked on a real repository; C, C++, C#,
+  PHP, Kotlin, Swift and Scala are verified on a fixture only, which proves the
+  spec works on ordinary code and not that it works on a codebase. CodeGraph has
+  30+ with framework awareness.
 - **Import resolution is uneven across languages.** Rust, Java, C#, Kotlin and
   Scala resolve module paths; the rest fall back to name matching more often
   than Python and TypeScript do.
