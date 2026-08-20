@@ -29,10 +29,10 @@ One linear path. B ships ~week 4, A ships ~week 8.
 |---|---|
 | 0 · Speed premise | ✅ **Done, measured.** Parse+extract is 2–6% of CodeGraph's pipeline |
 | 1 · Extraction | ✅ **Done.** Interned symbols, containment scopes, imports |
-| 1b · Resolution | ✅ **Done.** 3 tiers; 87.7–99.6% of in-repo refs |
-| 2 · CSR + persistence | ✅ **Done.** 7.9 MB vs 163 MB; ~20 µs load |
+| 1b · Resolution | ✅ **Done.** 3 tiers, receiver-aware; 88.4–99.4% of in-repo refs |
+| 2 · CSR + persistence | ✅ **Done.** 6.8 MB vs 156 MB; ~15 µs load |
 | 2b · Context builder | ✅ **Done.** Confidence-ranked, budget-capped |
-| 3 · MCP server (**B ships**) | ✅ **Done.** 3.9 ms startup vs 561.7 ms |
+| 3 · MCP server (**B ships**) | ✅ **Done.** 2.3 ms startup vs 552 ms |
 | 4 · Incremental sync | ✅ **Done.** 5–8x; semantically identical to a full reindex |
 | 4b · Stable node ids | ✅ **Done.** Persistent key table; ids survive edits |
 | 4c · Git tree-diff sync | ✅ **Done.** `--since <sha>` for push webhooks |
@@ -44,18 +44,18 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 6 · Breadth | ⬜ |
 | — · Node verification | ✅ **Done.** 95.0% presence recall vs oracle |
 | — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, clustered p=0.008 |
-| — · Cost benchmark | ✅ **Done, and now reproducible.** 26x fewer tokens at matched recall |
+| — · Cost benchmark | ✅ **Done, and now reproducible.** 17x fewer tokens at matched recall |
 
 **Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:
 
 ```
                         leangraph        CodeGraph
-index (full pipeline)   560 ms       7.87 s        14x
-graph on disk           7.9 MB       163 MB        21x
-graph load              ~20 us       —
-MCP startup             3.9 ms       561.7 ms      144x
-nodes / edges           67,924 / 293,254   62,114 / 195,802
-in-repo refs resolved   87.7%
+index (full pipeline)   0.77 s       7.76 s        10x
+graph on disk           6.8 MB       156 MB        23x
+graph load              ~15 us       —
+MCP startup             2.3 ms       552 ms       239x
+nodes / edges           67,970 / 270,108   62,114 / 195,802
+in-repo refs resolved   88.4%
 ```
 
 Full table and methodology: [BENCH.md](./BENCH.md).

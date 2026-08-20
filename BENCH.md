@@ -210,14 +210,14 @@ A speed number published before this ran would have been meaningless.
 `bench/mcp_startup.py`, median of 5 cold processes:
 
 ```
-leangraph          3.9 ms
-codegraph    561.7 ms        144x
+leangraph          2.3 ms
+codegraph    552.0 ms        239x
 ```
 
 Structural, not tuning: `Graph::open` is an mmap plus a header check, so there
 is nothing to warm. CodeGraph's own CLAUDE.md names startup as the reason
 agents "dive into Read/grep before codegraph finishes its ~2-3s startup" — the
-561.7 ms measured here is with the npm package already resolved and warm, so it
+552 ms measured here is with the npm package already resolved and warm, so it
 is the friendly end of their range.
 
 ---
