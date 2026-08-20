@@ -91,7 +91,8 @@ after a change is **0.11 s** on django, because unchanged files come from cache.
 **Startup: 2.4 ms** against CodeGraph's 556 ms, spawn to MCP `initialize`
 (`bench/mcp_startup.py`). This gap is structural, not tuning: loading is not
 deserialization. `Graph::open` is an `mmap` plus a header check, so a
-68,000-node graph is queryable in 31 µs with nothing to warm up. CodeGraph's own
+68,000-node graph is queryable in 15 µs once its pages are resident, and
+under a millisecond on the very first touch. CodeGraph's own
 notes name startup as the reason agents give up and reach for grep first.
 
 ### Cost — the claim that matters
