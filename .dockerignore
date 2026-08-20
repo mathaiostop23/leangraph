@@ -2,5 +2,8 @@ target
 .git
 .arbor
 .arbor-server
-bench/__pycache__
+bench
+__pycache__
+.pytest_cache
+.DS_Store
 *.md
