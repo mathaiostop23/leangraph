@@ -885,6 +885,6 @@ things, and only one of them is a decision.
 - **Cost against real issue→PR pairs.** The ground truth is bug-fix commits from git history, which is honest and reproducible but not the same distribution as issues people actually file.
 - **The agent against the real API.** Every agent assertion runs against a stub. Shape, safety and caching structure are checked; answer quality is not.
 - **Fix mode against a real provider.** The git half is real; GitHub is a stub, so nothing here says how often a proposed patch is *correct* — only that a wrong one cannot escalate.
-- **Tests are not run before a PR is opened.** The graph can select which tests import the changed files; executing them needs a sandbox that does not exist yet.
-- **Languages beyond Python and TypeScript.** Tier 0 is measured; the rest is a plan.
+- **Whether running the tests catches anything.** They run now, and the pull request reports what happened; nobody has measured how often a proposed patch passes a suite it should have failed, because that needs proposed patches against real repositories.
+- **Languages by tier, rather than by node recall.** Presence recall is measured for eleven of the fourteen against an oracle. How well each one *resolves* — which tier its references reach — is reported per corpus but not compared against anything.
 - **Anything other than one machine.** M1 Pro, macOS, three repositories.

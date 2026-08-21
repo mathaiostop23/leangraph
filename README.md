@@ -336,13 +336,16 @@ measured it.
 - **Recall tops out near 44%.** Raising it needs better retrieval signals.
 - **Cost measured on one repository.** 40 bug-fix commits in django.
   Directionally strong, not a general claim.
-- **Sync still rewrites the whole graph.** The extraction cache is now a base
-  plus a delta, which was the larger half; the CSR is still rewritten, and
-  resolve still redoes
-  everything for a one-line change.
-- **Fix mode does not run the tests.** The graph knows which tests import a
-  changed file; running them safely needs a sandbox that is not built. Every
-  pull request it opens says so.
+- **Sync still rewrites the whole graph.** The extraction cache is a base plus a
+  delta now, which was the larger half — 33 MB down to 10 KB for a one-file
+  change. The CSR is still rewritten and resolve still redoes everything;
+  measured at ~15 ms of a 140 ms sync and declined, with the reasoning in
+  [BENCH.md](./BENCH.md).
+- **Fix mode runs the tests, but supplies no sandbox.** A repository sets
+  `test_command` and the patch is checked against its own suite. The process
+  gets a scrubbed environment, its own process group and a timeout — not
+  isolation. A `sandbox` wrapper is where the operator puts that, and leaving it
+  empty means the command runs as the server does.
 
 ---
 
