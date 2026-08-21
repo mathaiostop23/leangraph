@@ -74,6 +74,14 @@ class Handler(BaseHTTPRequestHandler):
             text = ("The failure is in `QuerySet.get_or_create`, which does not route the "
                     "lookup and the create through the same database alias.\n\n"
                     "A fix belongs in `django/db/models/query.py`.")
+            # The routing signal the server reads and strips. Sonnet reports
+            # what STUB_CONFIDENCE says; Opus always reports high, so an
+            # escalation cannot loop.
+            if "opus" in model:
+                text += "\n\nOn a second look the alias is chosen in `db_manager`."
+                text += "\nconfidence: high"
+            else:
+                text += f"\nconfidence: {os.environ.get('STUB_CONFIDENCE', 'high')}"
             # A cache hit on the repo preamble, which is the whole point of the
             # breakpoint placement.
             usage = {"input_tokens": 900, "output_tokens": 260,

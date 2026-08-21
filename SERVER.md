@@ -145,7 +145,7 @@ which outlasts a cold index of anything reasonable, and then fails with a reason
 | `GET` `POST` | `/repos` | list; register (clone + index in the background) |
 | `GET` | `/repos/{owner/name}` | state, counts, index time, last error |
 | `POST` | `/repos/{owner/name}/sync` | fetch and incrementally reindex |
-| `POST` | `/repos/{owner/name}/config` | `fix_mode`, `trigger_label`, `fix_label`, `max_nodes` |
+| `POST` | `/repos/{owner/name}/config` | `fix_mode`, `trigger_label`, `fix_label`, `max_nodes`, `escalate`, `test_command` |
 | `GET` | `/secrets` | names and hints only — never values |
 | `POST` `DELETE` | `/secrets/{name}` | store encrypted; remove |
 | `GET` | `/metrics` | Prometheus text: repos, queue depth, graph size, spend |
@@ -187,9 +187,20 @@ using it is worse than one that is obviously wrong.
 2 — ANALYSE · claude-sonnet-5 · effort high · 4096 max_tokens
     graph context + cached repo preamble → the comment
 
+2b — ESCALATE · claude-opus-5 · only where the repository opted in
+     and the analysis reported low confidence of its own accord
+                                              ↓
+
 3 — FIX · claude-sonnet-5 · effort high · 8192 max_tokens
     only where all three gates in §5.5 are open
 ```
+
+The analysis ends with a self-reported `confidence:` line, which the server
+reads and strips — it is for routing and would read as a leak in a comment.
+Escalation is off unless a repository asks: Opus is five times Sonnet's input
+price, and spending that on every issue to help the few that need it is the
+opposite of what this project argues. Both calls are billed under their own
+stage in the ledger, so what escalation costs is visible rather than folded in.
 
 ### Deduplication costs nothing, on purpose
 
@@ -434,10 +445,26 @@ The context the patch is written from is the graph selection — the same one th
 analysis used, and the reason a fix can be attempted at all without reading the
 repository.
 
-**Not built:** running the affected tests before opening the PR. The graph knows
-which tests import the changed files, so the selection is cheap; executing
-untrusted code in the server's container is the part that needs its own sandbox
-first. Until then the PR body says plainly that nothing was run.
+**Running the tests.** A repository can set `test_command`, and the patch is
+then checked against the repository's own suite before the branch is pushed —
+`{files}` in the command is replaced with the paths the patch touched. The pull
+request says which of four things happened: the suite passed, it failed, it
+timed out, or no command was configured and nothing ran. A failing suite still
+opens the pull request, because discarding the branch would hide the failure
+rather than report it.
+
+**This executes code from the repository, and there is no sandbox here.** Three
+things make that a decision rather than an accident: the command is the
+operator's, written into the repository's config and never inferred or asked of
+the model; fix mode is already off in three independent ways before a patch
+exists; and the patch cannot have touched CI configuration, dependency
+manifests, lockfiles, Dockerfiles or Makefiles, which is exactly what a hostile
+patch would reach for to turn "run the tests" into "run anything".
+
+What it does not provide is isolation. The command runs as the server process,
+with whatever that process can reach, under a ten-minute timeout with its output
+capped. Putting a boundary around it — a container, a user, a network policy —
+is the operator's to do, and setting `test_command` is saying so.
 
 ### 5.6 Key storage
 
@@ -467,7 +494,8 @@ repos        id, full_name, provider, path, default_branch, url, private,
              state (pending|cloning|indexing|ready|error),
              last_indexed_sha, last_indexed_at,
              node_count, edge_count, file_count, index_ms, error,
-             config_json          -- fix_mode, trigger_label, fix_label, max_nodes
+             config_json          -- fix_mode, labels, max_nodes, escalate,
+             --                       test_command
 jobs         id, kind, repo_id, payload, state, dedupe_key,
              attempts, defers, run_after, error,
              created_at, started_at, finished_at
@@ -495,9 +523,7 @@ rest was never considered.
 
 | | |
 |---|---|
-| **Opus escalation** | designed as a third stage for low-confidence answers. Analysis is Sonnet; there is no escalation path |
 | **Batch API** | 50% off, and useless without the backfill and nightly re-analysis it would serve. Neither exists, so this is one item and not two |
-| **Tests before a PR** | §5.5 |
 
 ---
 

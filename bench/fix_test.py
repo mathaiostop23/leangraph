@@ -190,8 +190,8 @@ def main():
         check("it targets the default branch", pr.get("base") == "main", pr.get("base"))
         check("from a branch of its own, not main",
               pr.get("head") == "leangraph/issue-3", pr.get("head"))
-        check("the body says it is untested",
-              "not been run or tested" in pr.get("body", ""))
+        check("the body says it is untested, because no command was configured",
+              "not run or tested" in pr.get("body", ""))
 
     # --- the remote actually has the change ----------------------------------
     branches = git("branch", "--list", "leangraph/issue-3", cwd=origin)

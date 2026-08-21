@@ -298,6 +298,47 @@ pub async fn triage(c: &Client, title: &str, body: &str) -> Result<(Triage, Repl
 /// So: `preamble` is the same bytes for every issue on a repository and sits
 /// before the breakpoint. `context` is issue-specific and goes in the user
 /// message, after it. Nothing volatile may appear before the breakpoint.
+/// How sure the analysis says it is.
+///
+/// Self-reported, which is worth exactly what self-reporting is worth — but it
+/// is the only signal available before a human reads the answer, and the
+/// alternative is escalating everything or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sure {
+    High,
+    Medium,
+    Low,
+}
+
+/// Split the self-reported confidence off the end of an answer.
+///
+/// The marker never reaches the issue. A comment that ends with a machine tag
+/// reads as a leak, and the line is for routing rather than for the reporter.
+pub fn split_confidence(text: &str) -> (String, Sure) {
+    let mut sure = Sure::Medium;
+    let mut kept: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let t = line
+            .trim()
+            .trim_start_matches("<!--")
+            .trim_end_matches("-->")
+            .trim();
+        // Case-insensitively: a model that capitalises the label would
+        // otherwise read as medium, which never escalates and never says why.
+        let lower = t.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("confidence:").map(str::trim) {
+            sure = match v {
+                "high" => Sure::High,
+                "low" => Sure::Low,
+                _ => Sure::Medium,
+            };
+            continue;
+        }
+        kept.push(line);
+    }
+    (kept.join("\n").trim_end().to_string(), sure)
+}
+
 pub async fn analyse(
     c: &Client,
     preamble: &str,
@@ -305,7 +346,30 @@ pub async fn analyse(
     title: &str,
     body: &str,
 ) -> Result<Reply> {
-    let model = "claude-sonnet-5";
+    analyse_with(c, "claude-sonnet-5", preamble, context, title, body).await
+}
+
+/// The same analysis, escalated. Same prompt and same context deliberately:
+/// changing both the model and the question would leave no way to tell which
+/// one moved the answer.
+pub async fn escalate(
+    c: &Client,
+    preamble: &str,
+    context: &str,
+    title: &str,
+    body: &str,
+) -> Result<Reply> {
+    analyse_with(c, "claude-opus-5", preamble, context, title, body).await
+}
+
+async fn analyse_with(
+    c: &Client,
+    model: &str,
+    preamble: &str,
+    context: &str,
+    title: &str,
+    body: &str,
+) -> Result<Reply> {
     let req = json!({
         "model": model,
         "max_tokens": 4096,
@@ -319,7 +383,10 @@ pub async fn analyse(
         "messages": [{ "role": "user", "content": format!(
             "## Code selected for this issue\n\n{context}\n\n{}\n\nUsing only the code \
     above, explain the likely cause and where a fix would go. Be specific about files \
-    and symbols. If what you were given is insufficient, say what else you would need.",
+    and symbols. If what you were given is insufficient, say what else you would need.\
+    \n\nEnd with a final line, exactly `confidence: high`, `confidence: medium` or \
+    `confidence: low`, reporting how sure you are of the cause. Say low when the \
+    selected code does not contain it.",
             wrap_issue(title, body)) }]
     });
     c.call(req, model).await
@@ -497,5 +564,43 @@ code analysis.\n\n{}\n",
 impl Triage {
     pub fn worth_analysing(&self) -> bool {
         self.kind.needs_analysis()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_confidence_marker_never_reaches_the_issue() {
+        // It is for routing. A comment that ends with a machine tag reads to
+        // the reporter as something leaking.
+        let (text, sure) = split_confidence(
+            "The descriptor is never closed.\n\nSee `send_file`.\nconfidence: low\n",
+        );
+        assert_eq!(sure, Sure::Low);
+        assert!(!text.contains("confidence"), "{text:?}");
+        assert!(text.ends_with("See `send_file`."), "{text:?}");
+    }
+
+    #[test]
+    fn it_is_read_however_the_model_spells_it() {
+        for (raw, want) in [
+            ("x\nconfidence: high", Sure::High),
+            ("x\nCONFIDENCE: Low", Sure::Low),
+            ("x\n<!-- confidence: low -->", Sure::Low),
+            ("x\n  confidence:  medium  ", Sure::Medium),
+        ] {
+            assert_eq!(split_confidence(raw).1, want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_answer_with_no_marker_is_not_treated_as_unsure() {
+        // Escalating on a missing line would escalate every malformed answer,
+        // which is the expensive direction to be wrong in.
+        let (text, sure) = split_confidence("Just an answer, no marker.");
+        assert_eq!(sure, Sure::Medium);
+        assert_eq!(text, "Just an answer, no marker.");
     }
 }

@@ -608,6 +608,20 @@ struct SetConfig {
     /// one whose issues are worth spending on.
     #[serde(default)]
     max_nodes: Option<usize>,
+    /// Ask a stronger model again when the analysis reports low confidence.
+    /// Off by default: it is five times the input price to help the minority
+    /// of issues that need it.
+    #[serde(default)]
+    escalate: Option<bool>,
+    /// Shell command that runs this repository's tests, with `{files}`
+    /// substituted for the paths a patch touched. Empty means none run, which
+    /// is the default and what the pull request will say.
+    ///
+    /// It executes in the throwaway worktree as the server process. There is
+    /// no sandbox here; putting a boundary around the server is the operator's
+    /// to do, and setting this is saying so.
+    #[serde(default)]
+    test_command: Option<String>,
 }
 
 async fn set_config(
@@ -632,6 +646,21 @@ async fn set_config(
     }
     if let Some(v) = req.max_nodes {
         cfg["max_nodes"] = json!(v);
+    }
+    if let Some(v) = req.escalate {
+        cfg["escalate"] = json!(u8::from(v));
+    }
+    if let Some(v) = &req.test_command {
+        cfg["test_command"] = json!(v);
+        if !v.trim().is_empty() {
+            tracing_line(
+                "warn",
+                &format!(
+                    "{}: will run `{v}` in a worktree on every proposed patch",
+                    repo.full_name
+                ),
+            );
+        }
     }
     app.db.set_repo_config(repo.id, &cfg.to_string())?;
     tracing_line(
@@ -1052,7 +1081,47 @@ If that is wrong, say so on the issue and I will look properly.\n",
         tokens += r2.usage.total();
         cached += r2.usage.cache_read;
         cost += agent::record(&app.db, run_id, repo.id, "analyse", &r2)?;
-        comment = r2.text;
+        let (text, sure) = agent::split_confidence(&r2.text);
+        comment = text;
+
+        // --- stage 2b: escalate, where the answer says it is not sure --------
+        // Off unless the repository asks for it. Opus is five times the input
+        // price of Sonnet, and spending that on every issue to help the few
+        // that need it is the opposite of what this project argues for. The
+        // ledger records both calls under their own stage, so an operator can
+        // see what escalation cost and whether the answer changed.
+        let deep = repo.setting_usize("escalate", 0) != 0;
+        if deep && sure == agent::Sure::Low {
+            tracing_line(
+                "info",
+                &format!(
+                    "{}#{}: analysis reported low confidence, escalating",
+                    repo.full_name, issue.number
+                ),
+            );
+            match agent::escalate(
+                &client,
+                &built.preamble,
+                &built.text,
+                &issue.title,
+                &issue.body,
+            )
+            .await
+            {
+                Ok(r3) => {
+                    tokens += r3.usage.total();
+                    cached += r3.usage.cache_read;
+                    cost += agent::record(&app.db, run_id, repo.id, "escalate", &r3)?;
+                    comment = agent::split_confidence(&r3.text).0;
+                }
+                // The Sonnet answer is already in hand. Losing it because the
+                // second opinion failed would be worse than not asking.
+                Err(e) => tracing_line(
+                    "warn",
+                    &format!("escalation failed, keeping the first answer: {e}"),
+                ),
+            }
+        }
         built_for_fix = Some(built);
     }
 
@@ -1249,8 +1318,19 @@ async fn propose_fix(
     let number = issue.number;
     let name = repo.full_name.clone();
     let tok = token.clone();
+    // The operator's command, or none. Never inferred from the tree and never
+    // asked of the model: what runs here is a decision somebody typed.
+    let test_command = repo.setting("test_command", "").into_owned();
     let proposal = tokio::task::spawn_blocking(move || {
-        fix::propose(&dir, &branch_base, number, &patch, Some(&tok), &name)
+        fix::propose(
+            &dir,
+            &branch_base,
+            number,
+            &patch,
+            Some(&tok),
+            &name,
+            Some(test_command.as_str()).filter(|c| !c.trim().is_empty()),
+        )
     })
     .await??;
 
@@ -1260,6 +1340,7 @@ async fn propose_fix(
         &repo.default_branch,
         issue.number,
         &token,
+        proposal.tests.as_ref(),
     )
     .await?;
     tracing_line(

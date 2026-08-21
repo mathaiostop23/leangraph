@@ -109,7 +109,8 @@ def main():
         repo = ROOT
     data = tempfile.mkdtemp(prefix="leangraph-retry-")
 
-    for script, port, extra in (("bench/stub_api.py", STUB_A, {"STUB_FAIL_FIRST": "2"}),
+    for script, port, extra in (("bench/stub_api.py", STUB_A,
+                                 {"STUB_FAIL_FIRST": "2", "STUB_CONFIDENCE": "low"}),
                                 ("bench/stub_github.py", STUB_G, {})):
         procs.append(subprocess.Popen(
             [sys.executable, os.path.join(ROOT, script), str(port)],
@@ -144,6 +145,31 @@ def main():
     db.close()
     check("it waited rather than spending its retries", row and row[0] == "done",
           f"state={row[0] if row else '?'} defers={row[1] if row else '?'}")
+
+    # --- escalation -----------------------------------------------------------
+    # Off unless the repository asks for it: a stronger model at five times the
+    # input price, to help the minority of issues that need it.
+    code, _ = req("/repos/pallets%2Fflask/config", {"fix_mode": False, "escalate": True})
+    check("escalation can be turned on per repository", code < 400, f"{code}")
+
+    webhook(402, "url_for builds the wrong host behind a proxy",
+            "SERVER_NAME is ignored when X-Forwarded-Host is set.")
+    got = wait(lambda: any(
+        c.get("model", "").startswith("claude-opus")
+        for c in req("/_seen", base=f"http://127.0.0.1:{STUB_A}", token=None)[1]["calls"]), 60)
+    check("a low-confidence answer is asked again of a stronger model", got)
+
+    db = sqlite3.connect(os.path.join(data, "leangraph.db"))
+    stages = [r[0] for r in db.execute(
+        "SELECT DISTINCT stage FROM cost_ledger").fetchall()]
+    db.close()
+    check("and both calls are billed under their own stage",
+          "analyse" in stages and "escalate" in stages, str(sorted(stages)))
+
+    posted = [c for c in req("/_seen", base=f"http://127.0.0.1:{STUB_G}",
+                             token=None)[1]["calls"] if c["path"].endswith("/comments")]
+    check("the confidence marker never reaches the issue",
+          all("confidence:" not in c["body"].get("body", "") for c in posted))
 
     # --- metrics --------------------------------------------------------------
     code, _ = req("/metrics", token=None)
