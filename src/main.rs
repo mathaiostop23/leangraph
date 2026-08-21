@@ -182,6 +182,10 @@ enum Cmd {
         /// both slower rather than either faster.
         #[arg(long, default_value_t = 1)]
         index_workers: usize,
+        /// Hours between looking for answered issues whose code has moved.
+        /// 0 turns re-analysis off for the whole install.
+        #[arg(long, default_value_t = 24)]
+        reanalyse_hours: u32,
         /// Label an issue must carry before the bot acts
         #[arg(long, default_value = "leangraph")]
         trigger_label: String,
@@ -545,6 +549,7 @@ fn main() -> Result<()> {
             data,
             workers,
             index_workers,
+            reanalyse_hours,
             trigger_label,
             fix_label,
             no_auth,
@@ -559,6 +564,7 @@ fn main() -> Result<()> {
                 data_dir: data.clone(),
                 workers: workers.max(1),
                 index_workers: index_workers.max(1),
+                reanalyse_hours,
                 // From the environment, never a flag: a secret in argv is
                 // visible in `ps` to every user on the box.
                 webhook_secret: std::env::var("LEANGRAPH_WEBHOOK_SECRET")

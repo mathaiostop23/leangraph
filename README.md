@@ -102,7 +102,10 @@ whether that passed, failed, timed out, or never ran.
 
 **The backlog** a repository already had is answered on request, as one **Batch
 API** submission at half price — asynchronous, which is useless for a webhook
-and right for work nobody is waiting on.
+and right for work nobody is waiting on. The same machinery runs the other way
+on a schedule: an answered issue is looked at again only when the code beneath
+it has moved, because a bot that posts the same conclusion every night is a bot
+people mute.
 
 ---
 
@@ -253,7 +256,7 @@ repository is Rust, which the indexer supports, so it can be its own corpus.
 
 ```
 69  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
-44  server unit          vetting rules, dedup scoring, SSRF, leases, test runs
+48  server unit          vetting rules, dedup scoring, SSRF, leases, sandboxing
  5  convergence          incremental sync equals a full reindex
 21  webhook gates        signature, replay, authorship, labels
 38  agent assertions     prompt safety, cache correctness
@@ -261,7 +264,7 @@ repository is Rust, which the indexer supports, so it can be its own corpus.
 10  deduplication, end-to-end
 17  resilience, end-to-end: rate limits, restarts, waiting, escalation
 14  gitlab, end-to-end: its own gates, and the one GitHub does not need
- 9  backfill, end-to-end through the Batch API
+12  backfill and re-analysis, end-to-end through the Batch API
 13  languages, each connecting two methods on a fixture
 ```
 

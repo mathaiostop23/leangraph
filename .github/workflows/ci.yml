@@ -93,7 +93,7 @@ jobs:
       # The batch path never touches the live message endpoint, and the ledger
       # has to know the discount — a cost model that does not would overstate
       # backfill by exactly the factor this project publishes.
-      - name: backfill through the batch api
+      - name: backfill and re-analysis through the batch api
         run: python3 bench/backfill_test.py .
 
       # Every language must still extract and resolve. A fixture rather than a

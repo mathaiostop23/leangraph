@@ -146,7 +146,8 @@ which outlasts a cold index of anything reasonable, and then fails with a reason
 | `GET` | `/repos/{owner/name}` | state, counts, index time, last error |
 | `POST` | `/repos/{owner/name}/sync` | fetch and incrementally reindex |
 | `POST` | `/repos/{owner/name}/backfill` | answer the open backlog as one batch, at half price |
-| `POST` | `/repos/{owner/name}/config` | `fix_mode`, `trigger_label`, `fix_label`, `max_nodes`, `escalate`, `test_command`, `sandbox` |
+| `POST` | `/repos/{owner/name}/reanalyse` | answer again where the code beneath an issue has moved |
+| `POST` | `/repos/{owner/name}/config` | `fix_mode`, `trigger_label`, `fix_label`, `max_nodes`, `escalate`, `test_command`, `sandbox`, `reanalyse` |
 | `GET` | `/secrets` | names and hints only — never values |
 | `POST` `DELETE` | `/secrets/{name}` | store encrypted; remove |
 | `GET` | `/metrics` | Prometheus text: repos, queue depth, graph size, spend |
@@ -222,6 +223,16 @@ The poll for results uses the same deferral the issue path does: waiting for a
 batch is not a failed attempt, and the ledger books the result at
 `BATCH_RATE` — a ledger that did not know about the discount would overstate
 what backfill cost by exactly the factor this project publishes.
+
+**Re-analysis** is the same machinery pointed the other way: answered issues,
+where the code beneath them has moved. The gate is the fingerprint rather than
+the clock. An issue's fingerprint carries the `NodeKey`s of the seeds the
+context builder picks, so if those are unchanged the analysis would be drawn
+from the same code and say the same thing — and a bot that posts the same
+conclusion every night is a bot people mute. `--reanalyse-hours` sets the
+cadence for the install and `reanalyse` opts a repository in; `POST
+/repos/{name}/reanalyse` runs it now, which is what an operator wants after a
+large merge.
 
 ### Deduplication costs nothing, on purpose
 
@@ -564,10 +575,10 @@ measured and declined with the number written down — a warm-handle pool
 (`Graph::open` is microseconds) and CSR patching (15 ms of a 140 ms sync, for a
 slower read path).
 
-What remains genuinely absent is smaller and stated where it belongs: nightly
-re-analysis of stale issues, which is the second thing the Batch API was meant
-to serve; and a sandbox around the test command, which §5.5 says is the
-operator's to provide.
+Nothing remains on it. What was last here — nightly re-analysis, and isolation
+for the test command — is built: the first as a fingerprint-gated batch (§3),
+the second as a wrapper the operator supplies and an environment the process no
+longer inherits (§5.5).
 
 ---
 
@@ -598,13 +609,13 @@ curl -X POST localhost:7777/repos \
 The server's share of the suite. All of it runs without the benchmark corpora.
 
 ```
-44  unit                 vetting rules, dedup scoring, SSRF, leases, test runs
+48  unit                 vetting rules, dedup scoring, SSRF, leases, sandboxing
 21  webhook gates        signature, replay, authorship, labels, form encoding
 38  agent assertions     prompt safety, cache correctness
 23  fix mode, end-to-end against a real git remote
 10  deduplication, end-to-end
 17  resilience, end-to-end: rate limits, restarts, waiting, escalation
- 9  backfill, end-to-end through the Batch API
+12  backfill and re-analysis, end-to-end through the Batch API
 ```
 
 `bench/server_test.sh` runs the ones that need a live server, a stub API and a

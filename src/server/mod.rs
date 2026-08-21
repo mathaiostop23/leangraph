@@ -54,6 +54,9 @@ pub struct Config {
     /// shared with issues would put a three-second answer behind a
     /// twelve-minute index.
     pub index_workers: usize,
+    /// How often to look for answered issues whose code has since moved. Zero
+    /// turns it off entirely.
+    pub reanalyse_hours: u32,
     /// Gate on everything except the webhook and the health probe.
     ///
     /// `None` means the operator passed `--no-auth` and accepts that anyone who
@@ -244,6 +247,32 @@ pub async fn run(cfg: Config) -> Result<()> {
         });
     }
 
+    // Re-analysis, for repositories that asked for it. On a timer rather than
+    // a cron expression: this has one job and a number of hours says it.
+    if app.cfg.reanalyse_hours > 0 {
+        let ticker = app.clone();
+        tokio::spawn(async move {
+            let every = std::time::Duration::from_secs(ticker.cfg.reanalyse_hours as u64 * 3600);
+            loop {
+                tokio::time::sleep(every).await;
+                let Ok(repos) = ticker.db.repos() else {
+                    continue;
+                };
+                for r in repos.iter().filter(|r| r.state == "ready") {
+                    if r.setting_usize("reanalyse", 0) == 0 {
+                        continue;
+                    }
+                    let _ = ticker.db.enqueue(
+                        "reanalyse",
+                        r.id,
+                        "{}",
+                        Some(&format!("reanalyse:{}", r.id)),
+                    );
+                }
+            }
+        });
+    }
+
     for i in 0..app.cfg.workers {
         let w = app.clone();
         tokio::spawn(async move { worker(w, i, &Db::ISSUE_KINDS).await });
@@ -262,6 +291,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .route("/repos/{name}", get(get_repo))
         .route("/repos/{name}/sync", post(sync_repo))
         .route("/repos/{name}/backfill", post(backfill_repo))
+        .route("/repos/{name}/reanalyse", post(reanalyse_repo))
         .route("/repos/{name}/config", post(set_config))
         .route("/secrets", get(list_secrets))
         .route("/secrets/{name}", post(put_secret).delete(delete_secret))
@@ -624,6 +654,30 @@ async fn backfill_repo(
     })))
 }
 
+/// Look now rather than waiting for the timer.
+///
+/// After a large merge an operator wants this on demand, and it is the same
+/// job the schedule enqueues — including the gate, so an issue whose code did
+/// not move still costs nothing.
+async fn reanalyse_repo(
+    State(app): State<App>,
+    AxPath(name): AxPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(repo) = app.db.repo_by_name(&name)? else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such repo".into()));
+    };
+    let fresh = app.db.enqueue(
+        "reanalyse",
+        repo.id,
+        "{}",
+        Some(&format!("reanalyse:{}", repo.id)),
+    )?;
+    Ok(Json(json!({
+        "queued": fresh,
+        "note": "answered issues whose graph seeds have changed since"
+    })))
+}
+
 #[derive(Deserialize)]
 struct SetConfig {
     /// Opt in to proposing patches. Off by default, and one of three
@@ -660,6 +714,10 @@ struct SetConfig {
     /// here. Empty means the command runs as the server process does.
     #[serde(default)]
     sandbox: Option<String>,
+    /// Re-analyse this repository's answered issues when the code beneath them
+    /// changes. Off by default — it spends money on a schedule.
+    #[serde(default)]
+    reanalyse: Option<bool>,
 }
 
 async fn set_config(
@@ -690,6 +748,9 @@ async fn set_config(
     }
     if let Some(v) = &req.sandbox {
         cfg["sandbox"] = json!(v);
+    }
+    if let Some(v) = req.reanalyse {
+        cfg["reanalyse"] = json!(u8::from(v));
     }
     if let Some(v) = &req.test_command {
         cfg["test_command"] = json!(v);
@@ -869,7 +930,8 @@ async fn run_job(app: &App, job: &db::Job) -> Result<Outcome> {
             .await
             .map(|()| Outcome::Done),
         "issue" => answer_issue(app, job).await,
-        "backfill" => backfill(app, job).await,
+        "backfill" => backfill(app, job, false).await,
+        "reanalyse" => backfill(app, job, true).await,
         "batch" => collect_batch(app, job).await,
         other => anyhow::bail!("unknown job kind `{other}`"),
     }
@@ -1278,7 +1340,15 @@ fn fingerprint_of(repo_path: &std::path::Path, title: &str, body: &str) -> dedup
 /// Triage is skipped. Its job is to classify and pull seed symbols out of the
 /// text, and the context builder already seeds itself from the issue text — so
 /// for a bulk run it is a Haiku call per issue that buys nothing.
-async fn backfill(app: &App, job: &db::Job) -> Result<Outcome> {
+/// Re-run the answered ones whose code has moved since.
+///
+/// The gate is the fingerprint, not the clock. An issue's fingerprint includes
+/// the `NodeKey`s of the seeds the context builder picks, so if those are
+/// unchanged the analysis would be drawn from the same code and would say the
+/// same thing — and a bot that posts the same conclusion every night is a bot
+/// people mute. Where the seeds *have* changed, the code the issue points at
+/// moved, and there is something new to say.
+async fn backfill(app: &App, job: &db::Job, only_stale: bool) -> Result<Outcome> {
     let repo = app.repo(job.repo_id)?;
     if repo.state != "ready" {
         return Ok(Outcome::Waiting(
@@ -1292,7 +1362,10 @@ async fn backfill(app: &App, job: &db::Job) -> Result<Outcome> {
 
     let open = list_open_issues(app, &repo).await?;
     if open.is_empty() {
-        tracing_line("info", &format!("{}: nothing to backfill", repo.full_name));
+        tracing_line(
+            "info",
+            &format!("{}: no open issues to look at", repo.full_name),
+        );
         return Ok(Outcome::Done);
     }
 
@@ -1302,12 +1375,30 @@ async fn backfill(app: &App, job: &db::Job) -> Result<Outcome> {
         let issue_id = app
             .db
             .upsert_issue(repo.id, number, &title, &body, "MEMBER")?;
-        // Already answered: the backlog is re-runnable and should not re-bill
-        // an issue whose comment is already on the thread.
-        if app.db.has_run(issue_id)? {
+        let answered = app.db.has_run(issue_id)?;
+        // Backfill is for what has never been answered — it is re-runnable and
+        // must not re-bill an issue whose comment is already on the thread.
+        // Re-analysis is the mirror: only what has.
+        if answered != only_stale {
             continue;
         }
         let repo_path = PathBuf::from(&repo.path);
+        let fresh_fp = {
+            let (p, t, b) = (repo_path.clone(), title.clone(), body.clone());
+            tokio::task::spawn_blocking(move || fingerprint_of(&p, &t, &b)).await?
+        };
+        if only_stale {
+            let before = app
+                .db
+                .fingerprint(issue_id)?
+                .map(|e| dedup::decode(&e).seeds)
+                .unwrap_or_default();
+            // Same seeds, same code, same answer. A bot that posts the same
+            // conclusion every night is a bot people mute.
+            if before == fresh_fp.seeds {
+                continue;
+            }
+        }
         let seed = format!("{title}\n\n{body}");
         let max_nodes = repo.setting_usize("max_nodes", crate::query::Budget::default().max_nodes);
         let built =
@@ -1322,12 +1413,24 @@ async fn backfill(app: &App, job: &db::Job) -> Result<Outcome> {
             &title,
             &body,
         ));
+        // Recorded now: the answer is going to be drawn from this selection,
+        // and the next run compares against it whether or not this one posts.
+        app.db
+            .set_fingerprint(issue_id, &dedup::encode(&fresh_fp))?;
         runs.push((cid, issue_id, run_id));
     }
     if items.is_empty() {
         tracing_line(
             "info",
-            &format!("{}: every open issue is already answered", repo.full_name),
+            &format!(
+                "{}: nothing to {}",
+                repo.full_name,
+                if only_stale {
+                    "re-analyse — no issue's code has moved"
+                } else {
+                    "backfill — every open issue is already answered"
+                }
+            ),
         );
         return Ok(Outcome::Done);
     }
@@ -1343,6 +1446,7 @@ async fn backfill(app: &App, job: &db::Job) -> Result<Outcome> {
     );
     let payload = json!({
         "batch": batch_id,
+        "stage": if only_stale { "reanalyse" } else { "backfill" },
         "runs": runs.iter().map(|(c, i, r)| json!({ "cid": c, "issue": i, "run": r }))
             .collect::<Vec<_>>(),
     });
@@ -1398,7 +1502,10 @@ async fn collect_batch(app: &App, job: &db::Job) -> Result<Outcome> {
             &app.db,
             run_id,
             repo.id,
-            "backfill",
+            payload
+                .get("stage")
+                .and_then(|x| x.as_str())
+                .unwrap_or("backfill"),
             &reply,
             agent::BATCH_RATE,
         )?;

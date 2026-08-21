@@ -494,7 +494,7 @@ impl Db {
         })
     }
 
-    pub const HEAVY_KINDS: [&'static str; 4] = ["clone", "index", "sync", "backfill"];
+    pub const HEAVY_KINDS: [&'static str; 5] = ["clone", "index", "sync", "backfill", "reanalyse"];
     /// `batch` sits here rather than with the heavy work: it is a poll against
     /// an HTTP endpoint that spends almost all its time waiting, and putting it
     /// behind an index would leave a finished batch unread for minutes.
@@ -767,6 +767,20 @@ impl Db {
                 .filter_map(std::result::Result::ok)
                 .collect();
             Ok(rows)
+        })
+    }
+
+    /// The stored fingerprint of one issue, if it has been analysed.
+    pub fn fingerprint(&self, issue_id: i64) -> Result<Option<String>> {
+        self.with(|c| {
+            let fp: Option<String> = c
+                .query_row(
+                    "SELECT fingerprint FROM issues WHERE id = ?1",
+                    params![issue_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(fp.filter(|f| !f.is_empty()))
         })
     }
 

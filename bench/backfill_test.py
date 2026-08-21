@@ -134,6 +134,36 @@ def main():
     check("a second run does not answer them again", len(comments()) == 2,
           f"{len(comments())} comment(s)")
 
+    # --- re-analysis, gated on the code having moved --------------------------
+    # The gate is the fingerprint, not the clock. A bot that posts the same
+    # conclusion every night is a bot people mute.
+    api("/repos/pallets%2Fflask/reanalyse", {})
+    time.sleep(4)
+    check("nothing is re-analysed while the code has not moved",
+          len(comments()) == 2, f"{len(comments())} comment(s)")
+
+    # Move the code the issues point at, and reindex so the seeds change.
+    src = os.path.join(os.path.abspath(repo), "src", "leangraph_probe.py")
+    os.makedirs(os.path.dirname(src), exist_ok=True)
+    with open(src, "w") as f:
+        f.write("def send_file(path):\n    return open(path)\n\n"
+                "def url_for(name):\n    return name\n")
+    try:
+        api("/repos/pallets%2Fflask/sync", {})
+        wait(lambda: api("/repos/pallets%2Fflask")[1]["repo"]["state"] == "ready", 90)
+        api("/repos/pallets%2Fflask/reanalyse", {})
+        moved = wait(lambda: len(comments()) > 2, 120)
+        check("once it has, the answer is drawn again", moved,
+              f"{len(comments())} comment(s)")
+        db = sqlite3.connect(os.path.join(data, "leangraph.db"))
+        stages = [r[0] for r in db.execute(
+            "SELECT DISTINCT stage FROM cost_ledger").fetchall()]
+        db.close()
+        check("and billed under `reanalyse`, not `backfill`",
+              "reanalyse" in stages, str(sorted(stages)))
+    finally:
+        os.remove(src)
+
     print(f"\n  {passed} passed, {failed} failed\n")
     shutil.rmtree(data, ignore_errors=True)
     return 1 if failed else 0
