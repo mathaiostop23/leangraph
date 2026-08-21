@@ -59,9 +59,22 @@ check("attempted delimiter escapes were neutralised", escapes_seen >= 1,
       "(no escape attempt reached the model — check the fixture)")
 
 # --- caching ------------------------------------------------------------------
-analyse = [c for c in calls if isinstance(c.get("system"), list)
-           and any("cache_control" in b for b in c["system"])]
-check("analyse calls carry a cache breakpoint", len(analyse) >= 1)
+# A breakpoint below the 1024-token minimum is worse than none: it costs a cache
+# write at 1.25x that can never be read back. So the rule is conditional, and
+# asserting only one side of it made this fail on a repository small enough to
+# be right — a small repo's preamble genuinely cannot reach the floor.
+system_calls = [c for c in calls if isinstance(c.get("system"), list)]
+analyse = [c for c in system_calls if any("cache_control" in b for b in c["system"])]
+longest = max((sum(len(b.get("text", "")) for b in c["system"])
+               for c in system_calls), default=0)
+big_enough = longest > 4096  # ~1024 tokens
+
+if big_enough:
+    check("a preamble over the minimum carries a cache breakpoint", len(analyse) >= 1,
+          f"(longest system block {longest} chars)")
+else:
+    check("a preamble under the minimum carries none — it could not be read back",
+          not analyse, f"(longest system block {longest} chars ~= {longest//4} tokens)")
 
 if len(analyse) >= 2:
     def prefix(c):

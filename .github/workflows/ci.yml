@@ -74,6 +74,22 @@ jobs:
       - name: retry and recovery
         run: python3 bench/retry_test.py .
 
+      # A second provider is where a security gate quietly comes out
+      # different. This runs the same ground the GitHub suite covers, against
+      # GitLab's payload shape, plus the member lookup that has no counterpart
+      # there and is the one gate here that could fail open.
+      - name: gitlab
+        run: python3 bench/gitlab_test.py .
+
+      # The webhook gates and the agent's prompt safety, against stubs. These
+      # need a live server and a repository that has answered two different
+      # issues, which is why they stopped being run by hand.
+      - name: webhook gates and agent assertions
+        run: bash bench/server_test.sh .
+
+      - name: deduplication
+        run: python3 bench/dedup_test.py .
+
       # Every language must still extract and resolve. A fixture rather than a
       # corpus, but it is the difference between "the spec compiles" and "the
       # spec works".

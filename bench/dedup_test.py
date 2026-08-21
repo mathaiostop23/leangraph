@@ -7,7 +7,7 @@ analysis call, no tokens — because the check runs before the API client is eve
 constructed. So this counts model calls at the stub and asserts the count does
 not move.
 
-Usage: bench/dedup_test.py
+Usage: bench/dedup_test.py [repo_path]
 """
 import hashlib, hmac, json, os, shutil, signal, subprocess, sys, tempfile, time
 import urllib.error, urllib.request
@@ -106,9 +106,12 @@ def cleanup():
 
 
 def main():
-    repo = os.path.join(ROOT, "..", ".bench-repos", "flask")
+    # Any repository the indexer supports will do; nothing here depends on what
+    # is in it. Falling back to leangraph itself is what lets this run in CI.
+    repo = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+        ROOT, "..", ".bench-repos", "flask")
     if not os.path.isdir(repo):
-        print("no repo at .bench-repos/flask"); return 1
+        repo = ROOT
     data = tempfile.mkdtemp(prefix="leangraph-dedup-")
 
     env = dict(os.environ,
