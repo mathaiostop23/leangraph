@@ -574,7 +574,7 @@ one, and the compose file says where to put it.
 ```
 ## Edge correctness — does confidence predict it?
 
-Nodes were verified against an oracle at 95% presence recall. Edges were counted
+Nodes were verified against an oracle at 96.5% presence recall across ten repositories. Edges were counted
 and never checked, which mattered more than it sounds: **69% of django's semantic
 edges and 83.5% of its call edges were name matches** — a name found somewhere in
 the repository, with no scope and no import behind it. If those were mostly
@@ -842,7 +842,7 @@ Three consecutive runs now agree on every row.
 - **Startup subtracted from CodeGraph.** Its 0.50 s is real and per-invocation for a CLI, but paid once for a daemon. Subtracting isolates algorithmic work, which is the fair comparison for engine design. Our own startup is not yet measured; Phase 3 will report it, and it is where a static binary with an mmap'd graph should win outright.
 - **Warm page cache on both sides.** Cold-cache runs are I/O-bound and compress the difference.
 - **Same file-size skip.** Both ignore files over 1 MB.
-- **Not yet a general claim.** One machine, one OS, three repos, two languages.
+- **Not yet a general claim.** The *speed* numbers are one machine, one OS, three repos, two languages. Node verification is broader — ten repositories across eleven languages, `bench/langverify.sh` — but timing was not re-measured on the seven added for it.
 - **CodeGraph's own progress line self-reports ~2.0 s for django**, but wall clock minus startup is 7.7 s — its counter evidently covers only part of the pipeline. We use wall clock, which is what a user experiences.
 
 ## What is still unmeasured

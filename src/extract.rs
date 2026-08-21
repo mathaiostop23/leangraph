@@ -103,6 +103,14 @@ fn walk(
                 if let Some(txt) = node_text(&nn, src) {
                     let idx = unit.defs.len() as DefIdx;
                     consumed.insert(nn.id());
+                    // A qualified name carries the class the lexical scope
+                    // does not: `void DBImpl::Get()` is a method wherever it is
+                    // written.
+                    let dk = if dk == DefKind::Function && spec.def_name_is_qualified(&node) {
+                        DefKind::Method
+                    } else {
+                        dk
+                    };
                     unit.defs.push(Def {
                         name: interner.get_or_intern(txt),
                         kind: reclassify(dk, &unit.defs, scope),
@@ -499,6 +507,107 @@ mod tests {
         assert!(
             names.contains(&"before"),
             "definitions before the error survive: {names:?}"
+        );
+    }
+
+    fn names(c: &Corpus) -> Vec<String> {
+        c.units[0]
+            .defs
+            .iter()
+            .map(|d| c.interner.resolve(&d.name).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_class_property_is_a_definition_where_the_grammar_labels_no_field() {
+        // Kotlin puts the name under an unlabelled `variable_declaration`, so
+        // requiring a name field dropped every `val` and `var` in the language:
+        // 2,056 symbols in okhttp, 73.5% recall to 93.5% when it was fixed.
+        let c = Corpus::build(&[(
+            "a.kt",
+            "class Demo(private val ctor: String) {\n\
+             \x20 private val client = build()\n\
+             \x20 private lateinit var server: Server\n\
+             }\n\
+             enum class Color { RED }\n",
+        )]);
+        let got = names(&c);
+        for want in ["client", "server", "ctor", "RED"] {
+            assert!(
+                got.contains(&want.to_string()),
+                "{want} missing from {got:?}"
+            );
+        }
+        assert!(
+            !got.contains(&"build".to_string()),
+            "the initialiser is not the name: {got:?}"
+        );
+        assert!(
+            !got.contains(&"Server".to_string()),
+            "nor is the type: {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_php_property_is_named_without_its_sigil_and_a_const_counts() {
+        // PHP labels the name `variable_name`, whose text is `$errorLevelMap`.
+        // Rejecting that wrapper lost every class property — all 376 of
+        // monolog's missing symbols — and class constants were not in the spec
+        // at all.
+        let c = Corpus::build(&[(
+            "a.php",
+            "<?php\nclass H {\n\
+             \x20 private const FATAL = 1;\n\
+             \x20 private array $errorLevelMap = [];\n\
+             \x20 protected $fatalLevel;\n\
+             }\n",
+        )]);
+        let got = names(&c);
+        for want in ["FATAL", "errorLevelMap", "fatalLevel"] {
+            assert!(
+                got.contains(&want.to_string()),
+                "{want} missing from {got:?}"
+            );
+        }
+        assert!(
+            !got.iter().any(|n| n.starts_with('$')),
+            "the sigil belongs to the syntax, not the name: {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_c_typedef_and_union_are_definitions() {
+        // `uv.h` is mostly typedefs, and 184 of libuv's missing symbols were
+        // the type names the rest of the codebase refers to.
+        let c = Corpus::build(&[(
+            "a.c",
+            "typedef struct uv_loop_s uv_loop_t;\nunion payload { int a; };\n",
+        )]);
+        let got = names(&c);
+        assert!(got.contains(&"uv_loop_t".to_string()), "{got:?}");
+        assert!(got.contains(&"payload".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn an_out_of_line_definition_is_a_method() {
+        // The class is named in the declarator, not in the enclosing scope.
+        let c = Corpus::build(&[(
+            "a.cc",
+            "namespace db {\nclass Impl { public: int Get(int k); };\n\
+             int Impl::Get(int k) { return k; }\n}\n",
+        )]);
+        let get = c.units[0]
+            .defs
+            .iter()
+            .find(|d| c.interner.resolve(&d.name) == "Get" && matches!(d.kind, DefKind::Method));
+        assert!(
+            get.is_some(),
+            "Impl::Get must be a method, got {:?}",
+            c.units[0]
+                .defs
+                .iter()
+                .map(|d| (c.interner.resolve(&d.name), d.kind))
+                .collect::<Vec<_>>()
         );
     }
 

@@ -176,10 +176,7 @@ pub fn run(cfg: &Config) -> Result<Summary> {
                     {
                         return None;
                     }
-                    let lang = p
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .and_then(Lang::from_ext)?;
+                    let lang = Lang::for_path(&p)?;
                     Some((p, lang))
                 })
                 .collect::<Vec<_>>()
@@ -225,11 +222,7 @@ pub fn run(cfg: &Config) -> Result<Summary> {
                         return WalkState::Continue;
                     }
                     let path = entry.path();
-                    let Some(lang) = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .and_then(Lang::from_ext)
-                    else {
+                    let Some(lang) = Lang::for_path(path) else {
                         // Only code counts. Translations, docs and images are
                         // not a language gap and reporting them as one reads as
                         // a malfunction.

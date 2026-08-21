@@ -256,6 +256,28 @@ impl Lang {
         }
     }
 
+    /// The language of a file, deciding `.h` by what is inside it.
+    ///
+    /// `.h` is shared by C and C++, and extension alone sent every C++ header
+    /// through the C grammar — which has no `class_specifier`. leveldb is 56
+    /// headers to 33 source files, so its classes and every method on them were
+    /// absent: 376 of its symbols were labelled a plain function because the
+    /// class they belonged to was never a node.
+    ///
+    /// The check is deliberately one-directional. A C++ marker means C++; the
+    /// absence of one means C, which is what libuv's 38 headers are and what
+    /// leveldb's own `include/leveldb/c.h` is. Nothing here can turn a C header
+    /// into a C++ one by accident, because `namespace`, `template<`, an access
+    /// specifier and `x::y` are all invalid C.
+    pub fn for_path(path: &std::path::Path) -> Option<Lang> {
+        let ext = path.extension().and_then(|e| e.to_str())?;
+        let lang = Lang::from_ext(ext)?;
+        if lang == Lang::C && ext == "h" && header_looks_like_cpp(path) {
+            return Some(Lang::Cpp);
+        }
+        Some(lang)
+    }
+
     pub fn ts_language(self) -> Language {
         match self {
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
@@ -704,6 +726,12 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("preproc_function_def", DefKind::Function),
                     ("struct_specifier", DefKind::Class),
                     ("enum_specifier", DefKind::Class),
+                    ("union_specifier", DefKind::Class),
+                    // A typedef is how C names a type at all, and `uv.h` is
+                    // mostly typedefs — 184 of libuv's missing symbols were
+                    // `uv_loop_t`, `write_req_t` and their kin, every one of
+                    // them a name the rest of the codebase refers to.
+                    ("type_definition", DefKind::Interface),
                 ],
             ),
             refs: tagged(&l, &[("call_expression", RefKind::Call)]),
@@ -735,6 +763,9 @@ pub fn spec_for(lang: Lang) -> Spec {
                     ("struct_specifier", DefKind::Class),
                     ("enum_specifier", DefKind::Class),
                     ("alias_declaration", DefKind::Interface),
+                    // C++ has both spellings and real code uses both.
+                    ("type_definition", DefKind::Interface),
+                    ("union_specifier", DefKind::Class),
                     ("preproc_function_def", DefKind::Function),
                 ],
             ),
@@ -887,7 +918,10 @@ pub fn spec_for(lang: Lang) -> Spec {
             cond_defs: kinds(&l, &["assignment_expression"]),
             f_value: fields(&l, &["right"]),
             fn_values: kinds(&l, &["anonymous_function", "arrow_function"]),
-            var_defs: kinds(&l, &["property_element"]),
+            // `const_element` alongside the property: a PHP class constant is
+            // a declaration like any other, and leaving it out lost every
+            // `private const FATAL_ERRORS = [...]` in the corpus.
+            var_defs: kinds(&l, &["property_element", "const_element"]),
             f_var_name: fields(&l, &["name"]),
             idents: kinds(&l, &["name"]),
             heritage: kinds(&l, &["base_clause", "class_interface_clause"]),
@@ -1076,7 +1110,6 @@ impl Spec {
         if !self.var_defs.contains(&node.kind_id()) {
             return None;
         }
-        let n = first_field(node, &self.f_var_name)?;
         // The spec already says which node kinds name things in this language;
         // a hardcoded list here contradicted it. Ruby spells a constant
         // `constant`, so every module-level `ANSI_COLORS` was rejected by a
@@ -1086,7 +1119,30 @@ impl Spec {
         // `property_identifier` stays as an addition rather than a member of
         // `idents`: TypeScript needs it to name a class field, and putting it in
         // `idents` would turn every property *access* into a reference.
-        (self.is_ident(n.kind_id()) || n.kind() == "property_identifier").then_some(n)
+        if let Some(n) = first_field(node, &self.f_var_name) {
+            if self.is_ident(n.kind_id()) || n.kind() == "property_identifier" {
+                return Some(n);
+            }
+            // The field exists but names a wrapper. PHP labels a
+            // `property_element`'s name as `variable_name`, whose text is
+            // `$errorLevelMap` — the sigil belongs to the node and the bare
+            // identifier is one level down. Rejecting the wrapper dropped every
+            // class property in the language: 376 symbols in monolog, which was
+            // all of what it was missing.
+            return first_ident_within(&n, self, 1);
+        }
+        // No field to ask. Kotlin labels nothing inside a `property_declaration`
+        // — the name sits under an unlabelled `variable_declaration` — so
+        // requiring a field dropped every `val` and `var` in the language:
+        // 2,056 symbols in okhttp, three quarters of everything it was missing,
+        // and the spec listed the node all along.
+        //
+        // Document order is what makes this a rule rather than a guess. In
+        // `val client: OkHttpClient` the name precedes the type, and in
+        // `val x = f()` it precedes the initialiser, so the first identifier
+        // is the declared one. Depth two covers every shape that needs it and
+        // stops the walk well short of an expression body.
+        first_ident_within(node, self, 2)
     }
 
     #[inline]
@@ -1183,6 +1239,37 @@ impl Spec {
             }
         }
         Some(n)
+    }
+
+    /// Did this definition's name arrive through a scope qualifier?
+    ///
+    /// `Status DBImpl::Get(...)` sits at file scope: the class it belongs to is
+    /// named in the declarator, not in the enclosing scope, so `reclassify` —
+    /// which only looks at what lexically encloses a definition — cannot see it
+    /// and calls it a plain function. Out-of-line definitions are how C++ is
+    /// normally written, and 343 of leveldb's methods were labelled functions
+    /// for exactly this reason.
+    ///
+    /// Compared by name rather than by a spec field: `qualified_identifier` is
+    /// a C++ construct and no other grammar here has one, so a fifteenth entry
+    /// in every spec literal would be fourteen blanks and one value.
+    pub fn def_name_is_qualified(&self, def: &Node) -> bool {
+        let Some(mut n) = first_field(def, &self.f_name) else {
+            return false;
+        };
+        for _ in 0..4 {
+            if n.kind() == "qualified_identifier" {
+                return true;
+            }
+            if self.is_ident(n.kind_id()) {
+                return false;
+            }
+            match first_field(&n, &self.f_name) {
+                Some(inner) if inner.id() != n.id() => n = inner,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// The identifier node naming a call's target.
@@ -1301,6 +1388,66 @@ impl Spec {
     }
 }
 
+/// Does this header use something that is not C?
+///
+/// A prefix rather than the whole file: the markers sit near the top, after the
+/// licence and the includes, and a header large enough to exceed this is a
+/// generated one where the first 64 KB is representative anyway.
+fn header_looks_like_cpp(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = f.read(&mut buf).unwrap_or(0);
+    let text = String::from_utf8_lossy(&buf[..n]);
+
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("namespace ")
+            || t.starts_with("template<")
+            || t.starts_with("template <")
+            || t.starts_with("public:")
+            || t.starts_with("private:")
+            || t.starts_with("protected:")
+        {
+            return true;
+        }
+    }
+    // Scope resolution. What follows `::` must start like an identifier —
+    // a letter or an underscore, never a digit — which is both what C++ allows
+    // and what keeps `fe80::1` in a comment from reading as C++. It does not
+    // separate `fe80::abcd`, and nothing short of parsing would; the cost of
+    // that miss is a C header read by the C++ grammar, which parses it.
+    let b = text.as_bytes();
+    b.windows(4).any(|w| {
+        w[1] == b':'
+            && w[2] == b':'
+            && (w[0].is_ascii_alphanumeric() || w[0] == b'_')
+            && (w[3].is_ascii_alphabetic() || w[3] == b'_')
+    })
+}
+
+/// First identifier at or below `node`, in document order, within `depth`.
+///
+/// Only reached where a grammar labels no field for the name. The depth cap is
+/// the point: an unbounded search would eventually find an identifier in an
+/// initialiser and name the variable after whatever it was assigned.
+fn first_ident_within<'t>(node: &Node<'t>, spec: &Spec, depth: u32) -> Option<Node<'t>> {
+    let mut cur = node.walk();
+    for child in node.named_children(&mut cur) {
+        if spec.is_ident(child.kind_id()) {
+            return Some(child);
+        }
+        if depth > 0 {
+            if let Some(found) = first_ident_within(&child, spec, depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 #[inline]
 fn first_field<'t>(node: &Node<'t>, field_ids: &[u16]) -> Option<Node<'t>> {
     field_ids.iter().find_map(|f| node.child_by_field_id(*f))
@@ -1356,6 +1503,62 @@ mod tests {
             assert!(!s.defs.is_empty(), "{:?}: no definition kinds", lang);
             assert!(!s.refs.is_empty(), "{:?}: no reference kinds", lang);
             assert!(!s.idents.is_empty(), "{:?}: no identifier kinds", lang);
+        }
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    use crate::testkit::TempTree;
+
+    #[test]
+    fn a_header_using_cpp_is_read_as_cpp() {
+        // leveldb is 56 headers to 33 source files. Sending them all through
+        // the C grammar, which has no `class_specifier`, meant its classes were
+        // never nodes and every method on them was labelled a plain function.
+        let t = TempTree::new("hdr");
+        for (name, src, want) in [
+            ("ns.h", "namespace leveldb {\nclass DB {};\n}\n", Lang::Cpp),
+            (
+                "tpl.h",
+                "template <typename T>\nT max(T a, T b);\n",
+                Lang::Cpp,
+            ),
+            ("acc.h", "struct S {\n public:\n  int x;\n};\n", Lang::Cpp),
+            ("scope.h", "int n = leveldb::kDefault;\n", Lang::Cpp),
+            // A C header, including one written to be callable from C++.
+            ("plain.h", "typedef struct uv_loop_s uv_loop_t;\n", Lang::C),
+            (
+                "extern.h",
+                "#ifdef __cplusplus\nextern \"C\" {\n#endif\nint uv_run(void);\n",
+                Lang::C,
+            ),
+            // `::` inside a comment is not scope resolution.
+            (
+                "comment.h",
+                "/* bind to fe80::1 for tests */\nint listen_on(void);\n",
+                Lang::C,
+            ),
+        ] {
+            let p = t.write(name, src);
+            assert_eq!(
+                Lang::for_path(&p),
+                Some(want),
+                "{name} should be read as {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_extension_that_is_not_ambiguous_is_not_read_from_disk() {
+        // `for_path` must agree with `from_ext` everywhere except `.h`, or the
+        // two discovery paths could disagree about the same file.
+        let t = TempTree::new("hdr2");
+        for name in ["a.c", "a.cc", "a.py", "a.ts", "a.rs", "a.go", "a.kt"] {
+            let p = t.write(name, "namespace x { }\n");
+            let ext = name.split('.').next_back().unwrap();
+            assert_eq!(Lang::for_path(&p), Lang::from_ext(ext), "{name}");
         }
     }
 }

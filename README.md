@@ -20,9 +20,10 @@ leangraph install                    # wire it into Claude Code, Cursor, Codex
 Needs a Rust toolchain (1.82+) and nothing else — no runtime, no database, no
 services. There are no prebuilt binaries yet.
 
-**Status: early.** Fourteen languages, but only Python and TypeScript are verified against an oracle. The numbers below are measured
-and reproducible — every one of them comes from a script in `bench/` that you
-can run yourself. The language coverage is not yet competitive; see
+**Status: early.** Fourteen languages, eleven of them verified against an
+oracle on a real repository — 96.5% presence recall across ten corpora. The
+numbers below are measured and reproducible: every one comes from a script in
+`bench/` that you can run yourself. See also
 [what it does not do](#what-it-does-not-do).
 
 ---
@@ -144,23 +145,42 @@ Three independent checks, because a fast graph that is wrong is just wrong.
 **Nodes** — differential against CodeGraph (`bench/verify.py`), on a real
 repository per language rather than a fixture:
 
-| corpus | language | presence recall |
-|---|---|---:|
-| flask | python | 100.0% |
-| django | python | 100.0% |
-| excalidraw | typescript | 85.1% |
-| leangraph | rust | 100.0% |
-| pkg/errors | go | 100.0% |
-| JSON-java | java | 98.7% |
-| paint | ruby | 97.3% |
+| corpus | language | presence recall | kind agreement |
+|---|---|---:|---:|
+| flask | python | 100.0% | 100.0% |
+| django | python | 100.0% | 100.0% |
+| Newtonsoft.Json | c# | 100.0% | 100.0% |
+| monolog | php | 100.0% | 100.0% |
+| leangraph | rust | 100.0% | — |
+| pkg/errors | go | 100.0% | — |
+| upickle | scala | 99.7% | 97.3% |
+| JSON-java | java | 98.7% | — |
+| paint | ruby | 97.3% | — |
+| leveldb | c++ | 96.3% | 91.1% |
+| Alamofire | swift | 95.3% | 95.2% |
+| libuv | c | 95.2% | 92.4% |
+| okhttp | kotlin | 93.5% | 89.9% |
+| excalidraw | typescript | 85.1% | 84.5% |
 
-excalidraw's gap is function-local variables, skipped deliberately. The other
-six are within two points of an independent implementation.
+**96.5% across the ten corpora measured together.** excalidraw's gap is
+function-local variables, skipped deliberately.
 
-Doing this found three gaps a fixture never would: Rust module constants and
-type aliases were not extracted at all, and `var_def_name` carried a hardcoded
-list of identifier node kinds — written for Python and TypeScript — that
-rejected every Ruby constant. Rust went 83.6% → 100%, Ruby 62.2% → 97.3%.
+Every language here was checked against a real repository rather than a
+fixture, and doing that is what found the gaps — seven times now, in seven
+languages that all passed the fixture test:
+
+| | was | is | what was wrong |
+|---|---:|---:|---|
+| kotlin | 73.5% | 93.5% | the grammar labels no field for a property's name, and requiring one dropped every `val` and `var` — 2,056 symbols |
+| php | 81.0% | 100.0% | the name field points at `$errorLevelMap`, sigil included; the bare identifier is a level below. Class constants were not in the spec at all |
+| c | 86.9% | 95.2% | `typedef` was not a definition, and `uv.h` is mostly typedefs |
+| c++ | 89.3% | 96.3% | `.h` was read as C by extension, so in a repository that is 56 headers to 33 sources the classes were never nodes. Out-of-line `void Impl::Get()` was a plain function, because the class is named in the declarator and not in the enclosing scope |
+| rust | 83.6% | 100.0% | module constants and type aliases were not extracted |
+| ruby | 62.2% | 97.3% | `var_def_name` carried a hardcoded list of identifier node kinds, written for Python and TypeScript, that rejected every Ruby constant |
+
+Kind agreement is reported separately because it is a different failure: a node
+we extract but label `function` where the oracle says `method` is present in
+the graph and findable, and the fix is not the same one.
 
 **Edges** — flask's own test suite is run under `sys.monitoring` and every call
 that actually happened is recorded (`bench/edgetrace.py`). An observed edge
