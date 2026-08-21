@@ -261,6 +261,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .route("/repos", get(list_repos).post(add_repo))
         .route("/repos/{name}", get(get_repo))
         .route("/repos/{name}/sync", post(sync_repo))
+        .route("/repos/{name}/backfill", post(backfill_repo))
         .route("/repos/{name}/config", post(set_config))
         .route("/secrets", get(list_secrets))
         .route("/secrets/{name}", post(put_secret).delete(delete_secret))
@@ -591,6 +592,38 @@ async fn get_repo(
     }
 }
 
+/// Answer the backlog a repository already had.
+///
+/// Deliberately a request rather than something registration does on its own: a
+/// repository with four hundred open issues would otherwise spend the
+/// operator's budget the moment it was added.
+async fn backfill_repo(
+    State(app): State<App>,
+    AxPath(name): AxPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(repo) = app.db.repo_by_name(&name)? else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such repo".into()));
+    };
+    let fresh = app.db.enqueue(
+        "backfill",
+        repo.id,
+        "{}",
+        Some(&format!("backfill:{}", repo.id)),
+    )?;
+    tracing_line(
+        "info",
+        &format!(
+            "{}: backfill {}",
+            repo.full_name,
+            if fresh { "queued" } else { "already queued" }
+        ),
+    );
+    Ok(Json(json!({
+        "queued": fresh,
+        "note": "open issues carrying the trigger label, analysed as one batch at half price"
+    })))
+}
+
 #[derive(Deserialize)]
 struct SetConfig {
     /// Opt in to proposing patches. Off by default, and one of three
@@ -828,6 +861,8 @@ async fn run_job(app: &App, job: &db::Job) -> Result<Outcome> {
             .await
             .map(|()| Outcome::Done),
         "issue" => answer_issue(app, job).await,
+        "backfill" => backfill(app, job).await,
+        "batch" => collect_batch(app, job).await,
         other => anyhow::bail!("unknown job kind `{other}`"),
     }
 }
@@ -1223,6 +1258,232 @@ struct Built {
 fn fingerprint_of(repo_path: &std::path::Path, title: &str, body: &str) -> dedup::Fingerprint {
     let g = crate::graph::Graph::open(&repo_path.join(".leangraph").join("graph.bin")).ok();
     dedup::fingerprint(g.as_ref(), title, body)
+}
+
+/// Analyse every open issue at once, at half price.
+///
+/// The Batch API is 50% off and asynchronous — usually under an hour, up to 24.
+/// That is useless for a webhook, where latency is the product, and exactly
+/// right for the work nobody is waiting on: the backlog a repository already
+/// had when it was registered.
+///
+/// Triage is skipped. Its job is to classify and pull seed symbols out of the
+/// text, and the context builder already seeds itself from the issue text — so
+/// for a bulk run it is a Haiku call per issue that buys nothing.
+async fn backfill(app: &App, job: &db::Job) -> Result<Outcome> {
+    let repo = app.repo(job.repo_id)?;
+    if repo.state != "ready" {
+        return Ok(Outcome::Waiting(
+            10,
+            format!("{} is {}", repo.full_name, repo.state),
+        ));
+    }
+    let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
+        anyhow::bail!("backfill needs an API key");
+    };
+
+    let open = list_open_issues(app, &repo).await?;
+    if open.is_empty() {
+        tracing_line("info", &format!("{}: nothing to backfill", repo.full_name));
+        return Ok(Outcome::Done);
+    }
+
+    let mut items = Vec::new();
+    let mut runs: Vec<(String, i64, i64)> = Vec::new(); // custom_id, issue id, run id
+    for (number, title, body) in open {
+        let issue_id = app
+            .db
+            .upsert_issue(repo.id, number, &title, &body, "MEMBER")?;
+        // Already answered: the backlog is re-runnable and should not re-bill
+        // an issue whose comment is already on the thread.
+        if app.db.has_run(issue_id)? {
+            continue;
+        }
+        let repo_path = PathBuf::from(&repo.path);
+        let seed = format!("{title}\n\n{body}");
+        let max_nodes = repo.setting_usize("max_nodes", crate::query::Budget::default().max_nodes);
+        let built =
+            tokio::task::spawn_blocking(move || build_context(&repo_path, &seed, max_nodes))
+                .await??;
+        let run_id = app.db.start_run(issue_id, repo.id)?;
+        let cid = format!("issue-{issue_id}");
+        items.push(agent::batch_analyse(
+            &cid,
+            &built.preamble,
+            &built.text,
+            &title,
+            &body,
+        ));
+        runs.push((cid, issue_id, run_id));
+    }
+    if items.is_empty() {
+        tracing_line(
+            "info",
+            &format!("{}: every open issue is already answered", repo.full_name),
+        );
+        return Ok(Outcome::Done);
+    }
+
+    let batch_id = client.batch_submit(&items).await?;
+    tracing_line(
+        "info",
+        &format!(
+            "{}: {} issue(s) submitted as batch {batch_id} at half price",
+            repo.full_name,
+            items.len()
+        ),
+    );
+    let payload = json!({
+        "batch": batch_id,
+        "runs": runs.iter().map(|(c, i, r)| json!({ "cid": c, "issue": i, "run": r }))
+            .collect::<Vec<_>>(),
+    });
+    app.db
+        .enqueue("batch", repo.id, &payload.to_string(), None)?;
+    Ok(Outcome::Done)
+}
+
+/// Poll a submitted batch, and post what came back.
+///
+/// The waiting is the deferral mechanism the issue path already uses: a job
+/// standing aside for something it depends on, not an attempt that failed.
+async fn collect_batch(app: &App, job: &db::Job) -> Result<Outcome> {
+    let payload: serde_json::Value = serde_json::from_str(&job.payload).unwrap_or_default();
+    let batch_id = payload
+        .get("batch")
+        .and_then(|x| x.as_str())
+        .context("batch job without a batch id")?;
+    let repo = app.repo(job.repo_id)?;
+    let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
+        anyhow::bail!("collecting a batch needs an API key");
+    };
+
+    let Some(results) = client.batch_results(batch_id).await? else {
+        return Ok(Outcome::Waiting(60, format!("batch {batch_id} is running")));
+    };
+
+    let by_cid: std::collections::HashMap<&str, (i64, i64)> = payload
+        .get("runs")
+        .and_then(|x| x.as_array())
+        .map(|rs| {
+            rs.iter()
+                .filter_map(|r| {
+                    Some((
+                        r.get("cid")?.as_str()?,
+                        (r.get("issue")?.as_i64()?, r.get("run")?.as_i64()?),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let token = app.provider_token(&repo);
+    let mut posted = 0usize;
+    for (cid, reply) in results {
+        let Some(&(issue_id, run_id)) = by_cid.get(cid.as_str()) else {
+            continue;
+        };
+        let Some(issue) = app.db.issue(issue_id)? else {
+            continue;
+        };
+        let cost = agent::record_at(
+            &app.db,
+            run_id,
+            repo.id,
+            "backfill",
+            &reply,
+            agent::BATCH_RATE,
+        )?;
+        let mut comment = agent::split_confidence(&reply.text).0;
+        comment.push_str(&agent::receipt(
+            0,
+            reply.usage.total(),
+            reply.usage.cache_read,
+            cost,
+        ));
+        let ok = post_comment(
+            &repo.provider,
+            &repo.full_name,
+            issue.number,
+            &comment,
+            token.as_deref(),
+        )
+        .await;
+        app.db.finish_run(
+            run_id,
+            if ok.is_ok() { "posted" } else { "post-failed" },
+            Some("backfill"),
+            "[]",
+            reply.usage.total(),
+            cost,
+            0,
+            None,
+        )?;
+        posted += 1;
+    }
+    tracing_line(
+        "info",
+        &format!(
+            "{}: batch {batch_id} answered {posted} issue(s)",
+            repo.full_name
+        ),
+    );
+    Ok(Outcome::Done)
+}
+
+/// Open issues carrying the trigger label, from whichever host this is.
+async fn list_open_issues(app: &App, repo: &db::Repo) -> Result<Vec<(i64, String, String)>> {
+    let label = app.trigger_label(repo);
+    let token = app.provider_token(repo);
+    let client = reqwest::Client::new();
+    let req = if repo.provider == "gitlab" {
+        client
+            .get(format!(
+                "{}/api/v4/projects/{}/issues?state=opened&labels={}&per_page=100",
+                gitlab_api_base(),
+                urlencoding_encode(&repo.full_name),
+                urlencoding_encode(&label)
+            ))
+            .header("private-token", token.unwrap_or_default())
+    } else {
+        client
+            .get(format!(
+                "{}/repos/{}/issues?state=open&labels={}&per_page=100",
+                fix::api_base(),
+                repo.full_name,
+                urlencoding_encode(&label)
+            ))
+            .header(
+                "authorization",
+                format!("Bearer {}", token.unwrap_or_default()),
+            )
+            .header("accept", "application/vnd.github+json")
+    };
+    let res = req.header("user-agent", "leangraph").send().await?;
+    if !res.status().is_success() {
+        anyhow::bail!("{} returned {}", repo.provider, res.status());
+    }
+    let v: serde_json::Value = res.json().await?;
+    let gitlab = repo.provider == "gitlab";
+    Ok(v.as_array()
+        .map(|xs| {
+            xs.iter()
+                // A pull request arrives in GitHub's issue list too, and it is
+                // a different thing.
+                .filter(|x| x.get("pull_request").is_none())
+                .filter_map(|x| {
+                    let number = x.get(if gitlab { "iid" } else { "number" })?.as_i64()?;
+                    let title = x.get("title")?.as_str()?.to_string();
+                    let body = x
+                        .get(if gitlab { "description" } else { "body" })
+                        .and_then(|b| b.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    Some((number, title, body))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Graph lookup is synchronous and mmap-backed; it belongs on the blocking pool

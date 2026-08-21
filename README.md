@@ -96,7 +96,13 @@ nothing at all.
 three independent ways: the repository must opt in, the issue needs a second
 label, and a write token must exist. It will not push to the default branch,
 force-push, merge, or touch CI configuration, dependency manifests or lockfiles
-— refusals enforced in code before `git apply` runs.
+— refusals enforced in code before `git apply` runs. Give it a `test_command`
+and the repository's own suite judges the patch first; the pull request says
+whether that passed, failed, timed out, or never ran.
+
+**The backlog** a repository already had is answered on request, as one **Batch
+API** submission at half price — asynchronous, which is useless for a webhook
+and right for work nobody is waiting on.
 
 ---
 
@@ -253,8 +259,9 @@ repository is Rust, which the indexer supports, so it can be its own corpus.
 38  agent assertions     prompt safety, cache correctness
 23  fix mode, end-to-end against a real git remote
 10  deduplication, end-to-end
-13  resilience, end-to-end: rate limits, restarts, waiting for an index
+17  resilience, end-to-end: rate limits, restarts, waiting, escalation
 14  gitlab, end-to-end: its own gates, and the one GitHub does not need
+ 9  backfill, end-to-end through the Batch API
 13  languages, each connecting two methods on a fixture
 ```
 

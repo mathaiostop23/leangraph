@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 7999
 SEEN = []
+BATCHES = []
+POLLS = {}
 # Return 429 for the first N calls, so a caller's retry path can be exercised
 # against the shape a real rate limit takes.
 FAIL_FIRST = int(os.environ.get("STUB_FAIL_FIRST", "0"))
@@ -22,12 +24,54 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    # --- batch ------------------------------------------------------------
+    # Two calls back: the first poll reports it still running, so the deferral
+    # path is exercised rather than skipped by a stub that answers instantly.
+    def _batch_post(self, req):
+        BATCHES.append(req.get("requests", []))
+        bid = f"msgbatch_{len(BATCHES)}"
+        POLLS[bid] = 0
+        return self._json({"id": bid, "type": "message_batch",
+                           "processing_status": "in_progress"})
+
+    def _batch_status(self, bid):
+        POLLS[bid] = POLLS.get(bid, 0) + 1
+        ready = POLLS[bid] >= int(os.environ.get("STUB_BATCH_POLLS", "2"))
+        return self._json({"id": bid, "type": "message_batch",
+                           "processing_status": "ended" if ready else "in_progress"})
+
+    def _batch_results(self, bid):
+        n = int(bid.rsplit("_", 1)[-1]) - 1
+        lines = []
+        for r in BATCHES[n] if 0 <= n < len(BATCHES) else []:
+            lines.append(json.dumps({
+                "custom_id": r["custom_id"],
+                "result": {"type": "succeeded", "message": {
+                    "id": "msg_batch", "type": "message", "role": "assistant",
+                    "model": r["params"].get("model", "claude-sonnet-5"),
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text":
+                                 "Backfilled analysis.\nconfidence: high"}],
+                    "usage": {"input_tokens": 800, "output_tokens": 120,
+                              "cache_read_input_tokens": 0,
+                              "cache_creation_input_tokens": 0},
+                }},
+            }))
+        body = ("\n".join(lines) + "\n").encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/x-jsonl")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         n = int(self.headers.get("content-length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
 
         if self.path == "/_seen":
             return self._json({"calls": SEEN})
+        if self.path.endswith("/batches"):
+            return self._batch_post(req)
 
         if len(REFUSED) < FAIL_FIRST:
             REFUSED.append(1)
@@ -97,6 +141,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/_seen":
             return self._json({"calls": SEEN})
+        if "/batches/" in self.path:
+            bid = self.path.rsplit("/", 1)[-1]
+            if self.path.endswith("/results"):
+                return self._batch_results(self.path.split("/batches/")[1].split("/")[0])
+            return self._batch_status(bid)
         self._json({"ok": True})
 
     def _json(self, obj):

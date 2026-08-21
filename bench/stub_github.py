@@ -33,6 +33,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/_seen":
             return self._json({"calls": SEEN})
+        # The backlog a backfill run works through.
+        if "/issues?" in self.path or self.path.endswith("/issues"):
+            SEEN.append({"path": self.path, "body": None, "auth": ""})
+            return self._json([
+                {"number": 900, "title": "send_file leaks a descriptor",
+                 "body": "The descriptor is never closed on a large download."},
+                {"number": 901, "title": "url_for wrong behind a proxy",
+                 "body": "SERVER_NAME is ignored when X-Forwarded-Host is set."},
+                # A pull request arrives in this list too and is a different
+                # thing; the caller must drop it.
+                {"number": 902, "title": "Bump werkzeug", "body": "",
+                 "pull_request": {"url": "https://example/pull/902"}},
+            ])
         self._json({"ok": True})
 
     def _json(self, obj, code=200):

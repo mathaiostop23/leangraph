@@ -58,8 +58,14 @@ impl Usage {
     /// reuses a repo preamble across issues costs a fraction of one that does
     /// not. Reporting a flat input rate would overstate cost by roughly an
     /// order of magnitude on a busy repo.
-    fn cost(&self, model: &str) -> f64 {
-        let p = price(model);
+    /// The Batch API is half price, and a ledger that does not know it
+    /// overstates what backfill cost by exactly a factor of two — which is the
+    /// number this project publishes.
+    fn cost_at(&self, model: &str, rate: f64) -> f64 {
+        let p = Price {
+            input: price(model).input * rate,
+            output: price(model).output * rate,
+        };
         let m = 1_000_000.0;
         (self.input as f64 * p.input
             + self.cache_read as f64 * p.input * 0.1
@@ -76,6 +82,57 @@ pub struct Reply {
     pub text: String,
     pub usage: Usage,
     pub model: String,
+}
+
+/// A failed HTTP call, classified.
+///
+/// 429 is a rate limit and 5xx is the other end having a bad minute; both clear
+/// on their own. A 400 or a 401 will not, and retrying it is four times the cost
+/// for the same answer.
+fn http_error(status: reqwest::StatusCode, v: &Value) -> anyhow::Error {
+    let msg = v
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown error");
+    if status.as_u16() == 429 || status.is_server_error() {
+        return Transient(format!("model returned {status}: {msg}")).into();
+    }
+    anyhow::anyhow!("model returned {status}: {msg}")
+}
+
+/// One message object -> a `Reply`. Shared because a batch result carries the
+/// same shape a live call returns, and decoding it twice would let the two
+/// drift.
+fn reply_from(v: &Value) -> Reply {
+    let text = v
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    let u = v.get("usage").cloned().unwrap_or_else(|| json!({}));
+    let get = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+    Reply {
+        text,
+        usage: Usage {
+            input: get("input_tokens"),
+            output: get("output_tokens"),
+            cache_read: get("cache_read_input_tokens"),
+            cache_write: get("cache_creation_input_tokens"),
+        },
+        model: v
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    }
 }
 
 pub struct Client {
@@ -116,18 +173,7 @@ impl Client {
         let status = res.status();
         let v: Value = res.json().await.context("decoding the response")?;
         if !status.is_success() {
-            let msg = v
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            // 429 is a rate limit and 5xx is the other end having a bad
-            // minute; both clear on their own. A 400 or a 401 will not, and
-            // retrying it is four times the cost for the same answer.
-            if status.as_u16() == 429 || status.is_server_error() {
-                return Err(Transient(format!("model returned {status}: {msg}")).into());
-            }
-            bail!("model returned {status}: {msg}");
+            return Err(http_error(status, &v));
         }
 
         // A refusal is a successful HTTP 200 with an empty content array.
@@ -136,35 +182,11 @@ impl Client {
             bail!("the model declined this request");
         }
 
-        let text = v
-            .get("content")
-            .and_then(Value::as_array)
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
-
-        let u = v.get("usage").cloned().unwrap_or_else(|| json!({}));
-        let get = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
-        Ok(Reply {
-            text,
-            usage: Usage {
-                input: get("input_tokens"),
-                output: get("output_tokens"),
-                cache_read: get("cache_read_input_tokens"),
-                cache_write: get("cache_creation_input_tokens"),
-            },
-            model: v
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or(model)
-                .to_string(),
-        })
+        let mut r = reply_from(&v);
+        if r.model.is_empty() {
+            r.model = model.to_string();
+        }
+        Ok(r)
     }
 }
 
@@ -370,7 +392,22 @@ async fn analyse_with(
     title: &str,
     body: &str,
 ) -> Result<Reply> {
-    let req = json!({
+    c.call(
+        analyse_request(model, preamble, context, title, body),
+        model,
+    )
+    .await
+}
+
+/// The analyse request body, so the live path and the batch cannot drift.
+fn analyse_request(
+    model: &str,
+    preamble: &str,
+    context: &str,
+    title: &str,
+    body: &str,
+) -> serde_json::Value {
+    json!({
         "model": model,
         "max_tokens": 4096,
         "output_config": { "effort": "high" },
@@ -388,8 +425,7 @@ async fn analyse_with(
     `confidence: low`, reporting how sure you are of the cause. Say low when the \
     selected code does not contain it.",
             wrap_issue(title, body)) }]
-    });
-    c.call(req, model).await
+    })
 }
 
 /// Stage 3, only in fix mode. Produce a unified diff and nothing else.
@@ -514,7 +550,21 @@ pub fn clean_patch(raw: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub fn record(db: &Db, run_id: i64, repo_id: i64, stage: &str, r: &Reply) -> Result<f64> {
-    let cost = r.usage.cost(&r.model);
+    record_at(db, run_id, repo_id, stage, r, 1.0)
+}
+
+/// The Batch API bills at half. `rate` is that factor, and nothing else uses it.
+pub const BATCH_RATE: f64 = 0.5;
+
+pub fn record_at(
+    db: &Db,
+    run_id: i64,
+    repo_id: i64,
+    stage: &str,
+    r: &Reply,
+    rate: f64,
+) -> Result<f64> {
+    let cost = r.usage.cost_at(&r.model, rate);
     db.with(|c| {
         c.execute(
             "INSERT INTO cost_ledger (run_id, repo_id, stage, model, input_tokens,
@@ -536,6 +586,120 @@ pub fn record(db: &Db, run_id: i64, repo_id: i64, stage: &str, r: &Reply) -> Res
         Ok(())
     })?;
     Ok(cost)
+}
+
+/// One analysis, queued rather than asked.
+pub struct BatchItem {
+    /// Ties a result back to the issue it belongs to. The API returns results
+    /// in no particular order and possibly not all at once.
+    pub custom_id: String,
+    pub body: serde_json::Value,
+}
+
+/// Build the same analyse request the live path sends, for the batch.
+///
+/// Deliberately the same call: backfill that asked a different question would
+/// produce answers that cannot be compared with the ones issues get.
+pub fn batch_analyse(
+    custom_id: &str,
+    preamble: &str,
+    context: &str,
+    title: &str,
+    body: &str,
+) -> BatchItem {
+    BatchItem {
+        custom_id: custom_id.to_string(),
+        body: analyse_request("claude-sonnet-5", preamble, context, title, body),
+    }
+}
+
+impl Client {
+    /// Submit a batch. Returns its id.
+    ///
+    /// Half price and asynchronous — usually under an hour, up to 24. Never for
+    /// a live webhook, where latency is the product; this is for work nobody is
+    /// waiting on, which is what backfill is.
+    pub async fn batch_submit(&self, items: &[BatchItem]) -> Result<String> {
+        let requests: Vec<serde_json::Value> = items
+            .iter()
+            .map(|i| json!({ "custom_id": i.custom_id, "params": i.body }))
+            .collect();
+        let url = format!("{}/batches", self.base.trim_end_matches("/messages"));
+        let res = self
+            .http
+            .post(&url)
+            .header("x-api-key", &self.key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({ "requests": requests }))
+            .send()
+            .await
+            .map_err(|e| Transient(format!("submitting a batch: {e}")))?;
+        let status = res.status();
+        let v: serde_json::Value = res.json().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(http_error(status, &v));
+        }
+        v.get("id")
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .context("batch response carried no id")
+    }
+
+    /// `None` while it is still running.
+    pub async fn batch_results(&self, id: &str) -> Result<Option<Vec<(String, Reply)>>> {
+        let base = self.base.trim_end_matches("/messages").to_string();
+        let res = self
+            .http
+            .get(format!("{base}/batches/{id}"))
+            .header("x-api-key", &self.key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .map_err(|e| Transient(format!("polling a batch: {e}")))?;
+        let status = res.status();
+        let v: serde_json::Value = res.json().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(http_error(status, &v));
+        }
+        if v.get("processing_status").and_then(|x| x.as_str()) != Some("ended") {
+            return Ok(None);
+        }
+
+        let res = self
+            .http
+            .get(format!("{base}/batches/{id}/results"))
+            .header("x-api-key", &self.key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .map_err(|e| Transient(format!("fetching batch results: {e}")))?;
+        let text = res
+            .text()
+            .await
+            .map_err(|e| Transient(format!("reading batch results: {e}")))?;
+
+        let mut out = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(id) = v.get("custom_id").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            // A request can fail on its own without failing the batch. Skipping
+            // it leaves that issue unanswered, which is the right outcome —
+            // better than posting an empty comment.
+            let Some(msg) = v
+                .get("result")
+                .filter(|r| r.get("type").and_then(|t| t.as_str()) == Some("succeeded"))
+                .and_then(|r| r.get("message"))
+            else {
+                continue;
+            };
+            out.push((id.to_string(), reply_from(msg)));
+        }
+        Ok(Some(out))
+    }
 }
 
 /// The footer that goes on every comment.

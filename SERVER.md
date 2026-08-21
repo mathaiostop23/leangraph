@@ -145,6 +145,7 @@ which outlasts a cold index of anything reasonable, and then fails with a reason
 | `GET` `POST` | `/repos` | list; register (clone + index in the background) |
 | `GET` | `/repos/{owner/name}` | state, counts, index time, last error |
 | `POST` | `/repos/{owner/name}/sync` | fetch and incrementally reindex |
+| `POST` | `/repos/{owner/name}/backfill` | answer the open backlog as one batch, at half price |
 | `POST` | `/repos/{owner/name}/config` | `fix_mode`, `trigger_label`, `fix_label`, `max_nodes`, `escalate`, `test_command` |
 | `GET` | `/secrets` | names and hints only — never values |
 | `POST` `DELETE` | `/secrets/{name}` | store encrypted; remove |
@@ -201,6 +202,26 @@ Escalation is off unless a repository asks: Opus is five times Sonnet's input
 price, and spending that on every issue to help the few that need it is the
 opposite of what this project argues. Both calls are billed under their own
 stage in the ledger, so what escalation costs is visible rather than folded in.
+
+### The backlog, at half price
+
+A repository registered today usually has issues already. `POST
+/repos/{name}/backfill` answers the open ones carrying the trigger label as a
+single **Batch API** submission: 50% off, asynchronous, usually under an hour
+and up to 24. That is useless for a webhook, where latency is the product, and
+exactly right for work nobody is waiting on.
+
+It is a request rather than something registration does on its own — a
+repository with four hundred open issues would otherwise spend the operator's
+budget the moment it was added. Triage is skipped, because its job is to pull
+seed symbols out of the text and the context builder already seeds itself from
+the same text; for a bulk run it is a Haiku call per issue that buys nothing.
+An issue already answered is skipped, so running it twice does not bill twice.
+
+The poll for results uses the same deferral the issue path does: waiting for a
+batch is not a failed attempt, and the ledger books the result at
+`BATCH_RATE` — a ledger that did not know about the discount would overstate
+what backfill cost by exactly the factor this project publishes.
 
 ### Deduplication costs nothing, on purpose
 
@@ -521,9 +542,15 @@ column then failed against a table that had never been created.
 Listed because a document that describes only what exists reads as though the
 rest was never considered.
 
-| | |
-|---|---|
-| **Batch API** | 50% off, and useless without the backfill and nightly re-analysis it would serve. Neither exists, so this is one item and not two |
+Nothing, at present. Everything this document once listed here is built, or was
+measured and declined with the number written down — a warm-handle pool
+(`Graph::open` is microseconds) and CSR patching (15 ms of a 140 ms sync, for a
+slower read path).
+
+What remains genuinely absent is smaller and stated where it belongs: nightly
+re-analysis of stale issues, which is the second thing the Batch API was meant
+to serve; and a sandbox around the test command, which §5.5 says is the
+operator's to provide.
 
 ---
 
@@ -559,7 +586,8 @@ The server's share of the suite. All of it runs without the benchmark corpora.
 38  agent assertions     prompt safety, cache correctness
 23  fix mode, end-to-end against a real git remote
 10  deduplication, end-to-end
-13  resilience, end-to-end: rate limits, restarts, waiting for an index
+17  resilience, end-to-end: rate limits, restarts, waiting, escalation
+ 9  backfill, end-to-end through the Batch API
 ```
 
 `bench/server_test.sh` runs the ones that need a live server, a stub API and a

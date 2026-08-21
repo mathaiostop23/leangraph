@@ -494,8 +494,11 @@ impl Db {
         })
     }
 
-    pub const HEAVY_KINDS: [&'static str; 3] = ["clone", "index", "sync"];
-    pub const ISSUE_KINDS: [&'static str; 1] = ["issue"];
+    pub const HEAVY_KINDS: [&'static str; 4] = ["clone", "index", "sync", "backfill"];
+    /// `batch` sits here rather than with the heavy work: it is a poll against
+    /// an HTTP endpoint that spends almost all its time waiting, and putting it
+    /// behind an index would leave a finished batch unread for minutes.
+    pub const ISSUE_KINDS: [&'static str; 2] = ["issue", "batch"];
 
     /// How long a job may stand aside waiting before it is given up on.
     ///
@@ -803,6 +806,21 @@ impl Db {
                 params![issue_id, repo_id, now()],
             )?;
             Ok(c.last_insert_rowid())
+        })
+    }
+
+    /// Has this issue already been answered?
+    ///
+    /// Backfill is re-runnable — an operator will run it twice — and an issue
+    /// whose comment is already on the thread must not be billed again.
+    pub fn has_run(&self, issue_id: i64) -> Result<bool> {
+        self.with(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM runs WHERE issue_id = ?1 AND status IN ('posted','dry-run')",
+                params![issue_id],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
         })
     }
 

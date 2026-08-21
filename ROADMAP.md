@@ -42,6 +42,9 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 5b · Fix mode | ✅ **Done, opt-in.** Three independent switches; draft PRs only |
 | 5c · Issue dedup | ✅ **Done.** Local signals, no embedding API; a duplicate costs zero |
 | 5d · Egress policy | ✅ **Done.** SSRF closed on clone URLs; optional host allowlist |
+| 5e · Escalation | ✅ **Done, opt-in.** Self-reported confidence routes to Opus; both calls billed separately |
+| 5f · Tests before a PR | ✅ **Done, opt-in.** The operator's command, in the throwaway worktree; the PR states which of four things happened |
+| 5g · Backfill via Batch API | ✅ **Done.** The open backlog as one submission at half price, booked at half |
 | 6 · Breadth | 🟡 **14 languages.** Specs verified against each grammar; 11 verified against an oracle on a real repository, 96.5% presence recall across 10 corpora |
 | — · Node verification | ✅ **Done.** 96.5% presence recall vs oracle, 10 corpora |
 | — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, clustered p=0.008 |
