@@ -8,8 +8,9 @@ That graph then answers the question an agent actually has: *given this bug
 report, which forty lines should I read?*
 
 Without it, an agent greps. Grep returns every file containing the word, the
-agent reads them all, and you pay for the ones that were irrelevant. On django
-that is the difference between **9,444 tokens and 158,685** for a better answer.
+agent reads them all, and you pay for the ones that were irrelevant. Across 500
+real issues in SWE-bench Verified that is the difference between **13,525 tokens
+and 244,672** — for better recall of the files that actually had to change.
 
 ```bash
 cargo install --path .               # or: cargo build --release, then ./target/release/leangraph
@@ -144,20 +145,49 @@ notes name startup as the reason agents give up and reach for grep first.
 
 ### Cost — the claim that matters
 
-`bench/cost.py`. Ground truth is the files each bug-fix commit touched; the
-query is the commit message. The baseline is what an agent without a structural
-index actually does: tokenise, `git grep`, read the top *k*.
+**SWE-bench Verified**, 500 real issues across twelve repositories, each pinned
+to the commit its issue was filed against. The query is the issue as filed; the
+answer is the files the accepted patch touched, test files excluded. Reproduce
+with `bench/swebench.py`.
 
-| approach | recall | tokens / query |
+| | file recall | tokens / query |
 |---|---:|---:|
-| **leangraph, 100 nodes** | **40.0%** | **9,444** |
-| leangraph, 25 nodes | 23.5% | 2,365 |
-| keyword, top 5 | 35.7% | 158,685 |
-| keyword, top 10 | 45.2% | 259,328 |
+| **leangraph, 100 nodes** | **72.7%** | **13,525** |
+| keyword, top 10 | 51.3% | 244,672 |
+| keyword, what fits in our budget | 15.1% | 34,424 |
 
-Better recall than keyword top-5 at **1/16th the tokens**. Keyword search still
-wins on raw recall if you let it read 424k tokens; closing that gap is retrieval
-work, not budget work.
+**Better recall than reading ten whole files, for 1/18th the tokens.** At least
+one file that had to change is in the context 75.8% of the time (95% CI
+72–79). Bootstrapped over *repositories* rather than instances — django is 231
+of the 500 and its idioms are its own — recall is 72.7%, CI [68.5, 82.7]. Wide,
+and it should be: twelve repositories is a small sample of repositories however
+many instances they carry.
+
+The third row needs its caveat stated rather than left to be discovered: at our
+token budget keyword can afford roughly **one file**, because a single Python
+file usually exceeds the whole budget already. It is generous on tokens — 34,424
+against our 13,525, since the first file is taken whether it fits or not — and
+narrow on files. Read it as "its top-ranked file is the right one 15% of the
+time", not as a rich comparison.
+
+Where it loses: keyword top-10 beats us outright on **11%** of instances, and we
+return nothing useful at all on **24%**.
+
+<details>
+<summary>The benchmark this replaced, and why</summary>
+
+`bench/cost.py` used a bug-fix commit's message as the query and the files it
+touched as the answer — local, reproducible, and leaky. A commit message is
+written *after* the fix by someone who knows it, and frequently names the
+function that changed. It reported 40.0% for us against 45.2% for keyword
+top-10.
+
+Removing the leak moved the numbers **in our favour**, which is worth saying
+because it is the opposite of what you would assume. The commit message was
+handing the keyword baseline the exact identifier it needed; real issue text
+does not. It still runs, as a second and weaker signal.
+
+</details>
 
 ### Is the graph actually right?
 
@@ -333,9 +363,12 @@ measured it.
   confidence 100, over the 560 call sites flask's test suite settles. Elsewhere
   it is still a floor from the falsification rules and a ceiling from fan-out,
   because settling it needs a suite that runs offline.
-- **Recall tops out near 44%.** Raising it needs better retrieval signals.
-- **Cost measured on one repository.** 40 bug-fix commits in django.
-  Directionally strong, not a general claim.
+- **We return nothing useful on a quarter of issues.** 24% of SWE-bench
+  Verified, and keyword top-10 beats us outright on 11%. Raising that needs
+  better retrieval signals, not a bigger budget.
+- **Localization is not an answer.** 72.7% of the files that had to change is
+  where the *context* is right; whether an answer built on it is correct is the
+  benchmark's tests, which have not been run.
 - **Sync still rewrites the whole graph.** The extraction cache is a base plus a
   delta now, which was the larger half — 33 MB down to 10 KB for a one-file
   change. The CSR is still rewritten and resolve still redoes everything;
