@@ -205,6 +205,24 @@ exists; no amount of agreement between two static tools changes that.
 | 60 | 2–4 candidates | 19.3% |
 | 45 | 5–8 candidates | 5.2% |
 
+Runtime-confirmed is not precision: an edge that did not run is unconfirmed,
+not wrong. But there is a subset where the question is settled rather than
+estimated — where the tracer recorded which target a call **actually reached**,
+every other candidate emitted for that call is provably wrong. Over the 560 call
+sites flask's suite settles that way (`bench/edgeprecision.py`):
+
+| confidence | edges | precision | 95% interval |
+|---:|---:|---:|---|
+| 100 · lexical scope | 116 | **94.8%** | 89.2 – 97.6 |
+| 95 · explicit import | 28 | **100.0%** | 87.9 – 100 |
+| 80 · unique name match | 340 | **91.2%** | 87.7 – 93.7 |
+| 60 · 2–4 candidates | 197 | **42.1%** | 35.5 – 49.1 |
+| **all** | **688** | **78.1%** | 74.8 – 81.0 |
+
+The measure is deliberately pessimistic: a second call site for the same name
+that never ran has its target counted as an error. Being wrong in that direction
+is the point.
+
 **Confidence orders correctness** — which is the assumption the whole ranking
 rests on, and it had never been tested. Tested against a null that preserves how
 edges cluster by caller, the trend holds at `p = 0.0082`. A textbook test on the
@@ -293,23 +311,23 @@ measured it.
 
 ## What it does not do
 
-- **Fourteen languages, six measured against an oracle.** Python, TypeScript,
-  Rust, Go and Java and Ruby have been checked on a real repository; C, C++, C#,
-  PHP, Kotlin, Swift and Scala are verified on a fixture only, which proves the
-  spec works on ordinary code and not that it works on a codebase. CodeGraph has
-  30+ with framework awareness.
+- **Fourteen languages, eleven measured against an oracle.** Each on a real
+  repository rather than a fixture — 96.5% presence recall across ten corpora.
+  TSX/JSX and the two remaining variants ride on their parent grammar's spec and
+  have no corpus of their own. CodeGraph has 30+ with framework awareness.
 - **Import resolution is uneven across languages.** Rust, Java, C#, Kotlin and
   Scala resolve module paths; the rest fall back to name matching more often
   than Python and TypeScript do.
-- **Edge precision is bounded, not measured.** Runtime confirms edges that ran
-  and is silent on the rest; the falsification rules give a floor, and a rule
-  that does not fire is not a correct edge. Measured on one repository, in one
-  language.
+- **Edge precision is measured on one repository.** 78.1% overall and 94.8% at
+  confidence 100, over the 560 call sites flask's test suite settles. Elsewhere
+  it is still a floor from the falsification rules and a ceiling from fan-out,
+  because settling it needs a suite that runs offline.
 - **Recall tops out near 44%.** Raising it needs better retrieval signals.
 - **Cost measured on one repository.** 40 bug-fix commits in django.
   Directionally strong, not a general claim.
-- **Sync rewrites the whole graph.** Stable node ids are in place — the
-  prerequisite for a delta overlay — but resolve and persist still redo
+- **Sync still rewrites the whole graph.** The extraction cache is now a base
+  plus a delta, which was the larger half; the CSR is still rewritten, and
+  resolve still redoes
   everything for a one-line change.
 - **Fix mode does not run the tests.** The graph knows which tests import a
   changed file; running them safely needs a sandbox that is not built. Every

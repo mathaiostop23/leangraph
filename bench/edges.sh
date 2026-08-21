@@ -6,6 +6,7 @@
 #   edgetrace   what the code actually does — ground truth, but Python and only
 #               where the suite runs offline
 #   edges       the calibration table both feed
+#   edgeprecision  precision itself, on the call sites the tracer settled
 #
 # Every optional stage degrades to a printed SKIP rather than a failure, because
 # a benchmark that only runs on one machine is a benchmark nobody runs.
@@ -47,6 +48,12 @@ echo
 echo "──────────  calibration  ──────────"
 if [ -n "$TRACE" ]; then
   python3 bench/edges.py flask --trace "$TRACE"
+  # The one place precision is settled rather than bounded: where the tracer
+  # saw which target a call actually reached, every other candidate we emitted
+  # for it is wrong, and that is a measurement rather than an estimate.
+  echo
+  echo "──────────  precision, where it can be settled  ──────────"
+  python3 bench/edgeprecision.py flask --trace "$TRACE"
   rm -f "$TRACE"
 else
   python3 bench/edges.py flask

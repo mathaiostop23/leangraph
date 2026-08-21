@@ -847,7 +847,7 @@ Three consecutive runs now agree on every row.
 
 ## What is still unmeasured
 
-- **Edge precision.** Bounded from below by `edgefacts` and confirmed-where-observed by the runtime oracle; never measured directly. That needs blind hand adjudication of a stratified sample, which is human time nobody has spent yet.
+- **Edge precision outside flask.** Now measured directly where the runtime oracle can settle it — 78.1% over 688 edges at 560 call sites, and 94.8% in the confidence-100 bucket (`bench/edgeprecision.py`). That subset is one repository in one language, because it needs a test suite that runs offline. Everywhere else it is still a floor from `edgefacts` and a ceiling from fan-out.
 - **Edge recall outside flask.** django's suite needs dependencies this machine cannot fetch offline; excalidraw has no Python. One repository, one language.
 - **Cost against real issue→PR pairs.** The ground truth is bug-fix commits from git history, which is honest and reproducible but not the same distribution as issues people actually file.
 - **The agent against the real API.** Every agent assertion runs against a stub. Shape, safety and caching structure are checked; answer quality is not.
