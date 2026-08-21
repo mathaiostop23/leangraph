@@ -846,3 +846,42 @@ mod tests {
         assert!(checked >= 3, "the fixture must have definitions to check");
     }
 }
+
+#[cfg(test)]
+mod open_cost {
+    use super::*;
+    use crate::testkit::Corpus;
+
+    /// Is a handle pool worth building?
+    ///
+    /// The server opens the graph for every job, and SERVER.md listed an LRU of
+    /// warm handles as missing. It is only missing if opening is expensive, and
+    /// nothing had measured it. `open` is an mmap and a header check, so this
+    /// asserts the property the design rests on rather than a wall-clock number
+    /// that would differ on every machine: reopening must not cost what
+    /// building costs.
+    #[test]
+    fn opening_a_graph_is_not_deserialization() {
+        let c = Corpus::build(&[
+            ("a.py", "class C:\n    def x(self):\n        return self.y()\n    def y(self):\n        return 1\n"),
+            ("b.py", "from a import C\n\ndef go():\n    return C().x()\n"),
+        ]);
+        let g = c.graph();
+        let path = c.root.join("graph.bin");
+        drop(g);
+
+        let t = std::time::Instant::now();
+        const N: u32 = 200;
+        let mut nodes = 0u32;
+        for _ in 0..N {
+            let g = Graph::open(&path).expect("reopen");
+            nodes += g.n_nodes();
+        }
+        let per = t.elapsed() / N;
+        assert!(nodes > 0, "the graph must actually have been read");
+        assert!(
+            per < std::time::Duration::from_millis(1),
+            "opening took {per:?}, which would make a warm-handle pool worth having"
+        );
+    }
+}

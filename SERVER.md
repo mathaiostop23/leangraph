@@ -114,6 +114,11 @@ The cost is recovery latency: a crashed job waits out its lease rather than
 being reclaimed the instant someone restarts. Up to a minute, against silent
 duplicate work, which is the right way round.
 
+Every job opens the graph rather than taking one from a pool of warm handles.
+An LRU was designed for this; opening is an `mmap` and a header check, measured
+in microseconds, and a test asserts it stays under a millisecond so the decision
+is a measurement rather than an assumption.
+
 ### Workers
 
 Two pools, because the two sorts of work have nothing in common. Indexing
@@ -491,8 +496,7 @@ rest was never considered.
 | | |
 |---|---|
 | **Opus escalation** | designed as a third stage for low-confidence answers. Analysis is Sonnet; there is no escalation path |
-| **Graph handle pool** | every job opens the graph. It is an mmap and a header check — microseconds — so this has not been worth it, but it is measured nowhere |
-| **Batch API** | 50% off for backfill and nightly re-analysis. Not wired up |
+| **Batch API** | 50% off, and useless without the backfill and nightly re-analysis it would serve. Neither exists, so this is one item and not two |
 | **Tests before a PR** | §5.5 |
 
 ---
