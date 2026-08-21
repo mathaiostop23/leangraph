@@ -528,7 +528,7 @@ curl -X POST localhost:7777/repos \
 The server's share of the suite. All of it runs without the benchmark corpora.
 
 ```
-33  unit                 vetting rules, dedup scoring, SSRF, queues, preflight
+35  unit                 vetting rules, dedup scoring, SSRF, leases, preflight
 21  webhook gates        signature, replay, authorship, labels, form encoding
 38  agent assertions     prompt safety, cache correctness
 23  fix mode, end-to-end against a real git remote

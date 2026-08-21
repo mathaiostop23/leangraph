@@ -1,0 +1,74 @@
+name: release
+
+# Binaries on a tag. The quickstart asks for a Rust toolchain because there was
+# nothing else to offer; this is what removes that requirement for anyone who
+# just wants to try it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      # Native runners rather than cross-compilation: every tree-sitter grammar
+      # is a C library, so a cross build needs a C toolchain per target and
+      # fails in a way that looks like a Rust problem.
+      - name: build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The binary is the product; a release that ships an untested one is
+      # worse than no release.
+      - name: test
+        run: cargo test --release --locked
+
+      - name: package
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/leangraph
+          strip "$bin" 2>/dev/null || true
+          tar -czf "leangraph-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" leangraph
+          shasum -a 256 "leangraph-${{ matrix.target }}.tar.gz" \
+            > "leangraph-${{ matrix.target }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: leangraph-${{ matrix.target }}.tar.gz*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          # A tag is a claim that this build is the one. Draft first so the
+          # claim is deliberate.
+          draft: true

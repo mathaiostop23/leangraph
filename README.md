@@ -18,7 +18,8 @@ leangraph install                    # wire it into Claude Code, Cursor, Codex
 ```
 
 Needs a Rust toolchain (1.82+) and nothing else — no runtime, no database, no
-services. There are no prebuilt binaries yet.
+services. Tagged releases also carry prebuilt binaries for macOS (Apple silicon
+and Intel) and Linux x86-64.
 
 **Status: early.** Fourteen languages, eleven of them verified against an
 oracle on a real repository — 96.5% presence recall across ten corpora. The
@@ -245,8 +246,8 @@ Everything below runs in CI on every push, without the benchmark corpora — thi
 repository is Rust, which the indexer supports, so it can be its own corpus.
 
 ```
-68  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
-33  server unit          vetting rules, dedup scoring, SSRF, queues, preflight
+69  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
+35  server unit          vetting rules, dedup scoring, SSRF, queues, preflight
  5  convergence          incremental sync equals a full reindex
 21  webhook gates        signature, replay, authorship, labels
 38  agent assertions     prompt safety, cache correctness
