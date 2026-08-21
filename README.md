@@ -59,8 +59,9 @@ curl -X POST localhost:7777/repos -H "authorization: Bearer $TOKEN" \
 ```
 
 One binary, one volume, **no database container** — SQLite is compiled in. Point
-a GitHub webhook at `/webhook/github`, label an issue `leangraph`, and the answer
-arrives as a comment with what it cost.
+a GitHub webhook at `/webhook/github` or a GitLab one at `/webhook/gitlab`,
+label an issue `leangraph`, and the answer arrives as a comment with what it
+cost.
 
 Everything except the webhook and the health probe needs an admin token, printed
 at startup and generated on first run. That surface can register a repository
@@ -234,6 +235,7 @@ repository is Rust, which the indexer supports, so it can be its own corpus.
 23  fix mode, end-to-end against a real git remote
 10  deduplication, end-to-end
 13  resilience, end-to-end: rate limits, restarts, waiting for an index
+14  gitlab, end-to-end: its own gates, and the one GitHub does not need
 13  languages, each connecting two methods on a fixture
 ```
 

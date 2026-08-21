@@ -106,6 +106,15 @@ impl App {
         std::env::var(env_name(name)).ok().filter(|v| !v.is_empty())
     }
 
+    /// The write token for whichever host this repository lives on.
+    pub fn provider_token(&self, repo: &db::Repo) -> Option<String> {
+        self.secret(if repo.provider == "gitlab" {
+            "gitlab_token"
+        } else {
+            "github_token"
+        })
+    }
+
     pub fn repo(&self, id: i64) -> anyhow::Result<db::Repo> {
         self.db
             .repos()?
@@ -249,7 +258,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     // reports counts rather than contents.
     let open = Router::new()
         .route("/health", get(health))
-        .route("/webhook/github", post(webhook::github));
+        .route("/webhook/github", post(webhook::github))
+        .route("/webhook/gitlab", post(webhook::gitlab));
 
     let router = managed.merge(open).with_state(app.clone());
 
@@ -429,6 +439,11 @@ struct AddRepo {
     full_name: Option<String>,
     #[serde(default = "default_branch")]
     branch: String,
+    /// `github` or `gitlab`. Derived from the URL host when omitted, because
+    /// getting this wrong means the comment goes to the wrong API and the
+    /// webhook is authenticated the wrong way.
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 fn default_branch() -> String {
@@ -467,9 +482,26 @@ async fn add_repo(
         (None, None) => return Err(bad("one of `url` or `path` is required".into())),
     };
 
-    let repo = app
-        .db
-        .upsert_repo(&name, &path.to_string_lossy(), &req.branch, url.as_deref())?;
+    // Named, or read off the URL. A repository registered by local path with no
+    // provider given is GitHub, which is what it was before this existed.
+    let provider = req.provider.clone().unwrap_or_else(|| {
+        match url.as_deref() {
+            Some(u) if u.contains("gitlab") => "gitlab",
+            _ => "github",
+        }
+        .into()
+    });
+    if provider != "github" && provider != "gitlab" {
+        return Err(bad(format!("unknown provider `{provider}`")));
+    }
+
+    let repo = app.db.upsert_repo(
+        &name,
+        &path.to_string_lossy(),
+        &req.branch,
+        url.as_deref(),
+        &provider,
+    )?;
     app.db.set_repo_state(repo.id, "pending", None)?;
 
     // Index at registration, not on the first issue: a cold index at answer
@@ -877,10 +909,11 @@ If that is wrong, say so on the issue and I will look properly.\n",
             score.seed * 100.0
         );
         post_comment(
+            &repo.provider,
             &repo.full_name,
             issue.number,
             &comment,
-            app.secret("github_token").as_deref(),
+            app.provider_token(&repo).as_deref(),
         )
         .await
         .ok();
@@ -1007,10 +1040,11 @@ willing to propose from the context available._\n",
     comment.push_str(&agent::receipt(nodes, tokens, cached, cost));
 
     let posted = post_comment(
+        &repo.provider,
         &repo.full_name,
         issue.number,
         &comment,
-        app.secret("github_token").as_deref(),
+        app.provider_token(&repo).as_deref(),
     )
     .await;
     let status = match &posted {
@@ -1179,9 +1213,19 @@ async fn propose_fix(
     Ok(Some((url, proposal.files, reply)))
 }
 
+/// Where GitLab's API lives. Overridable for a self-managed install, and for
+/// the test suite, which points it at a stub.
+pub fn gitlab_api_base() -> String {
+    std::env::var("LEANGRAPH_GITLAB_API")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://gitlab.com".into())
+}
+
 /// Returns false when no token is configured — a deliberate dry run rather than
 /// an error, so the whole pipeline can be exercised without write access.
 async fn post_comment(
+    provider: &str,
     full_name: &str,
     number: i64,
     body: &str,
@@ -1190,22 +1234,50 @@ async fn post_comment(
     let Some(token) = token.filter(|t| !t.is_empty()) else {
         return Ok(false);
     };
-    let url = format!(
-        "{}/repos/{full_name}/issues/{number}/comments",
-        fix::api_base()
-    );
-    let res = reqwest::Client::new()
-        .post(&url)
-        .header("authorization", format!("Bearer {token}"))
-        .header("accept", "application/vnd.github+json")
-        .header("user-agent", "leangraph")
-        .json(&serde_json::json!({ "body": body }))
-        .send()
-        .await?;
+    let client = reqwest::Client::new();
+    // The two differ in three ways and no more: where the note goes, how the
+    // project is named in the path, and how the token is presented.
+    let req = if provider == "gitlab" {
+        let project = urlencoding_encode(full_name);
+        client
+            .post(format!(
+                "{}/api/v4/projects/{project}/issues/{number}/notes",
+                gitlab_api_base()
+            ))
+            .header("private-token", token)
+            .json(&serde_json::json!({ "body": body }))
+    } else {
+        client
+            .post(format!(
+                "{}/repos/{full_name}/issues/{number}/comments",
+                fix::api_base()
+            ))
+            .header("authorization", format!("Bearer {token}"))
+            .header("accept", "application/vnd.github+json")
+            .json(&serde_json::json!({ "body": body }))
+    };
+    let res = req.header("user-agent", "leangraph").send().await?;
     if !res.status().is_success() {
-        anyhow::bail!("github returned {}", res.status());
+        anyhow::bail!("{provider} returned {}", res.status());
     }
     Ok(true)
+}
+
+/// `group/project` -> `group%2Fproject`.
+///
+/// GitLab addresses a project by its path with the slashes escaped. Sending it
+/// raw makes the API read it as three path segments and answer 404.
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 fn git_head(root: &std::path::Path) -> Option<String> {

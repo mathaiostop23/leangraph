@@ -136,6 +136,7 @@ which outlasts a cold index of anything reasonable, and then fails with a reason
 | `GET` | `/metrics` | Prometheus text: repos, queue depth, graph size, spend |
 | `GET` | `/health` | **open** — counts, not contents |
 | `POST` | `/webhook/github` | **open** — HMAC-verified |
+| `POST` | `/webhook/gitlab` | **open** — token-verified |
 
 Everything not marked open requires the admin token (§5.3). Registering a
 repository spends your API budget, `/secrets` writes credentials, and
@@ -268,7 +269,8 @@ This is where the project could embarrass itself publicly.
 
 ### 5.1 Webhook verification
 
-HMAC-SHA256 over the **raw request bytes**, compared in constant time.
+**GitHub:** HMAC-SHA256 over the **raw request bytes**, compared in constant
+time.
 Re-serializing the JSON and verifying that instead would be checking something
 the sender never signed. GitHub's webhook UI also defaults to form encoding, so
 deliveries arrive as `payload=<urlencoded json>` rather than as a JSON body —
@@ -278,6 +280,30 @@ sends.
 
 `X-GitHub-Delivery` is stored and replays are dropped. Providers retry, and a
 retried issue must not produce a second comment.
+
+**GitLab** sends the secret itself in `X-Gitlab-Token` rather than a signature
+over the body. That is weaker — it is a bearer token, and anything that logs the
+request has it — but it is what the platform offers, so the comparison is
+constant-time even though there is no MAC to forge. `X-Gitlab-Event-UUID` serves
+the same purpose as GitHub's delivery id.
+
+The GitLab payload is **translated** into the shape the GitHub handlers already
+read, rather than getting handlers of its own. The author gate, the label gate
+and replay rejection are security properties, and a second provider with its own
+copy of them is a provider where one of them quietly differs. What actually
+differs is authentication and field names, and that is all the adapter does.
+
+One gate has no counterpart: GitLab's payload does not say whether the author is
+a member, so that check is an API call against the project's member list.
+Anything short of a definite yes — the API down, a token that cannot read
+members, a malformed answer — is treated as *not a member*. A gate that exists
+to stop a stranger spending the owner's budget cannot fail open, and there is a
+test that restarts the stub answering 404 to prove it does not.
+
+**Fix mode is GitHub-only.** It opens a pull request; the merge-request
+equivalent is not written, so a GitLab repository with fix mode enabled logs a
+refusal and posts the analysis without a patch rather than failing three steps
+later on a 404.
 
 ### 5.2 Prompt injection
 
@@ -458,7 +484,6 @@ rest was never considered.
 | **Multi-instance** | orphan reclaim runs at startup, which is correct for one process. Two instances on one database need a lease with a heartbeat, not a state column |
 | **Graph handle pool** | every job opens the graph. It is an mmap and a header check — microseconds — so this has not been worth it, but it is measured nowhere |
 | **Batch API** | 50% off for backfill and nightly re-analysis. Not wired up |
-| **GitLab** | GitHub only. The provider boundary exists; the adapter does not |
 | **Tests before a PR** | §5.5 |
 
 ---

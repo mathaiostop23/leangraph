@@ -292,6 +292,9 @@ pub fn now() -> i64 {
 pub struct Repo {
     pub id: i64,
     pub full_name: String,
+    /// `github` or `gitlab`. Decides how a comment is posted and how a webhook
+    /// from this repository is authenticated.
+    pub provider: String,
     pub path: String,
     pub url: Option<String>,
     pub default_branch: String,
@@ -309,6 +312,7 @@ fn repo_from_row(r: &rusqlite::Row) -> rusqlite::Result<Repo> {
     Ok(Repo {
         id: r.get("id")?,
         full_name: r.get("full_name")?,
+        provider: r.get("provider")?,
         path: r.get("path")?,
         url: r.get("url")?,
         default_branch: r.get("default_branch")?,
@@ -330,14 +334,16 @@ impl Db {
         path: &str,
         branch: &str,
         url: Option<&str>,
+        provider: &str,
     ) -> Result<Repo> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO repos (full_name, path, default_branch, url, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO repos (full_name, path, default_branch, url, provider, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(full_name) DO UPDATE SET
-                   path = ?2, default_branch = ?3, url = COALESCE(?4, repos.url)",
-                params![full_name, path, branch, url, now()],
+                   path = ?2, default_branch = ?3, url = COALESCE(?4, repos.url),
+                   provider = ?5",
+                params![full_name, path, branch, url, provider, now()],
             )?;
             let repo = c.query_row(
                 "SELECT * FROM repos WHERE full_name = ?1",
@@ -922,6 +928,7 @@ mod tests {
         Repo {
             id: 1,
             full_name: "a/b".into(),
+            provider: "github".into(),
             path: "/tmp".into(),
             url: None,
             default_branch: "main".into(),
