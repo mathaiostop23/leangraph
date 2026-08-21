@@ -845,6 +845,39 @@ Three consecutive runs now agree on every row.
 - **Not yet a general claim.** The *speed* numbers are one machine, one OS, three repos, two languages. Node verification is broader — ten repositories across eleven languages, `bench/langverify.sh` — but timing was not re-measured on the seven added for it.
 - **CodeGraph's own progress line self-reports ~2.0 s for django**, but wall clock minus startup is 7.7 s — its counter evidently covers only part of the pipeline. We use wall clock, which is what a user experiences.
 
+## Why the CSR is still rewritten whole
+
+A one-file sync on django is 140 ms, and it goes:
+
+```
+discover   38 ms   walking 3,038 files
+extract     2 ms   3,037 of them served from cache
+resolve    48 ms   full re-resolution
+co-change   8 ms
+persist    44 ms   graph.bin ~28, delta cache ~1, rest overhead
+```
+
+Persist was 84 ms before the extraction cache became a base plus a delta;
+rewriting 33 MB to record one changed file was the single largest cost in a
+sync, and it is now 10 KB.
+
+What remains is the graph: symbol table 6 ms, CSR sort 10 ms, write 1 ms,
+fsync 11 ms. Patching the CSR in place instead would recover perhaps 15 of
+those — and the CSR is offset-addressed, so an overlay means every `callees`
+and `callers` merges a base with a delta on the read path. That path is the
+project's headline: `Graph::open` is an mmap and a header check, 15 µs on a
+68,000-node graph and 2.4 ms to MCP `initialize`.
+
+Fifteen milliseconds off a sync, against complicating the thing the whole design
+is built to be fast at, is the wrong trade. The two candidates worth more are
+`discover`, which the server already skips with `--since`, and `resolve`, which
+needs per-name dependency tracking to be sound — and unsound incremental
+resolution would cost the convergence invariant, which is the strongest
+correctness guarantee here.
+
+Written down because "not built" and "measured and declined" are different
+things, and only one of them is a decision.
+
 ## What is still unmeasured
 
 - **Edge precision outside flask.** Now measured directly where the runtime oracle can settle it — 78.1% over 688 edges at 560 call sites, and 94.8% in the confidence-100 bucket (`bench/edgeprecision.py`). That subset is one repository in one language, because it needs a test suite that runs offline. Everywhere else it is still a floor from `edgefacts` and a ceiling from fan-out.

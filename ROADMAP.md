@@ -36,7 +36,8 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 4 · Incremental sync | ✅ **Done.** 5–8x; semantically identical to a full reindex |
 | 4b · Stable node ids | ✅ **Done.** Persistent key table; ids survive edits |
 | 4c · Git tree-diff sync | ✅ **Done.** `--since <sha>` for push webhooks |
-| 4d · Delta cache | ✅ **Done.** A one-file sync appends 10 KB instead of rewriting 33 MB; persist 84 ms → 38 ms. CSR patching still open — measured at 28 ms, and the cache was the 56 |
+| 4d · Delta cache | ✅ **Done.** A one-file sync appends 10 KB instead of rewriting 33 MB; persist 84 ms → 41 ms |
+| 4e · CSR patching | ⛔ **Not worth it, measured.** 140 ms sync: discover 38, resolve 48, persist 44. Patching the CSR touches ~15 ms of that and complicates the read path the 15 µs open and 2.4 ms startup depend on |
 | 5 · Server (**A ships**) | ✅ **Done.** SQLite, webhooks, agent, dashboard, Docker |
 | 5b · Fix mode | ✅ **Done, opt-in.** Three independent switches; draft PRs only |
 | 5c · Issue dedup | ✅ **Done.** Local signals, no embedding API; a duplicate costs zero |
