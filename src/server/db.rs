@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Schema version. Bump alongside a step in `migrate`.
-const SCHEMA: u32 = 5;
+const SCHEMA: u32 = 6;
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -92,6 +92,12 @@ impl Db {
             if have < 5 {
                 add_column(c, "jobs", "defers", "INTEGER NOT NULL DEFAULT 0")?;
                 have = 5;
+                c.pragma_update(None, "user_version", have)?;
+            }
+            if have < 6 {
+                add_column(c, "jobs", "lease_until", "INTEGER NOT NULL DEFAULT 0")?;
+                add_column(c, "jobs", "owner", "TEXT")?;
+                have = 6;
                 c.pragma_update(None, "user_version", have)?;
             }
             // The constant is the ladder's top step. Asserting it here is what
@@ -204,6 +210,12 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- an attempt, and counting it as one would exhaust the retry budget before
   -- the work could start.
   defers      INTEGER NOT NULL DEFAULT 0,
+  -- Who holds this job and until when. A `running` row on its own cannot tell
+  -- a crashed worker from a busy one, which is fine for a single process and
+  -- wrong for two: the second one's startup would requeue the first one's
+  -- work out from under it. A lease expires; a state does not.
+  lease_until INTEGER NOT NULL DEFAULT 0,
+  owner       TEXT,
   error       TEXT,
   created_at  INTEGER NOT NULL,
   started_at  INTEGER,
@@ -449,7 +461,9 @@ impl Db {
     /// model. One pool over one queue puts a three-second answer behind a
     /// twelve-minute index, and no amount of worker count fixes that — the
     /// index workers would just multiply and make each other slower.
-    pub fn claim_kinds(&self, kinds: &[&str]) -> Result<Option<Job>> {
+    /// Recording who took it, so the lease can be renewed and so one instance
+    /// cannot reclaim what another is still working on.
+    pub fn claim_as(&self, kinds: &[&str], owner: &str) -> Result<Option<Job>> {
         let list = kinds
             .iter()
             .map(|k| format!("'{k}'"))
@@ -457,14 +471,15 @@ impl Db {
             .join(",");
         self.with(|c| {
             let sql = format!(
-                "UPDATE jobs SET state='running', started_at=?1, attempts = attempts + 1
+                "UPDATE jobs SET state='running', started_at=?1, attempts = attempts + 1,
+                                lease_until = ?2, owner = ?3
                  WHERE id = (SELECT id FROM jobs
                              WHERE state='queued' AND run_after <= ?1 AND kind IN ({list})
                              ORDER BY id LIMIT 1)
                  RETURNING id, kind, repo_id, payload, attempts, defers"
             );
             let job = c
-                .query_row(&sql, params![now()], |r| {
+                .query_row(&sql, params![now(), now() + Self::LEASE_SECS, owner], |r| {
                     Ok(Job {
                         id: r.get(0)?,
                         kind: r.get(1)?,
@@ -569,13 +584,43 @@ impl Db {
     /// those up again: not queued, so never claimed; not failed, so never
     /// reported. They sat in the dashboard as permanently running while the
     /// work they stood for was quietly lost.
-    pub fn reclaim_orphans(&self) -> Result<usize> {
+    /// How long a claim is good for without being renewed.
+    ///
+    /// Long enough that a worker doing real work keeps it comfortably — the
+    /// heartbeat renews at a third of this — and short enough that a killed
+    /// process does not strand its job for the rest of the afternoon.
+    pub const LEASE_SECS: i64 = 60;
+
+    /// Requeue anything whose holder stopped renewing it.
+    ///
+    /// This replaces requeuing every `running` row at startup, which was right
+    /// for one process and actively harmful for two: the second instance would
+    /// take the first one's in-flight work and both would do it. An expired
+    /// lease is evidence the holder is gone; a `running` state is not.
+    pub fn reclaim_expired(&self) -> Result<usize> {
         self.with(|c| {
             let n = c.execute(
-                "UPDATE jobs SET state='queued', run_after=0 WHERE state='running'",
-                [],
+                "UPDATE jobs SET state='queued', run_after=0, owner=NULL
+                 WHERE state='running' AND lease_until < ?1",
+                params![now()],
             )?;
             Ok(n)
+        })
+    }
+
+    /// Say the job is still being worked on.
+    ///
+    /// Returns false when the lease was lost — the row is no longer ours,
+    /// because something reclaimed it while we were slow. The caller should
+    /// stop rather than finish a job another worker has already taken.
+    pub fn renew_lease(&self, id: i64, owner: &str) -> Result<bool> {
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE jobs SET lease_until = ?2 WHERE id = ?1 AND owner = ?3
+                   AND state = 'running'",
+                params![id, now() + Self::LEASE_SECS, owner],
+            )?;
+            Ok(n > 0)
         })
     }
 
@@ -957,16 +1002,19 @@ mod tests {
         db.enqueue("issue", 1, "{}", None).unwrap();
 
         let issue = db
-            .claim_kinds(&Db::ISSUE_KINDS)
+            .claim_as(&Db::ISSUE_KINDS, "test")
             .unwrap()
             .expect("an issue was queued");
         assert_eq!(issue.kind, "issue", "must not have taken the index job");
 
-        let heavy = db.claim_kinds(&Db::HEAVY_KINDS).unwrap().expect("index");
+        let heavy = db
+            .claim_as(&Db::HEAVY_KINDS, "test")
+            .unwrap()
+            .expect("index");
         assert_eq!(heavy.kind, "index");
 
         assert!(
-            db.claim_kinds(&Db::ISSUE_KINDS).unwrap().is_none(),
+            db.claim_as(&Db::ISSUE_KINDS, "test").unwrap().is_none(),
             "and neither pool sees the other's work twice"
         );
     }
@@ -978,13 +1026,13 @@ mod tests {
         // even exists.
         let db = fresh("defer");
         db.enqueue("issue", 1, "{}", None).unwrap();
-        let job = db.claim_kinds(&Db::ISSUE_KINDS).unwrap().unwrap();
+        let job = db.claim_as(&Db::ISSUE_KINDS, "test").unwrap().unwrap();
         assert_eq!(job.attempts, 1);
         assert_eq!(job.defers, 0);
 
         db.defer_job(job.id, 0).unwrap();
         let again = db
-            .claim_kinds(&Db::ISSUE_KINDS)
+            .claim_as(&Db::ISSUE_KINDS, "test")
             .unwrap()
             .expect("it must come back");
         assert_eq!(again.attempts, 1, "the attempt was given back");
@@ -995,11 +1043,73 @@ mod tests {
     fn a_deferred_job_is_not_claimable_before_its_time() {
         let db = fresh("defer-time");
         db.enqueue("issue", 1, "{}", None).unwrap();
-        let job = db.claim_kinds(&Db::ISSUE_KINDS).unwrap().unwrap();
+        let job = db.claim_as(&Db::ISSUE_KINDS, "test").unwrap().unwrap();
         db.defer_job(job.id, 300).unwrap();
         assert!(
-            db.claim_kinds(&Db::ISSUE_KINDS).unwrap().is_none(),
+            db.claim_as(&Db::ISSUE_KINDS, "test").unwrap().is_none(),
             "waiting five minutes means five minutes"
+        );
+    }
+
+    #[test]
+    fn a_lease_holds_a_job_against_a_second_instance() {
+        // The failure this replaces: a second process starting up requeued
+        // every `running` row, which for one instance meant recovering after a
+        // crash and for two meant taking the other one's in-flight work.
+        let db = fresh("lease");
+        db.enqueue("index", 1, "{}", None).unwrap();
+        let job = db
+            .claim_as(&Db::HEAVY_KINDS, "instance-a:0")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            db.reclaim_expired().unwrap(),
+            0,
+            "a live lease must not be reclaimable, however many instances look"
+        );
+        assert!(
+            db.claim_as(&Db::HEAVY_KINDS, "instance-b:0")
+                .unwrap()
+                .is_none(),
+            "and the job is not claimable while it is held"
+        );
+
+        assert!(
+            db.renew_lease(job.id, "instance-a:0").unwrap(),
+            "the holder can renew"
+        );
+        assert!(
+            !db.renew_lease(job.id, "instance-b:0").unwrap(),
+            "and nobody else can"
+        );
+    }
+
+    #[test]
+    fn an_expired_lease_is_reclaimed_and_can_be_taken_again() {
+        let db = fresh("lease-expiry");
+        db.enqueue("index", 1, "{}", None).unwrap();
+        let job = db.claim_as(&Db::HEAVY_KINDS, "gone:0").unwrap().unwrap();
+
+        // Stand in for a process that stopped renewing.
+        db.with(|c| {
+            c.execute(
+                "UPDATE jobs SET lease_until = 1 WHERE id = ?1",
+                params![job.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(db.reclaim_expired().unwrap(), 1);
+        let again = db
+            .claim_as(&Db::HEAVY_KINDS, "fresh:0")
+            .unwrap()
+            .expect("it comes back");
+        assert_eq!(again.id, job.id);
+        assert!(
+            !db.renew_lease(job.id, "gone:0").unwrap(),
+            "the old holder cannot renew a lease it lost"
         );
     }
 
@@ -1095,7 +1205,7 @@ mod tests {
         db.enqueue("sync", repos[0].id, "{}", None)
             .expect("the job queue must exist after an upgrade");
         assert!(
-            db.claim_kinds(&Db::HEAVY_KINDS)
+            db.claim_as(&Db::HEAVY_KINDS, "test")
                 .expect("claiming must work")
                 .is_some(),
             "an upgraded database must be able to run jobs"

@@ -100,9 +100,19 @@ and because a test that waits 30 s to prove a retry works is a test nobody runs.
 **A killed process does not strand its work.** A job is marked `running` before
 it runs, so a worker that dies mid-job leaves the row there — never claimed again
 because it is not queued, never reported because it has not failed, and shown in
-the dashboard as permanently in progress. Startup requeues them and logs how
-many. This is startup-only, which is correct for one process and *not* correct
-for two: see [§7](#7-what-is-not-built).
+the dashboard as permanently in progress.
+
+A claim therefore takes a **lease**, not just a state: sixty seconds, renewed by
+a heartbeat at a third of that for as long as the work runs, and a sweeper
+requeues anything whose holder stopped renewing. A `running` row cannot tell a
+crashed worker from a busy one; an expired lease can. That distinction is what
+makes two instances on one database safe — the earlier version requeued every
+`running` row at startup, which recovers a crash for one process and steals the
+other one's in-flight work for two.
+
+The cost is recovery latency: a crashed job waits out its lease rather than
+being reclaimed the instant someone restarts. Up to a minute, against silent
+duplicate work, which is the right way round.
 
 ### Workers
 
@@ -481,7 +491,6 @@ rest was never considered.
 | | |
 |---|---|
 | **Opus escalation** | designed as a third stage for low-confidence answers. Analysis is Sonnet; there is no escalation path |
-| **Multi-instance** | orphan reclaim runs at startup, which is correct for one process. Two instances on one database need a lease with a heartbeat, not a state column |
 | **Graph handle pool** | every job opens the graph. It is an mmap and a header check — microseconds — so this has not been worth it, but it is measured nowhere |
 | **Batch API** | 50% off for backfill and nightly re-analysis. Not wired up |
 | **Tests before a PR** | §5.5 |

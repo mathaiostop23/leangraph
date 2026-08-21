@@ -219,13 +219,29 @@ pub async fn run(cfg: Config) -> Result<()> {
         vault: Arc::new(vault),
     };
 
-    match app.db.reclaim_orphans() {
-        Ok(n) if n > 0 => tracing_line(
-            "warn",
-            &format!("requeued {n} job(s) left running by a previous process"),
-        ),
-        Err(e) => tracing_line("error", &format!("reclaiming orphaned jobs: {e}")),
-        _ => {}
+    // Sweep expired leases, at startup and then on a timer. On a timer because
+    // a process that dies mid-job should not strand it until someone restarts
+    // the server, and by *expiry* rather than by state because a second
+    // instance sharing this database is entitled to reclaim nothing that is
+    // still being renewed.
+    {
+        let sweeper = app.clone();
+        tokio::spawn(async move {
+            loop {
+                match sweeper.db.reclaim_expired() {
+                    Ok(n) if n > 0 => tracing_line(
+                        "warn",
+                        &format!("requeued {n} job(s) whose worker stopped renewing"),
+                    ),
+                    Err(e) => tracing_line("error", &format!("reclaiming jobs: {e}")),
+                    _ => {}
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    (Db::LEASE_SECS / 2).max(1) as u64
+                ))
+                .await;
+            }
+        });
     }
 
     for i in 0..app.cfg.workers {
@@ -654,9 +670,24 @@ async fn sync_repo(
 
 // -------------------------------------------------------------------- worker
 
+/// Who this process is, for the purpose of holding a lease.
+///
+/// Random per process rather than derived from the host: two containers on one
+/// machine sharing a volume is exactly the case this has to tell apart.
+fn instance_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        use aes_gcm::aead::rand_core::RngCore;
+        let mut b = [0u8; 8];
+        aes_gcm::aead::OsRng.fill_bytes(&mut b);
+        hex::encode(b)
+    })
+}
+
 async fn worker(app: App, id: usize, kinds: &'static [&'static str]) {
+    let owner = format!("{}:{id}", instance_id());
     loop {
-        let claimed = match app.db.claim_kinds(kinds) {
+        let claimed = match app.db.claim_as(kinds, &owner) {
             Ok(j) => j,
             Err(e) => {
                 tracing_line("error", &format!("worker {id}: claim failed: {e}"));
@@ -669,10 +700,35 @@ async fn worker(app: App, id: usize, kinds: &'static [&'static str]) {
             continue;
         };
 
+        // Hold the lease while the work runs. An index of a large repository
+        // takes minutes, which is many times the lease, and without this the
+        // sweeper would reclaim a job that is progressing perfectly well.
+        let beat = {
+            let db = app.db.clone();
+            let (jid, who) = (job.id, owner.clone());
+            tokio::spawn(async move {
+                let every = std::time::Duration::from_secs((Db::LEASE_SECS / 3).max(1) as u64);
+                loop {
+                    tokio::time::sleep(every).await;
+                    match db.renew_lease(jid, &who) {
+                        Ok(true) => {}
+                        // Lost it: something reclaimed the job. Stop renewing
+                        // rather than fight over a row that is no longer ours.
+                        Ok(false) => break,
+                        Err(e) => {
+                            tracing_line("error", &format!("renewing lease on {jid}: {e}"));
+                            break;
+                        }
+                    }
+                }
+            })
+        };
+
         // Waiting for the graph is not failing. A job that stands aside is put
         // back without spending an attempt, so a cold index does not exhaust
         // the retry budget of every issue that arrived while it ran.
         let outcome = run_job(&app, &job).await;
+        beat.abort();
         if let Ok(Outcome::Waiting(secs, why)) = &outcome {
             if job.defers >= Db::MAX_DEFERS {
                 let msg = format!("gave up waiting: {why}");
