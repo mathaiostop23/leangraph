@@ -45,9 +45,15 @@ pub struct Config {
     /// Where repositories and their graphs live.
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
-    /// Worker concurrency. Indexing saturates cores on its own, so more than a
-    /// couple of concurrent indexes makes all of them slower.
+    /// Concurrency for answering issues. Almost entirely waiting on the model
+    /// API, so this can be far higher than the core count.
     pub workers: usize,
+    /// Concurrency for cloning and indexing. Separate because the two have
+    /// nothing in common: indexing already saturates every core through rayon,
+    /// so running several at once makes each of them slower, while a queue
+    /// shared with issues would put a three-second answer behind a
+    /// twelve-minute index.
+    pub index_workers: usize,
     /// Gate on everything except the webhook and the health probe.
     ///
     /// `None` means the operator passed `--no-auth` and accepts that anyone who
@@ -72,12 +78,17 @@ impl App {
 
     /// Per-repo override would live in `config_json`; for now one label for the
     /// whole install.
-    pub fn trigger_label(&self, _repo: &db::Repo) -> String {
-        self.cfg.trigger_label.clone()
+    /// The label this repository acts on.
+    ///
+    /// Per repository first, because one project wanting its own word for this
+    /// should not mean restarting the server for everyone else.
+    pub fn trigger_label(&self, repo: &db::Repo) -> String {
+        repo.setting("trigger_label", &self.cfg.trigger_label)
+            .into_owned()
     }
 
-    pub fn fix_label(&self) -> &str {
-        &self.cfg.fix_label
+    pub fn fix_label_for(&self, repo: &db::Repo) -> String {
+        repo.setting("fix_label", &self.cfg.fix_label).into_owned()
     }
 
     /// Stored secret first, environment second.
@@ -186,6 +197,10 @@ async fn require_token(
 
 pub async fn run(cfg: Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.data_dir).ok();
+    // Before anything else, and before the first repository is registered:
+    // this fails at boot with a sentence the operator can act on, or it fails
+    // hours later as a corrupt WAL under load.
+    db::preflight(&cfg.data_dir)?;
     let db = Db::open(&cfg.db_path)?;
     let vault = crypto::Vault::open(&cfg.data_dir)?;
     let key_on_disk = vault.key_on_disk;
@@ -206,13 +221,18 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     for i in 0..app.cfg.workers {
         let w = app.clone();
-        tokio::spawn(async move { worker(w, i).await });
+        tokio::spawn(async move { worker(w, i, &Db::ISSUE_KINDS).await });
+    }
+    for i in 0..app.cfg.index_workers {
+        let w = app.clone();
+        tokio::spawn(async move { worker(w, 1000 + i, &Db::HEAVY_KINDS).await });
     }
 
     // Everything that manages the install. The dashboard is in here too: it
     // lists repository names, error strings and what each answer cost.
     let managed = Router::new()
         .route("/", get(ui::page))
+        .route("/metrics", get(metrics))
         .route("/repos", get(list_repos).post(add_repo))
         .route("/repos/{name}", get(get_repo))
         .route("/repos/{name}/sync", post(sync_repo))
@@ -312,6 +332,84 @@ async fn health(State(app): State<App>) -> ApiResult<Json<serde_json::Value>> {
         "ready": repos.iter().filter(|r| r.state == "ready").count(),
         "queue": { "queued": queued, "running": running },
     })))
+}
+
+/// Prometheus text format.
+///
+/// Behind the token like everything else that manages the install: the cost
+/// figures here are the operator's spend, not a liveness signal. A scraper
+/// sends the same `Authorization: Bearer` header a person would.
+async fn metrics(State(app): State<App>) -> ApiResult<String> {
+    let (queued, running) = app.db.queue_depth()?;
+    let repos = app.db.repos()?;
+    let ready = repos.iter().filter(|r| r.state == "ready").count();
+    let failed = repos.iter().filter(|r| r.state == "error").count();
+    let nodes: i64 = repos.iter().map(|r| r.node_count).sum();
+    let edges: i64 = repos.iter().map(|r| r.edge_count).sum();
+    let (runs, cost) = app.db.run_totals()?;
+
+    let mut out = String::new();
+    for (name, help, kind, value) in [
+        (
+            "leangraph_repos",
+            "Repositories registered.",
+            "gauge",
+            repos.len() as f64,
+        ),
+        (
+            "leangraph_repos_ready",
+            "Repositories with a usable graph.",
+            "gauge",
+            ready as f64,
+        ),
+        (
+            "leangraph_repos_failed",
+            "Repositories whose last index failed.",
+            "gauge",
+            failed as f64,
+        ),
+        (
+            "leangraph_jobs_queued",
+            "Jobs waiting to be claimed.",
+            "gauge",
+            queued as f64,
+        ),
+        (
+            "leangraph_jobs_running",
+            "Jobs a worker is holding.",
+            "gauge",
+            running as f64,
+        ),
+        (
+            "leangraph_graph_nodes",
+            "Nodes across every graph.",
+            "gauge",
+            nodes as f64,
+        ),
+        (
+            "leangraph_graph_edges",
+            "Edges across every graph.",
+            "gauge",
+            edges as f64,
+        ),
+        (
+            "leangraph_runs_total",
+            "Issues answered.",
+            "counter",
+            runs as f64,
+        ),
+        (
+            "leangraph_cost_usd_total",
+            "Spent on the model API.",
+            "counter",
+            cost,
+        ),
+    ] {
+        out.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
+        ));
+    }
+    Ok(out)
 }
 
 async fn list_repos(State(app): State<App>) -> ApiResult<Json<serde_json::Value>> {
@@ -451,6 +549,17 @@ struct SetConfig {
     /// independent switches — the issue still needs the fix label and the
     /// server still needs a write token.
     fix_mode: bool,
+    /// This repository's own trigger label, where the server-wide one does not
+    /// suit it. Absent leaves whatever is set.
+    #[serde(default)]
+    trigger_label: Option<String>,
+    #[serde(default)]
+    fix_label: Option<String>,
+    /// Context ceiling in graph nodes. The cost of an answer is roughly linear
+    /// in this, so it is the knob for a repository whose issues are cheap or
+    /// one whose issues are worth spending on.
+    #[serde(default)]
+    max_nodes: Option<usize>,
 }
 
 async fn set_config(
@@ -464,6 +573,18 @@ async fn set_config(
     let mut cfg: serde_json::Value =
         serde_json::from_str(&repo.config_json).unwrap_or_else(|_| json!({}));
     cfg["fix_mode"] = json!(req.fix_mode);
+    // Only what was sent. A config endpoint that silently resets the keys a
+    // caller did not mention is how a label gets turned off by someone toggling
+    // fix mode.
+    if let Some(v) = &req.trigger_label {
+        cfg["trigger_label"] = json!(v);
+    }
+    if let Some(v) = &req.fix_label {
+        cfg["fix_label"] = json!(v);
+    }
+    if let Some(v) = req.max_nodes {
+        cfg["max_nodes"] = json!(v);
+    }
     app.db.set_repo_config(repo.id, &cfg.to_string())?;
     tracing_line(
         if req.fix_mode { "warn" } else { "info" },
@@ -501,9 +622,9 @@ async fn sync_repo(
 
 // -------------------------------------------------------------------- worker
 
-async fn worker(app: App, id: usize) {
+async fn worker(app: App, id: usize, kinds: &'static [&'static str]) {
     loop {
-        let claimed = match app.db.claim() {
+        let claimed = match app.db.claim_kinds(kinds) {
             Ok(j) => j,
             Err(e) => {
                 tracing_line("error", &format!("worker {id}: claim failed: {e}"));
@@ -516,7 +637,31 @@ async fn worker(app: App, id: usize) {
             continue;
         };
 
+        // Waiting for the graph is not failing. A job that stands aside is put
+        // back without spending an attempt, so a cold index does not exhaust
+        // the retry budget of every issue that arrived while it ran.
         let outcome = run_job(&app, &job).await;
+        if let Ok(Outcome::Waiting(secs, why)) = &outcome {
+            if job.defers >= Db::MAX_DEFERS {
+                let msg = format!("gave up waiting: {why}");
+                tracing_line("error", &format!("job {} ({}) {msg}", job.id, job.kind));
+                let _ = app.db.finish_job(job.id, Some(&msg), false);
+            } else {
+                // Say it once. Repeating it every ten seconds for a
+                // twelve-minute index would bury everything else in the log.
+                if job.defers == 0 {
+                    tracing_line(
+                        "info",
+                        &format!("job {} ({}) waiting: {why}", job.id, job.kind),
+                    );
+                }
+                if let Err(e) = app.db.defer_job(job.id, *secs) {
+                    tracing_line("error", &format!("worker {id}: defer failed: {e}"));
+                }
+            }
+            continue;
+        }
+
         let err = outcome.as_ref().err().map(|e| e.to_string());
         // Ask the error what it is rather than reading its message.
         let retry = outcome
@@ -549,11 +694,22 @@ async fn worker(app: App, id: usize) {
     }
 }
 
-async fn run_job(app: &App, job: &db::Job) -> Result<()> {
+/// What a job did. `Waiting` is not failure and not success: the work has not
+/// been attempted yet because something it needs is not ready.
+pub enum Outcome {
+    Done,
+    Waiting(i64, String),
+}
+
+async fn run_job(app: &App, job: &db::Job) -> Result<Outcome> {
     match job.kind.as_str() {
-        "clone" => clone_repo(app, job.repo_id).await,
-        "index" => index_repo(app, job.repo_id, true).await,
-        "sync" => index_repo(app, job.repo_id, false).await,
+        "clone" => clone_repo(app, job.repo_id).await.map(|()| Outcome::Done),
+        "index" => index_repo(app, job.repo_id, true)
+            .await
+            .map(|()| Outcome::Done),
+        "sync" => index_repo(app, job.repo_id, false)
+            .await
+            .map(|()| Outcome::Done),
         "issue" => answer_issue(app, job).await,
         other => anyhow::bail!("unknown job kind `{other}`"),
     }
@@ -668,7 +824,7 @@ async fn index_repo(app: &App, repo_id: i64, full: bool) -> Result<()> {
 /// Every exit path records a run: a job that silently did nothing is
 /// indistinguishable from one that never ran, and the cost ledger is only
 /// trustworthy if it accounts for the cheap outcomes too.
-async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
+async fn answer_issue(app: &App, job: &db::Job) -> Result<Outcome> {
     let payload: serde_json::Value = serde_json::from_str(&job.payload).unwrap_or_default();
     let issue_id = payload
         .get("issue_id")
@@ -676,6 +832,25 @@ async fn answer_issue(app: &App, job: &db::Job) -> Result<()> {
         .context("issue job without an issue_id")?;
     let issue = app.db.issue(issue_id)?.context("issue vanished")?;
     let repo = app.repo(issue.repo_id)?;
+
+    // An issue can arrive before the repository has finished indexing — the
+    // first one usually does, since registering a repository and opening an
+    // issue about it are the same afternoon. Answering it anyway means
+    // answering without the graph, which is the one thing this tool is for.
+    // A cold index is seconds to minutes; the issue can wait for it.
+    if repo.state != "ready" {
+        if repo.state == "error" {
+            anyhow::bail!(
+                "repository {} could not be indexed: {}",
+                repo.full_name,
+                repo.error.as_deref().unwrap_or("no reason recorded")
+            );
+        }
+        return Ok(Outcome::Waiting(
+            10,
+            format!("{} is {}", repo.full_name, repo.state),
+        ));
+    }
 
     let run_id = app.db.start_run(issue.id, repo.id)?;
     let started = Instant::now();
@@ -727,7 +902,7 @@ If that is wrong, say so on the issue and I will look properly.\n",
                 repo.full_name, issue.number
             ),
         );
-        return Ok(());
+        return Ok(Outcome::Done);
     }
 
     let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
@@ -742,7 +917,7 @@ If that is wrong, say so on the issue and I will look properly.\n",
             None,
         )?;
         tracing_line("warn", "no LEANGRAPH_ANTHROPIC_KEY — issue skipped");
-        return Ok(());
+        return Ok(Outcome::Done);
     };
 
     // --- stage 1: triage -----------------------------------------------------
@@ -770,8 +945,10 @@ If that is wrong, say so on the issue and I will look properly.\n",
             issue.body
         );
         let repo_path = PathBuf::from(&repo.path);
+        let max_nodes = repo.setting_usize("max_nodes", crate::query::Budget::default().max_nodes);
         let built =
-            tokio::task::spawn_blocking(move || build_context(&repo_path, &seed_text)).await??;
+            tokio::task::spawn_blocking(move || build_context(&repo_path, &seed_text, max_nodes))
+                .await??;
         nodes = built.nodes;
         files_json = built.files_json.clone();
 
@@ -870,7 +1047,7 @@ willing to propose from the context available._\n",
             triage.kind.as_str()
         ),
     );
-    Ok(())
+    Ok(Outcome::Done)
 }
 
 #[derive(Clone)]
@@ -891,11 +1068,21 @@ fn fingerprint_of(repo_path: &std::path::Path, title: &str, body: &str) -> dedup
 
 /// Graph lookup is synchronous and mmap-backed; it belongs on the blocking pool
 /// like indexing does.
-fn build_context(repo_path: &std::path::Path, text: &str) -> Result<Built> {
+fn build_context(repo_path: &std::path::Path, text: &str, max_nodes: usize) -> Result<Built> {
     use crate::{graph::Graph, query};
     let g = Graph::open(&repo_path.join(".leangraph").join("graph.bin"))
         .context("repository has no graph yet")?;
-    let ctx = query::build_from_text(&g, text, &query::Budget::default());
+    // A repository can ask for a tighter or a wider selection than the default.
+    // The cost of an answer is roughly linear in this, so it is the one knob an
+    // operator watching a bill actually wants.
+    let ctx = query::build_from_text(
+        &g,
+        text,
+        &query::Budget {
+            max_nodes,
+            ..query::Budget::default()
+        },
+    );
     let preamble = g.preamble_at_least(agent::CACHE_MIN_CHARS, 60);
 
     let mut out = String::new();

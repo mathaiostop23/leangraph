@@ -106,12 +106,19 @@ for two: see [§7](#7-what-is-not-built).
 
 ### Workers
 
-`--workers N` (default 2) spawns N identical tasks over one queue. The design
-called for three queues at different concurrencies — index CPU-bound, issue
-IO-bound — and that is a real concern at volume, since a twelve-minute monorepo
-index will block an issue behind it. It is not built. At the volume this handles
-today the simpler thing is honest; at higher volume it is the first structural
-change to make.
+Two pools, because the two sorts of work have nothing in common. Indexing
+saturates every core through rayon, so a second concurrent index makes both
+slower rather than either faster — `--index-workers` defaults to **1**.
+Answering an issue is a socket waiting on a model, so `--workers` defaults to
+**8**. They claim different job kinds, which is what keeps a three-second answer
+from queuing behind a twelve-minute index.
+
+An issue that arrives before its repository has finished indexing **waits**. The
+first issue on a repository usually does arrive that way — registering it and
+opening an issue about it are the same afternoon — and answering without the
+graph is answering without the one thing this is for. Waiting is not failing, so
+a deferred job is put back without spending an attempt; it gets 180 of those,
+which outlasts a cold index of anything reasonable, and then fails with a reason.
 
 ---
 
@@ -123,9 +130,10 @@ change to make.
 | `GET` `POST` | `/repos` | list; register (clone + index in the background) |
 | `GET` | `/repos/{owner/name}` | state, counts, index time, last error |
 | `POST` | `/repos/{owner/name}/sync` | fetch and incrementally reindex |
-| `POST` | `/repos/{owner/name}/config` | per-repo settings; `fix_mode` is the only one |
+| `POST` | `/repos/{owner/name}/config` | `fix_mode`, `trigger_label`, `fix_label`, `max_nodes` |
 | `GET` | `/secrets` | names and hints only — never values |
 | `POST` `DELETE` | `/secrets/{name}` | store encrypted; remove |
+| `GET` | `/metrics` | Prometheus text: repos, queue depth, graph size, spend |
 | `GET` | `/health` | **open** — counts, not contents |
 | `POST` | `/webhook/github` | **open** — HMAC-verified |
 
@@ -249,9 +257,8 @@ webhook delivery
   fix mode gates all open? → §5.5
 ```
 
-An issue arriving before the graph exists is answered without graph context
-rather than failed. Deferring it until the index finishes — and saying so on the
-issue — is the better behaviour and is not built.
+An issue arriving before the graph exists waits for it rather than being
+answered without it (§1).
 
 ---
 
@@ -402,6 +409,13 @@ never values.
 
 ## 6. Data model
 
+Before any of it, `preflight` writes and reads back a probe database in the data
+directory and refuses to start if that fails. A bind mount from a macOS or
+Windows host has unreliable file locking and mmap semantics, and both this
+database and every graph depend on them — without the check the failure is not a
+refusal to boot but a corrupt WAL hours later under load, which nobody can
+diagnose from the outside.
+
 SQLite. `PRAGMA user_version` drives a forward-only migration ladder, and
 `SCHEMA` is asserted against the ladder's top step on every open — so adding a
 migration without bumping the constant, or the reverse, fires immediately rather
@@ -412,9 +426,10 @@ repos        id, full_name, provider, path, default_branch, url, private,
              state (pending|cloning|indexing|ready|error),
              last_indexed_sha, last_indexed_at,
              node_count, edge_count, file_count, index_ms, error,
-             config_json          -- per-repo settings; `fix_mode` is the only key
+             config_json          -- fix_mode, trigger_label, fix_label, max_nodes
 jobs         id, kind, repo_id, payload, state, dedupe_key,
-             attempts, run_after, error, created_at, started_at, finished_at
+             attempts, defers, run_after, error,
+             created_at, started_at, finished_at
 issues       id, repo_id, number, title, body, author_association, fingerprint
 runs         id, issue_id, repo_id, status, outcome, context_files,
              total_tokens, cost_usd, duration_ms, error, created_at
@@ -440,16 +455,11 @@ rest was never considered.
 | | |
 |---|---|
 | **Opus escalation** | designed as a third stage for low-confidence answers. Analysis is Sonnet; there is no escalation path |
-| **Separate queues** | one worker pool over one queue. A long index blocks an issue behind it (§1) |
 | **Multi-instance** | orphan reclaim runs at startup, which is correct for one process. Two instances on one database need a lease with a heartbeat, not a state column |
 | **Graph handle pool** | every job opens the graph. It is an mmap and a header check — microseconds — so this has not been worth it, but it is measured nowhere |
 | **Batch API** | 50% off for backfill and nightly re-analysis. Not wired up |
-| **Metrics** | structured logs, no Prometheus endpoint |
 | **GitLab** | GitHub only. The provider boundary exists; the adapter does not |
-| **WAL preflight** | bind mounts from macOS/Windows hosts have unreliable locking and mmap semantics, and the CSR is mmap'd. The compose file uses a named volume; nothing refuses to boot if you override it |
 | **Tests before a PR** | §5.5 |
-| **Per-repo configuration** | `config_json` carries `fix_mode` and nothing else. The trigger and fix labels are server-wide flags, and there is no per-repo token ceiling |
-| **Deferring an issue until indexed** | answered without graph context instead (§4) |
 
 ---
 
@@ -480,12 +490,12 @@ curl -X POST localhost:7777/repos \
 The server's share of the suite. All of it runs without the benchmark corpora.
 
 ```
-27  unit                 vetting rules, dedup scoring, SSRF, schema migration
+33  unit                 vetting rules, dedup scoring, SSRF, queues, preflight
 21  webhook gates        signature, replay, authorship, labels, form encoding
 38  agent assertions     prompt safety, cache correctness
 23  fix mode, end-to-end against a real git remote
 10  deduplication, end-to-end
- 7  retry and recovery, end-to-end against a rate-limited API
+13  resilience, end-to-end: rate limits, restarts, waiting for an index
 ```
 
 `bench/server_test.sh` runs the ones that need a live server, a stub API and a

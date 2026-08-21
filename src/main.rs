@@ -173,9 +173,15 @@ enum Cmd {
         /// Where repositories, graphs and the database live
         #[arg(long, default_value = ".leangraph-server")]
         data: PathBuf,
-        /// Concurrent workers. Indexing already saturates cores.
-        #[arg(long, default_value_t = 2)]
+        /// Concurrency for answering issues. Almost all of it is spent waiting
+        /// on the model API, so this can far exceed the core count.
+        #[arg(long, default_value_t = 8)]
         workers: usize,
+        /// Concurrency for cloning and indexing. One by default: indexing
+        /// already saturates every core, so a second concurrent index makes
+        /// both slower rather than either faster.
+        #[arg(long, default_value_t = 1)]
+        index_workers: usize,
         /// Label an issue must carry before the bot acts
         #[arg(long, default_value = "leangraph")]
         trigger_label: String,
@@ -538,6 +544,7 @@ fn main() -> Result<()> {
             addr,
             data,
             workers,
+            index_workers,
             trigger_label,
             fix_label,
             no_auth,
@@ -551,6 +558,7 @@ fn main() -> Result<()> {
                 db_path: data.join("leangraph.db"),
                 data_dir: data.clone(),
                 workers: workers.max(1),
+                index_workers: index_workers.max(1),
                 // From the environment, never a flag: a secret in argv is
                 // visible in `ps` to every user on the box.
                 webhook_secret: std::env::var("LEANGRAPH_WEBHOOK_SECRET")

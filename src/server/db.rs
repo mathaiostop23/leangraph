@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Schema version. Bump alongside a step in `migrate`.
-const SCHEMA: u32 = 4;
+const SCHEMA: u32 = 5;
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -89,6 +89,11 @@ impl Db {
                 have = 4;
                 c.pragma_update(None, "user_version", have)?;
             }
+            if have < 5 {
+                add_column(c, "jobs", "defers", "INTEGER NOT NULL DEFAULT 0")?;
+                have = 5;
+                c.pragma_update(None, "user_version", have)?;
+            }
             // The constant is the ladder's top step. Asserting it here is what
             // makes it a guard rather than a comment: add a migration without
             // bumping it, or bump it without adding one, and this fires on the
@@ -103,6 +108,48 @@ impl Db {
             Ok(())
         })
     }
+}
+
+/// Refuse to start on storage that cannot hold this database.
+///
+/// A bind mount from a macOS or Windows host goes through a translation layer
+/// with unreliable file locking and mmap semantics, and both the app database
+/// and the graphs depend on those. The failure without this check is not a
+/// refusal to boot — it is a server that runs, indexes, and corrupts a WAL
+/// hours later under load, which is a support ticket nobody can diagnose from
+/// the outside. Writing and reading back one row costs milliseconds once.
+pub fn preflight(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let probe = dir.join(".preflight.db");
+    let _ = std::fs::remove_file(&probe);
+
+    let check = || -> Result<i64> {
+        let c = Connection::open(&probe)?;
+        let mode: String = c.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            bail!("this filesystem refused write-ahead logging (got journal_mode={mode})");
+        }
+        c.execute_batch("CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (42);")?;
+        // A second connection, because the failure mode is locking between
+        // handles rather than anything one handle can see on its own.
+        let d = Connection::open(&probe)?;
+        Ok(d.query_row("SELECT n FROM t", [], |r| r.get(0))?)
+    };
+
+    let got = check().with_context(|| {
+        format!(
+            "{} cannot hold the database. On Docker Desktop this is usually a bind mount — \
+             use a named volume",
+            dir.display()
+        )
+    })?;
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", probe.display()));
+    }
+    if got != 42 {
+        bail!("{} read back {got} where 42 was written", dir.display());
+    }
+    Ok(())
 }
 
 /// `ALTER TABLE ADD COLUMN` errors when the column is already there, and it is
@@ -152,6 +199,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- Not before this time. A retry that comes straight back does not wait out
   -- whatever it was that failed.
   run_after   INTEGER NOT NULL DEFAULT 0,
+  -- Times this job stood aside for something it was waiting on, as distinct
+  -- from times it was tried and failed. Waiting for an index to finish is not
+  -- an attempt, and counting it as one would exhaust the retry budget before
+  -- the work could start.
+  defers      INTEGER NOT NULL DEFAULT 0,
   error       TEXT,
   created_at  INTEGER NOT NULL,
   started_at  INTEGER,
@@ -357,6 +409,8 @@ pub struct Job {
     pub payload: String,
     /// How many times this has been claimed, this one included.
     pub attempts: i64,
+    /// How many times it stood aside for something it was waiting on.
+    pub defers: i64,
 }
 
 impl Db {
@@ -381,28 +435,67 @@ impl Db {
 
     /// Claim the oldest queued job. The update is the claim: two workers cannot
     /// both transition the same row out of `queued`.
-    pub fn claim(&self) -> Result<Option<Job>> {
+    /// Take the oldest ready job of one of these kinds.
+    ///
+    /// Kinds rather than everything, because the two sorts of work here have
+    /// nothing in common: indexing saturates every core for as long as the
+    /// repository is large, and answering an issue is a socket waiting on a
+    /// model. One pool over one queue puts a three-second answer behind a
+    /// twelve-minute index, and no amount of worker count fixes that — the
+    /// index workers would just multiply and make each other slower.
+    pub fn claim_kinds(&self, kinds: &[&str]) -> Result<Option<Job>> {
+        let list = kinds
+            .iter()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(",");
         self.with(|c| {
+            let sql = format!(
+                "UPDATE jobs SET state='running', started_at=?1, attempts = attempts + 1
+                 WHERE id = (SELECT id FROM jobs
+                             WHERE state='queued' AND run_after <= ?1 AND kind IN ({list})
+                             ORDER BY id LIMIT 1)
+                 RETURNING id, kind, repo_id, payload, attempts, defers"
+            );
             let job = c
-                .query_row(
-                    "UPDATE jobs SET state='running', started_at=?1, attempts = attempts + 1
-                     WHERE id = (SELECT id FROM jobs
-                                 WHERE state='queued' AND run_after <= ?1
-                                 ORDER BY id LIMIT 1)
-                     RETURNING id, kind, repo_id, payload, attempts",
-                    params![now()],
-                    |r| {
-                        Ok(Job {
-                            id: r.get(0)?,
-                            kind: r.get(1)?,
-                            repo_id: r.get(2)?,
-                            payload: r.get(3)?,
-                            attempts: r.get(4)?,
-                        })
-                    },
-                )
+                .query_row(&sql, params![now()], |r| {
+                    Ok(Job {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        repo_id: r.get(2)?,
+                        payload: r.get(3)?,
+                        attempts: r.get(4)?,
+                        defers: r.get(5)?,
+                    })
+                })
                 .optional()?;
             Ok(job)
+        })
+    }
+
+    pub const HEAVY_KINDS: [&'static str; 3] = ["clone", "index", "sync"];
+    pub const ISSUE_KINDS: [&'static str; 1] = ["issue"];
+
+    /// How long a job may stand aside waiting before it is given up on.
+    ///
+    /// A cold index of a large repository is minutes, so this has to outlast
+    /// one; past it the wait is not a slow index, it is a stuck one.
+    pub const MAX_DEFERS: i64 = 180;
+
+    /// Put a job back without charging it an attempt.
+    ///
+    /// It was never tried — it is waiting on something else — and spending the
+    /// retry budget on waiting would fail it before the work could begin.
+    pub fn defer_job(&self, id: i64, secs: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs
+                   SET state='queued', run_after=?2, started_at=NULL,
+                       attempts = MAX(attempts - 1, 0), defers = defers + 1
+                 WHERE id = ?1",
+                params![id, now() + secs],
+            )?;
+            Ok(())
         })
     }
 
@@ -480,6 +573,17 @@ impl Db {
         })
     }
 
+    /// Issues answered, and what they cost.
+    pub fn run_totals(&self) -> Result<(i64, f64)> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(cost_usd), 0) FROM runs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+    }
+
     pub fn queue_depth(&self) -> Result<(i64, i64)> {
         self.with(|c| {
             let q: i64 =
@@ -512,10 +616,36 @@ impl Repo {
     /// unparseable is treated as off — a corrupt config must not be a way to
     /// turn on the one feature that writes to someone's repository.
     pub fn fix_mode(&self) -> bool {
+        self.config().and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    fn config(&self) -> Option<serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(&self.config_json)
+            .ok()?
+            .get("fix_mode")
+            .cloned()
+    }
+
+    /// A per-repository setting, or the server-wide default.
+    ///
+    /// One repository wanting a different trigger label, or a tighter context
+    /// budget than the rest, is the ordinary case on a shared install — and
+    /// making those flags means the operator restarts everyone to change one.
+    pub fn setting<'a>(&self, key: &str, fallback: &'a str) -> std::borrow::Cow<'a, str> {
         serde_json::from_str::<serde_json::Value>(&self.config_json)
             .ok()
-            .and_then(|v| v.get("fix_mode").and_then(|b| b.as_bool()))
-            .unwrap_or(false)
+            .and_then(|v| v.get(key).and_then(|x| x.as_str().map(String::from)))
+            .map_or(
+                std::borrow::Cow::Borrowed(fallback),
+                std::borrow::Cow::Owned,
+            )
+    }
+
+    pub fn setting_usize(&self, key: &str, fallback: usize) -> usize {
+        serde_json::from_str::<serde_json::Value>(&self.config_json)
+            .ok()
+            .and_then(|v| v.get(key).and_then(serde_json::Value::as_u64))
+            .map_or(fallback, |n| n as usize)
     }
 }
 
@@ -763,11 +893,150 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A database of its own, with one repository to hang jobs on.
+    fn fresh(tag: &str) -> Db {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "leangraph-{tag}-{}-{}.db",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let db = Db::open(&path).expect("open");
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO repos (id, full_name, path, created_at) VALUES (1, 'a/b', '/tmp', 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("seed repo");
+        db
+    }
+
+    fn sample_repo() -> Repo {
+        Repo {
+            id: 1,
+            full_name: "a/b".into(),
+            path: "/tmp".into(),
+            url: None,
+            default_branch: "main".into(),
+            state: "ready".into(),
+            last_indexed_sha: None,
+            node_count: 0,
+            edge_count: 0,
+            file_count: 0,
+            index_ms: 0,
+            error: None,
+            config_json: "{}".into(),
+        }
+    }
 
     /// The upgrade path is the one nobody exercises, because development always
     /// starts from an empty database. `config_json` reached DDL without a
     /// migration and broke every read on an existing install; this is the test
     /// that would have caught it.
+    #[test]
+    fn a_worker_only_claims_the_kinds_it_asked_for() {
+        // One pool over one queue puts a three-second answer behind a
+        // twelve-minute index, and adding index workers only makes each index
+        // slower. The separation has to happen at the claim.
+        let db = fresh("kinds");
+        db.enqueue("index", 1, "{}", None).unwrap();
+        db.enqueue("issue", 1, "{}", None).unwrap();
+
+        let issue = db
+            .claim_kinds(&Db::ISSUE_KINDS)
+            .unwrap()
+            .expect("an issue was queued");
+        assert_eq!(issue.kind, "issue", "must not have taken the index job");
+
+        let heavy = db.claim_kinds(&Db::HEAVY_KINDS).unwrap().expect("index");
+        assert_eq!(heavy.kind, "index");
+
+        assert!(
+            db.claim_kinds(&Db::ISSUE_KINDS).unwrap().is_none(),
+            "and neither pool sees the other's work twice"
+        );
+    }
+
+    #[test]
+    fn waiting_does_not_spend_an_attempt() {
+        // An issue that arrives during a cold index waits for it. Charging that
+        // to the retry budget would fail the issue before the graph it needs
+        // even exists.
+        let db = fresh("defer");
+        db.enqueue("issue", 1, "{}", None).unwrap();
+        let job = db.claim_kinds(&Db::ISSUE_KINDS).unwrap().unwrap();
+        assert_eq!(job.attempts, 1);
+        assert_eq!(job.defers, 0);
+
+        db.defer_job(job.id, 0).unwrap();
+        let again = db
+            .claim_kinds(&Db::ISSUE_KINDS)
+            .unwrap()
+            .expect("it must come back");
+        assert_eq!(again.attempts, 1, "the attempt was given back");
+        assert_eq!(again.defers, 1, "and the wait was counted separately");
+    }
+
+    #[test]
+    fn a_deferred_job_is_not_claimable_before_its_time() {
+        let db = fresh("defer-time");
+        db.enqueue("issue", 1, "{}", None).unwrap();
+        let job = db.claim_kinds(&Db::ISSUE_KINDS).unwrap().unwrap();
+        db.defer_job(job.id, 300).unwrap();
+        assert!(
+            db.claim_kinds(&Db::ISSUE_KINDS).unwrap().is_none(),
+            "waiting five minutes means five minutes"
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_a_directory_it_can_use() {
+        let dir = std::env::temp_dir().join(format!("leangraph-pre-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        preflight(&dir).expect("a normal temp directory must pass");
+        // And it must leave nothing behind, or the next boot inherits a probe.
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(left.is_empty(), "probe files were left: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preflight_refuses_what_it_cannot_write() {
+        // A path that cannot be a directory at all stands in for the storage
+        // this exists to catch: the point is that it fails at boot, not later.
+        let file = std::env::temp_dir().join(format!("leangraph-pre-file-{}", std::process::id()));
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(preflight(&file.join("under")).is_err());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_repo_setting_falls_back_to_the_server_default() {
+        let mut r = Repo {
+            config_json: "{}".into(),
+            ..sample_repo()
+        };
+        assert_eq!(r.setting("trigger_label", "leangraph"), "leangraph");
+        assert_eq!(r.setting_usize("max_nodes", 25), 25);
+
+        r.config_json = r#"{"trigger_label":"triage","max_nodes":80}"#.into();
+        assert_eq!(r.setting("trigger_label", "leangraph"), "triage");
+        assert_eq!(r.setting_usize("max_nodes", 25), 80);
+        // Untouched keys still fall through.
+        assert_eq!(r.setting("fix_label", "leangraph-fix"), "leangraph-fix");
+    }
+
     #[test]
     fn migrating_an_old_database_adds_the_missing_columns() {
         let dir = std::env::temp_dir().join(format!("leangraph-db-{}", std::process::id()));
@@ -819,7 +1088,9 @@ mod tests {
         db.enqueue("sync", repos[0].id, "{}", None)
             .expect("the job queue must exist after an upgrade");
         assert!(
-            db.claim().expect("claiming must work").is_some(),
+            db.claim_kinds(&Db::HEAVY_KINDS)
+                .expect("claiming must work")
+                .is_some(),
             "an upgraded database must be able to run jobs"
         );
 

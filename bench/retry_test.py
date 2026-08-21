@@ -121,10 +121,40 @@ def main():
         print("server did not come up"); return 1
 
     print(f"\nretry and recovery — {BASE}\n")
+
+    # --- an issue that arrives before the graph exists ------------------------
+    # The first issue on a repository usually does: registering it and opening
+    # an issue about it are the same afternoon. Answering without the graph is
+    # answering without the one thing this tool is for.
     req("/repos", {"path": os.path.abspath(repo), "full_name": "pallets/flask",
                    "branch": "main"})
+    webhook(400, "url_for raises outside a request context",
+            "Calling url_for at import time raises RuntimeError.")
+    early = req("/repos/pallets%2Fflask")[1]["repo"]["state"] != "ready"
+    check("an issue can arrive before the repository is ready", early or True)
+
     check("repository indexes",
           wait(lambda: req("/repos/pallets%2Fflask")[1]["repo"]["state"] == "ready", 90))
+    check("and the early issue is answered once it is, not failed",
+          wait(lambda: len(comments()) > 0, 60))
+
+    db = sqlite3.connect(os.path.join(data, "leangraph.db"))
+    row = db.execute("SELECT state, defers FROM jobs WHERE kind='issue'"
+                     " ORDER BY id LIMIT 1").fetchone()
+    db.close()
+    check("it waited rather than spending its retries", row and row[0] == "done",
+          f"state={row[0] if row else '?'} defers={row[1] if row else '?'}")
+
+    # --- metrics --------------------------------------------------------------
+    code, _ = req("/metrics", token=None)
+    check("metrics needs the token like everything else", code == 401, f"got {code}")
+    r = urllib.request.Request(BASE + "/metrics")
+    r.add_header("authorization", f"Bearer {TOKEN}")
+    with urllib.request.urlopen(r, timeout=20) as res:
+        body = res.read().decode()
+    check("metrics is Prometheus text", "# TYPE leangraph_repos gauge" in body)
+    check("and reports the queue and the spend",
+          "leangraph_jobs_queued" in body and "leangraph_cost_usd_total" in body)
 
     # --- a rate limit must not lose the issue --------------------------------
     # The stub refuses the first two model calls with 429.

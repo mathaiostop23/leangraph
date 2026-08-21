@@ -69,6 +69,12 @@ requests, so it does not default to open — send `Authorization: Bearer …`, o
 open the dashboard at `/?token=…`. `--no-auth` turns the gate off for anyone who
 already has one in front.
 
+Two worker pools, because indexing and answering have nothing in common: one
+saturates every core, the other waits on a socket. An issue that arrives before
+its repository has finished indexing waits for the graph rather than being
+answered without it — and waiting is not failing, so it does not spend the
+issue's retries.
+
 A rate limit is not a verdict on the issue, so it is not treated as one. Only
 failures that are actually transient — 429, 5xx, a connection that never landed
 — go back on the queue, backing off 30 s, 2 m, 8 m before giving up; a malformed
@@ -220,14 +226,14 @@ Everything below runs in CI on every push, without the benchmark corpora — thi
 repository is Rust, which the indexer supports, so it can be its own corpus.
 
 ```
-58  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
-27  server unit          vetting rules, dedup scoring, SSRF, schema migration
+68  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
+33  server unit          vetting rules, dedup scoring, SSRF, queues, preflight
  5  convergence          incremental sync equals a full reindex
 21  webhook gates        signature, replay, authorship, labels
 38  agent assertions     prompt safety, cache correctness
 23  fix mode, end-to-end against a real git remote
 10  deduplication, end-to-end
- 7  retry and recovery, end-to-end against a rate-limited API
+13  resilience, end-to-end: rate limits, restarts, waiting for an index
 13  languages, each connecting two methods on a fixture
 ```
 

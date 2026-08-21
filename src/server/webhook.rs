@@ -221,7 +221,7 @@ fn on_issue(app: &App, p: &Value) -> ApiResult<Value> {
     // labelled for it specifically, and a token to push with. Asking for an
     // explanation and asking for a change to your code are different decisions,
     // so they are different labels.
-    let fix_label = app.fix_label().to_string();
+    let fix_label = app.fix_label_for(&repo);
     let wants_fix = issue
         .get("labels")
         .and_then(Value::as_array)
