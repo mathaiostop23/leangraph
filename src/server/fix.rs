@@ -162,14 +162,51 @@ const TEST_OUTPUT_CHARS: usize = 4_000;
 /// does, with whatever that process can reach. Putting a boundary around it —
 /// a container, a user, a network policy — is the operator's to do, and the
 /// documentation says so rather than implying this is safe by construction.
-fn run_tests(work: &Path, command: &str, files: &[String]) -> TestRun {
-    run_with_timeout(work, command, files, TEST_TIMEOUT)
+fn run_tests(work: &Path, command: &str, files: &[String], sandbox: &str) -> TestRun {
+    run_with_timeout(work, command, files, sandbox, TEST_TIMEOUT)
 }
+
+/// Wrap the test command in whatever the operator uses for isolation.
+///
+/// `{dir}` is the worktree and `{cmd}` the shell-quoted command, so a `sandbox`
+/// of
+///
+/// ```text
+/// docker run --rm --network none -v {dir}:/w -w /w python:3.12 sh -c {cmd}
+/// ```
+///
+/// gets a container with no network and nothing mounted but the tree under
+/// test. This is the difference between telling an operator that isolation is
+/// their problem and giving them somewhere to put it.
+fn wrap(sandbox: &str, work: &Path, inner: &str) -> String {
+    if sandbox.trim().is_empty() {
+        return inner.to_string();
+    }
+    sandbox
+        .replace("{dir}", &work.to_string_lossy())
+        .replace("{cmd}", &shell_quote(inner))
+}
+
+/// Single-quote for `sh`, the only form with no escapes inside it.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// What a test process is allowed to see of the server's environment.
+///
+/// An allowlist, and a short one. The first version of this inherited the
+/// server's environment wholesale, which handed `LEANGRAPH_MASTER_KEY`, the
+/// model API key and the write token to whatever the repository's test suite
+/// runs — the one thing a patch written from a hostile issue would want. A
+/// build needs a PATH and somewhere to put its caches; it does not need the
+/// keys to the install.
+const ENV_KEEP: [&str; 6] = ["PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR"];
 
 fn run_with_timeout(
     work: &Path,
     command: &str,
     files: &[String],
+    sandbox: &str,
     limit: std::time::Duration,
 ) -> TestRun {
     use std::process::{Command, Stdio};
@@ -177,18 +214,33 @@ fn run_with_timeout(
     // `{files}` where the command wants the affected paths; otherwise the
     // command runs whole, which is what a `make test` wants.
     let list = files.join(" ");
-    let rendered = command.replace("{files}", &list);
+    let rendered = wrap(sandbox, work, &command.replace("{files}", &list));
 
-    let mut child = match Command::new("sh")
-        .arg("-c")
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
         .arg(&rendered)
         .current_dir(work)
         // A test that waits on stdin waits forever.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .env_clear();
+    for k in ENV_KEEP {
+        if let Ok(v) = std::env::var(k) {
+            cmd.env(k, v);
+        }
+    }
+    // Its own process group, so a timeout kills the tree rather than the shell
+    // that spawned it. Killing only the shell leaves the actual test runner
+    // holding the worktree, and the next attempt fails on a directory that
+    // will not delete.
+    #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return TestRun {
@@ -206,6 +258,7 @@ fn run_with_timeout(
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if std::time::Instant::now() >= deadline => {
+                kill_group(child.id());
                 let _ = child.kill();
                 timed_out = true;
                 break;
@@ -255,6 +308,7 @@ pub fn propose(
     token: Option<&str>,
     full_name: &str,
     test_command: Option<&str>,
+    sandbox: &str,
 ) -> Result<Proposal> {
     let files = vet(patch)?;
     let token = token.context("fix mode needs a token with write access")?;
@@ -342,7 +396,7 @@ pub fn propose(
         // rather than quietly opened as though nothing was checked.
         let tests = test_command
             .filter(|c| !c.trim().is_empty())
-            .map(|c| run_tests(&work, c, &files));
+            .map(|c| run_tests(&work, c, &files, sandbox));
 
         git(&work, Some(token), &["push", "origin", &branch])?;
 
@@ -364,6 +418,23 @@ pub fn propose(
     let _ = full_name;
     result
 }
+
+/// Kill a whole process group.
+///
+/// Shelling out to `kill` rather than taking a libc dependency for one call.
+/// Negative pid means the group, which is the point: `sh -c 'pytest'` that runs
+/// out of time leaves pytest running otherwise.
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &format!("-{pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_group(_pid: u32) {}
 
 /// What the pull request says about itself.
 ///
@@ -461,7 +532,7 @@ mod tests {
     #[test]
     fn a_passing_suite_is_reported_as_the_suite_agreeing() {
         let t = TempTree::new("fixtests");
-        let r = run_tests(t.path(), "echo '3 passed'; exit 0", &[]);
+        let r = run_tests(t.path(), "echo '3 passed'; exit 0", &[], "");
         assert!(r.ok);
         assert!(!r.timed_out);
         assert!(r.output.contains("3 passed"), "{r:?}");
@@ -479,7 +550,7 @@ mod tests {
         // Discarding the branch would hide the failure. The point of the draft
         // is that a human sees what happened.
         let t = TempTree::new("fixtests-fail");
-        let r = run_tests(t.path(), "echo 'assert 1 == 2'; exit 1", &[]);
+        let r = run_tests(t.path(), "echo 'assert 1 == 2'; exit 1", &[], "");
         assert!(!r.ok);
         let body = pr_body(7, Some(&r));
         assert!(body.contains("**failed**"), "{body}");
@@ -495,12 +566,84 @@ mod tests {
             t.path(),
             "sleep 30",
             &[],
+            "",
             std::time::Duration::from_millis(400),
         );
         assert!(r.timed_out, "{r:?}");
         assert!(!r.ok);
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         assert!(pr_body(7, Some(&r)).contains("timed out"));
+    }
+
+    #[test]
+    fn the_installs_secrets_do_not_reach_the_test_process() {
+        // The first version of this inherited the server's environment, which
+        // handed the master key, the model API key and the write token to
+        // whatever a repository's suite runs — precisely what a patch written
+        // from a hostile issue would be after.
+        std::env::set_var("LEANGRAPH_MASTER_KEY", "00ff-secret-material");
+        std::env::set_var("LEANGRAPH_GITHUB_TOKEN", "ghp-secret-token");
+        let t = TempTree::new("fixtests-env");
+        let r = run_tests(t.path(), "env", &[], "");
+        std::env::remove_var("LEANGRAPH_MASTER_KEY");
+        std::env::remove_var("LEANGRAPH_GITHUB_TOKEN");
+
+        assert!(
+            !r.output.contains("secret-material") && !r.output.contains("secret-token"),
+            "the install's secrets reached the test process:\n{}",
+            r.output
+        );
+        assert!(
+            !r.output.contains("LEANGRAPH_"),
+            "nothing of ours belongs in there at all:\n{}",
+            r.output
+        );
+        // ...but a build still needs to find its tools.
+        assert!(r.output.contains("PATH="), "{}", r.output);
+    }
+
+    #[test]
+    fn a_timeout_kills_the_tree_and_not_only_the_shell() {
+        // `sh -c 'pytest'` that runs out of time leaves pytest holding the
+        // worktree, and the next attempt fails deleting a directory in use.
+        let t = TempTree::new("fixtests-group");
+        let marker = t.path().join("still-alive");
+        let cmd = format!("( sleep 3; touch {} ) & wait", marker.to_string_lossy());
+        let r = run_with_timeout(
+            t.path(),
+            &cmd,
+            &[],
+            "",
+            std::time::Duration::from_millis(300),
+        );
+        assert!(r.timed_out);
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        assert!(
+            !marker.exists(),
+            "a child outlived the timeout and kept working"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_wraps_the_command_rather_than_replacing_it() {
+        let t = TempTree::new("fixtests-sandbox");
+        let wrapped = wrap("echo WOULD-RUN {cmd} IN {dir}", t.path(), "pytest -q");
+        assert!(wrapped.contains("WOULD-RUN"), "{wrapped}");
+        assert!(wrapped.contains("'pytest -q'"), "quoted whole: {wrapped}");
+        assert!(wrapped.contains(&*t.path().to_string_lossy()), "{wrapped}");
+        assert_eq!(wrap("", t.path(), "pytest -q"), "pytest -q");
+    }
+
+    #[test]
+    fn quoting_survives_a_command_containing_a_quote() {
+        // A sandbox template ends in something like `... sh -c {cmd}`, so the
+        // command is parsed by a second shell. Without correct quoting a
+        // command carrying an apostrophe breaks out of the wrapper — which is
+        // the wrapper failing exactly where it matters.
+        let t = TempTree::new("fixtests-quote");
+        let r = run_tests(t.path(), r#"echo "it's fine""#, &[], "sh -c {cmd}");
+        assert!(r.ok, "{r:?}");
+        assert!(r.output.contains("it's fine"), "{r:?}");
     }
 
     #[test]
@@ -513,7 +656,7 @@ mod tests {
     fn the_affected_paths_are_substituted_where_the_command_asks() {
         let t = TempTree::new("fixtests-files");
         let files = vec!["src/a.py".to_string(), "src/b.py".to_string()];
-        let r = run_tests(t.path(), "echo GOT {files}", &files);
+        let r = run_tests(t.path(), "echo GOT {files}", &files, "");
         assert!(r.output.contains("GOT src/a.py src/b.py"), "{r:?}");
         assert!(r.command.contains("src/a.py"), "and the command records it");
     }
@@ -521,7 +664,7 @@ mod tests {
     #[test]
     fn a_command_that_cannot_start_is_a_failure_not_a_panic() {
         let t = TempTree::new("fixtests-nocmd");
-        let r = run_tests(t.path(), "definitely-not-a-real-binary-xyz", &[]);
+        let r = run_tests(t.path(), "definitely-not-a-real-binary-xyz", &[], "");
         assert!(!r.ok);
     }
 

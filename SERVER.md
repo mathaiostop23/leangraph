@@ -146,7 +146,7 @@ which outlasts a cold index of anything reasonable, and then fails with a reason
 | `GET` | `/repos/{owner/name}` | state, counts, index time, last error |
 | `POST` | `/repos/{owner/name}/sync` | fetch and incrementally reindex |
 | `POST` | `/repos/{owner/name}/backfill` | answer the open backlog as one batch, at half price |
-| `POST` | `/repos/{owner/name}/config` | `fix_mode`, `trigger_label`, `fix_label`, `max_nodes`, `escalate`, `test_command` |
+| `POST` | `/repos/{owner/name}/config` | `fix_mode`, `trigger_label`, `fix_label`, `max_nodes`, `escalate`, `test_command`, `sandbox` |
 | `GET` | `/secrets` | names and hints only — never values |
 | `POST` `DELETE` | `/secrets/{name}` | store encrypted; remove |
 | `GET` | `/metrics` | Prometheus text: repos, queue depth, graph size, spend |
@@ -474,18 +474,35 @@ timed out, or no command was configured and nothing ran. A failing suite still
 opens the pull request, because discarding the branch would hide the failure
 rather than report it.
 
-**This executes code from the repository, and there is no sandbox here.** Three
-things make that a decision rather than an accident: the command is the
-operator's, written into the repository's config and never inferred or asked of
-the model; fix mode is already off in three independent ways before a patch
-exists; and the patch cannot have touched CI configuration, dependency
-manifests, lockfiles, Dockerfiles or Makefiles, which is exactly what a hostile
-patch would reach for to turn "run the tests" into "run anything".
+**This executes code from the repository.** Three things make that a decision
+rather than an accident: the command is the operator's, written into the
+repository's config and never inferred or asked of the model; fix mode is
+already off in three independent ways before a patch exists; and the patch
+cannot have touched CI configuration, dependency manifests, lockfiles,
+Dockerfiles or Makefiles, which is exactly what a hostile patch would reach for
+to turn "run the tests" into "run anything".
 
-What it does not provide is isolation. The command runs as the server process,
-with whatever that process can reach, under a ten-minute timeout with its output
-capped. Putting a boundary around it — a container, a user, a network policy —
-is the operator's to do, and setting `test_command` is saying so.
+What the process gets is deliberately small:
+
+| | |
+|---|---|
+| **environment** | cleared, then `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR` and nothing else. The first version inherited the server's environment wholesale, which handed `LEANGRAPH_MASTER_KEY`, the model key and the write token to whatever the suite runs |
+| **cwd** | the throwaway worktree, never the indexed checkout |
+| **stdin** | `/dev/null`, so a prompt is not a hang |
+| **time** | ten minutes, then the whole **process group** is killed — killing only the shell leaves the test runner holding the worktree |
+| **output** | the last 4,000 characters, which is where a failing suite says what failed |
+
+**Isolation is still the operator's, but there is somewhere to put it.** A
+repository can set `sandbox`, and the command is wrapped in it — `{dir}` is the
+worktree and `{cmd}` the shell-quoted command:
+
+```
+docker run --rm --network none -v {dir}:/w -w /w python:3.12 sh -c {cmd}
+```
+
+That is a container with no network and nothing mounted but the tree under
+test. Left empty, the command runs as the server process does, which is what
+the config field says.
 
 ### 5.6 Key storage
 

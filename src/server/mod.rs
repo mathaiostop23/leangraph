@@ -655,6 +655,11 @@ struct SetConfig {
     /// to do, and setting this is saying so.
     #[serde(default)]
     test_command: Option<String>,
+    /// Wrapper that supplies isolation, with `{dir}` the worktree and `{cmd}`
+    /// the shell-quoted command — a `docker run --rm --network none …` belongs
+    /// here. Empty means the command runs as the server process does.
+    #[serde(default)]
+    sandbox: Option<String>,
 }
 
 async fn set_config(
@@ -682,6 +687,9 @@ async fn set_config(
     }
     if let Some(v) = req.escalate {
         cfg["escalate"] = json!(u8::from(v));
+    }
+    if let Some(v) = &req.sandbox {
+        cfg["sandbox"] = json!(v);
     }
     if let Some(v) = &req.test_command {
         cfg["test_command"] = json!(v);
@@ -1582,6 +1590,9 @@ async fn propose_fix(
     // The operator's command, or none. Never inferred from the tree and never
     // asked of the model: what runs here is a decision somebody typed.
     let test_command = repo.setting("test_command", "").into_owned();
+    // Where the operator puts real isolation. Empty means the command runs as
+    // the server does, which the config field and SERVER.md both say plainly.
+    let sandbox = repo.setting("sandbox", "").into_owned();
     let proposal = tokio::task::spawn_blocking(move || {
         fix::propose(
             &dir,
@@ -1591,6 +1602,7 @@ async fn propose_fix(
             Some(&tok),
             &name,
             Some(test_command.as_str()).filter(|c| !c.trim().is_empty()),
+            &sandbox,
         )
     })
     .await??;
