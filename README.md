@@ -253,7 +253,7 @@ repository is Rust, which the indexer supports, so it can be its own corpus.
 
 ```
 69  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
-35  server unit          vetting rules, dedup scoring, SSRF, queues, preflight
+44  server unit          vetting rules, dedup scoring, SSRF, leases, test runs
  5  convergence          incremental sync equals a full reindex
 21  webhook gates        signature, replay, authorship, labels
 38  agent assertions     prompt safety, cache correctness
