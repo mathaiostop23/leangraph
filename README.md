@@ -112,7 +112,11 @@ loads: 6.9 MB against CodeGraph's 156 MB database, which is the comparison that
 matters for startup and memory. But `.leangraph/` also holds a 33 MB extraction
 cache, and quoting only the first number would be the kind of selective framing
 this project exists to avoid. The cache is what makes re-running after a change
-**0.11 s** instead of 0.75.
+**0.13 s** instead of 0.77.
+
+It is written as a base plus a delta, because rewriting all 33 MB to record that
+one file moved was the single largest cost in a sync — more than resolution and
+the graph put together. A one-file change now appends **10 KB**.
 
 **Startup: 2.4 ms** against CodeGraph's 556 ms, spawn to MCP `initialize`
 (`bench/mcp_startup.py`). This gap is structural, not tuning: loading is not

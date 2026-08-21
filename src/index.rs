@@ -522,6 +522,9 @@ pub fn run(cfg: &Config) -> Result<Summary> {
             &interner,
             &root,
             &head,
+            // A forced run rebuilt everything, so it should leave one clean
+            // base rather than a delta layered on whatever was there before.
+            !cfg.incremental,
         )
         .context("writing extraction cache")?;
         if std::env::var_os("LEANGRAPH_PROFILE").is_some() {

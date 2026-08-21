@@ -18,12 +18,13 @@ use anyhow::{bail, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use lasso::Key;
 use memmap2::Mmap;
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAGIC: [u8; 8] = *b"LGRPHC\x00\x05";
-const N_SECTIONS: usize = 11;
+const MAGIC: [u8; 8] = *b"LGRPHC\x00\x06";
+const N_SECTIONS: usize = 12;
 
 const S_FILES: usize = 0;
 const S_DEFS: usize = 1;
@@ -35,6 +36,12 @@ const S_PATH_OFF: usize = 6;
 const S_PATH_BLOB: usize = 7;
 const S_HEAD: usize = 8;
 const S_ALIASES: usize = 9;
+/// Paths the base still holds but that no longer exist. Only a delta writes
+/// these; without them a deleted file would keep coming back from the base, and
+/// the "nothing changed" check that skips rewriting the graph would never fire
+/// again.
+const S_GONE_OFF: usize = 10;
+const S_GONE_BLOB: usize = 11;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -130,6 +137,13 @@ pub struct Entry {
 /// Commit the cache was built at, if any. Lets a sync ask git what changed
 /// instead of walking and stat-ing the whole tree.
 pub fn read_head(path: &Path) -> Option<String> {
+    // The delta is written after the base and carries the commit the cache is
+    // actually current at. Reading the base's would send a sync back over work
+    // the delta already records.
+    head_of(&delta_path(path)).or_else(|| head_of(path))
+}
+
+fn head_of(path: &Path) -> Option<String> {
     let buf = std::fs::read(path).ok()?;
     if buf.len() < std::mem::size_of::<Header>() || buf[..8] != MAGIC {
         return None;
@@ -188,6 +202,51 @@ fn blob(items: impl Iterator<Item = String>) -> (Vec<u32>, Vec<u8>) {
     (off, buf)
 }
 
+/// Where the appended part of the cache lives, beside the base.
+fn delta_path(base: &Path) -> PathBuf {
+    base.with_extension("delta")
+}
+
+/// Rewriting the whole cache costs more than everything else in a sync put
+/// together — 33 MB on django, 56 of the 84 ms that "persist" reports, to record
+/// that one file changed. Past this share of the tree it is cheaper to fold the
+/// delta back in and start again than to keep reading two files.
+const COMPACT_ABOVE: f64 = 0.25;
+
+/// `(relative path, content hash)` for what the base already holds.
+///
+/// Read straight from the mmap without interning anything: deciding what to
+/// write must not cost what writing it would have.
+fn base_index(path: &Path) -> Option<FxHashMap<String, [u8; 32]>> {
+    let f = File::open(path).ok()?;
+    let mmap = unsafe { Mmap::map(&f).ok()? };
+    if mmap.len() < std::mem::size_of::<Header>() || mmap[..8] != MAGIC {
+        return None;
+    }
+    let h: Header = *bytemuck::from_bytes(&mmap[..std::mem::size_of::<Header>()]);
+    let sec = |id: usize| -> Option<&[u8]> {
+        let (o, l) = (h.off[id] as usize, h.len[id] as usize);
+        mmap.get(o..o + l)
+    };
+    let files: &[CFile] = bytemuck::cast_slice(sec(S_FILES)?);
+    let path_off: &[u32] = bytemuck::cast_slice(sec(S_PATH_OFF)?);
+    let path_blob = sec(S_PATH_BLOB)?;
+    let mut out = FxHashMap::default();
+    for (i, cf) in files.iter().enumerate() {
+        let (a, b) = (*path_off.get(i)? as usize, *path_off.get(i + 1)? as usize);
+        let rel = std::str::from_utf8(path_blob.get(a..b)?).ok()?;
+        out.insert(rel.to_string(), cf.hash);
+    }
+    Some(out)
+}
+
+fn rel_of(p: &Path, root: &Path) -> String {
+    p.strip_prefix(root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .into_owned()
+}
+
 pub fn write(
     path: &Path,
     units: &[FileUnit],
@@ -197,14 +256,115 @@ pub fn write(
     interner: &Interner,
     root: &Path,
     head: &str,
+    compact: bool,
 ) -> Result<()> {
-    let mut files = Vec::with_capacity(units.len());
+    let delta = delta_path(path);
+    let base = if compact { None } else { base_index(path) };
+    let Some(base) = base else {
+        // No base to append to.
+        let all: Vec<usize> = (0..units.len()).collect();
+        write_set(
+            path,
+            &all,
+            units,
+            paths,
+            langs,
+            metas,
+            interner,
+            root,
+            head,
+            &[],
+        )?;
+        let _ = std::fs::remove_file(&delta);
+        return Ok(());
+    };
+
+    // What the base does not already hold, or holds differently.
+    let mut changed: Vec<usize> = Vec::new();
+    let mut live: Vec<String> = Vec::with_capacity(paths.len());
+    for i in 0..units.len() {
+        let rel = rel_of(&paths[i], root);
+        match base.get(&rel) {
+            Some(h) if *h == metas[i].hash => {}
+            _ => changed.push(i),
+        }
+        live.push(rel);
+    }
+    let live: rustc_hash::FxHashSet<&str> = live.iter().map(String::as_str).collect();
+    let gone: Vec<String> = base
+        .keys()
+        .filter(|k| !live.contains(k.as_str()))
+        .cloned()
+        .collect();
+
+    // Past the threshold the delta stops paying for itself.
+    let churn = (changed.len() + gone.len()) as f64 / units.len().max(1) as f64;
+    if churn > COMPACT_ABOVE {
+        let all: Vec<usize> = (0..units.len()).collect();
+        write_set(
+            path,
+            &all,
+            units,
+            paths,
+            langs,
+            metas,
+            interner,
+            root,
+            head,
+            &[],
+        )?;
+        let _ = std::fs::remove_file(&delta);
+        return Ok(());
+    }
+
+    write_set(
+        &delta, &changed, units, paths, langs, metas, interner, root, head, &gone,
+    )
+}
+
+/// Serialise exactly the files named by `sel`.
+///
+/// The symbol table holds only the strings those files reference, remapped to
+/// dense local ids. Writing the whole interner instead — which is what this did
+/// — put every symbol in the repository into a delta that describes one file.
+#[allow(clippy::too_many_arguments)]
+fn write_set(
+    path: &Path,
+    sel: &[usize],
+    units: &[FileUnit],
+    paths: &[PathBuf],
+    langs: &[Lang],
+    metas: &[FileMeta],
+    interner: &Interner,
+    root: &Path,
+    head: &str,
+    gone: &[String],
+) -> Result<()> {
+    let mut files = Vec::with_capacity(sel.len());
     let mut defs = Vec::new();
     let mut refs = Vec::new();
     let mut imports = Vec::new();
     let mut aliases: Vec<CAlias> = Vec::new();
 
-    for (i, u) in units.iter().enumerate() {
+    let mut sym_idx: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut sym_strings: Vec<String> = Vec::new();
+    macro_rules! sym {
+        ($s:expr) => {{
+            let id = Key::into_usize($s) as u32;
+            match sym_idx.get(&id) {
+                Some(&v) => v,
+                None => {
+                    let v = sym_strings.len() as u32;
+                    sym_strings.push(interner.resolve(&$s).to_string());
+                    sym_idx.insert(id, v);
+                    v
+                }
+            }
+        }};
+    }
+
+    for &i in sel {
+        let u = &units[i];
         files.push(CFile {
             hash: metas[i].hash,
             size: metas[i].size,
@@ -222,7 +382,7 @@ pub fn write(
         });
         for d in &u.defs {
             defs.push(CDef {
-                name: d.name.into_usize() as u32,
+                name: sym!(d.name),
                 kind: d.kind as u32,
                 span_s: d.span.start,
                 span_e: d.span.end,
@@ -234,50 +394,43 @@ pub fn write(
         }
         for r in &u.refs {
             refs.push(CRef {
-                name: r.name.into_usize() as u32,
+                name: sym!(r.name),
                 kind: r.kind as u32,
                 span_s: r.span.start,
                 span_e: r.span.end,
                 scope: r.scope,
                 recv: r.recv as u32,
-                recv_name: r.recv_name.map_or(u32::MAX, |n| n.into_usize() as u32),
+                // The sentinel means "no receiver" and is not a symbol id.
+                recv_name: match r.recv_name {
+                    Some(s) => sym!(s),
+                    None => u32::MAX,
+                },
                 _pad: 0,
-            });
-        }
-        for &(local, original) in &u.aliases {
-            aliases.push(CAlias {
-                local: local.into_usize() as u32,
-                original: original.into_usize() as u32,
             });
         }
         for m in &u.imports {
             imports.push(CImport {
-                module: m.module.into_usize() as u32,
+                module: sym!(m.module),
                 span_s: m.span.start,
                 span_e: m.span.end,
                 _pad: 0,
             });
         }
-    }
-
-    let mut syms = vec![String::new(); interner.len()];
-    for (k, v) in interner.iter() {
-        let i = Key::into_usize(k);
-        if i < syms.len() {
-            syms[i] = v.to_string();
+        for (l, o) in &u.aliases {
+            aliases.push(CAlias {
+                local: sym!(*l),
+                original: sym!(*o),
+            });
         }
     }
-    let (sym_off, sym_blob) = blob(syms.into_iter());
-    let (path_off, path_blob) = blob(paths.iter().map(|p| {
-        p.strip_prefix(root)
-            .unwrap_or(p)
-            .to_string_lossy()
-            .into_owned()
-    }));
+
+    let (sym_off, sym_blob) = blob(sym_strings.into_iter());
+    let (path_off, path_blob) = blob(sel.iter().map(|&i| rel_of(&paths[i], root)));
+    let (gone_off, gone_blob) = blob(gone.iter().cloned());
 
     let mut header = Header {
         magic: MAGIC,
-        n_files: units.len() as u32,
+        n_files: sel.len() as u32,
         _pad: 0,
         off: [0; N_SECTIONS],
         len: [0; N_SECTIONS],
@@ -304,6 +457,8 @@ pub fn write(
     section!(S_PATH_OFF, &path_off[..]);
     section!(S_PATH_BLOB, &path_blob[..]);
     section!(S_HEAD, head.as_bytes());
+    section!(S_GONE_OFF, &gone_off[..]);
+    section!(S_GONE_BLOB, &gone_blob[..]);
 
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).ok();
@@ -319,7 +474,26 @@ pub fn write(
     Ok(())
 }
 
+/// Everything the cache knows, base and delta folded together.
+///
+/// A delta entry replaces the base's entry for the same path, and a path the
+/// delta lists as gone is dropped. Order is not part of the contract — the
+/// caller keys this by path immediately — which is what lets the merge be a
+/// map rather than a splice.
 pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>> {
+    let (mut entries, _) = read_one(path, interner, root)?;
+    if let Ok((delta, gone)) = read_one(&delta_path(path), interner, root) {
+        let replaced: rustc_hash::FxHashSet<PathBuf> =
+            delta.iter().map(|e| e.path.clone()).collect();
+        let gone: rustc_hash::FxHashSet<PathBuf> = gone.iter().map(|g| root.join(g)).collect();
+        entries.retain(|e| !replaced.contains(&e.path) && !gone.contains(&e.path));
+        entries.extend(delta);
+    }
+    Ok(entries)
+}
+
+/// One cache file, base or delta, with the paths it declares gone.
+fn read_one(path: &Path, interner: &Interner, root: &Path) -> Result<(Vec<Entry>, Vec<String>)> {
     let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&f)? };
     if mmap.len() < std::mem::size_of::<Header>() {
@@ -421,7 +595,18 @@ pub fn read(path: &Path, interner: &Interner, root: &Path) -> Result<Vec<Entry>>
             unit,
         });
     }
-    Ok(out)
+
+    let gone_off: &[u32] = bytemuck::cast_slice(sec(S_GONE_OFF));
+    let gone_blob = sec(S_GONE_BLOB);
+    let gone: Vec<String> = (0..gone_off.len().saturating_sub(1))
+        .filter_map(|i| {
+            let (a, b) = (gone_off[i] as usize, gone_off[i + 1] as usize);
+            std::str::from_utf8(gone_blob.get(a..b)?)
+                .ok()
+                .map(String::from)
+        })
+        .collect();
+    Ok((out, gone))
 }
 
 #[cfg(test)]
@@ -458,6 +643,7 @@ mod tests {
             &c.interner,
             &c.root,
             "abc123",
+            true,
         )
         .expect("writing the cache");
         let back = read(&path, &c.interner, &c.root).expect("reading the cache");
@@ -586,9 +772,120 @@ mod tests {
             &c.interner,
             &c.root,
             "deadbeef",
+            true,
         )
         .unwrap();
         assert_eq!(read_head(&path).as_deref(), Some("deadbeef"));
+    }
+
+    /// Write `sel` of the corpus as the cache's view of the tree.
+    fn write_view(path: &Path, c: &Corpus, keep: &[usize], head: &str, compact: bool) {
+        let units: Vec<_> = keep.iter().map(|&i| clone_unit(&c.units[i])).collect();
+        let paths: Vec<_> = keep.iter().map(|&i| c.paths[i].clone()).collect();
+        let langs: Vec<_> = keep.iter().map(|&i| c.langs[i]).collect();
+        let metas: Vec<_> = keep.iter().map(|&i| c.metas[i]).collect();
+        write(
+            path,
+            &units,
+            &paths,
+            &langs,
+            &metas,
+            &c.interner,
+            &c.root,
+            head,
+            compact,
+        )
+        .expect("writing the cache");
+    }
+
+    fn clone_unit(u: &FileUnit) -> FileUnit {
+        FileUnit {
+            file: u.file,
+            defs: u.defs.clone(),
+            refs: u.refs.clone(),
+            imports: u.imports.clone(),
+            had_parse_error: u.had_parse_error,
+            aliases: u.aliases.clone(),
+        }
+    }
+
+    #[test]
+    fn a_delta_holds_only_what_changed_and_still_reads_whole() {
+        // Rewriting 33 MB to record that one file moved was the largest single
+        // cost in a sync — more than resolution and the graph put together.
+        let c = corpus();
+        let tree = TempTree::new("cache-delta");
+        let path = tree.path().join("cache.bin");
+
+        write_view(&path, &c, &[0, 1], "base", true);
+        let base_len = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            !delta_path(&path).exists(),
+            "a compacting write leaves none"
+        );
+
+        // The same tree again: nothing changed, so the delta carries no files.
+        write_view(&path, &c, &[0, 1], "second", false);
+        let delta_len = std::fs::metadata(delta_path(&path)).unwrap().len();
+        assert!(
+            delta_len * 4 < base_len,
+            "a delta describing no change is {delta_len} against a base of {base_len}"
+        );
+
+        let back = read(&path, &c.interner, &c.root).expect("read");
+        assert_eq!(back.len(), 2, "both files still come back");
+        for (entry, original) in back.iter().zip(&c.units) {
+            assert_eq!(entry.unit.defs.len(), original.defs.len());
+            assert_eq!(entry.unit.refs.len(), original.refs.len());
+        }
+    }
+
+    #[test]
+    fn the_delta_carries_the_newer_commit() {
+        let c = corpus();
+        let tree = TempTree::new("cache-delta-head");
+        let path = tree.path().join("cache.bin");
+        write_view(&path, &c, &[0, 1], "old-sha", true);
+        write_view(&path, &c, &[0, 1], "new-sha", false);
+        assert_eq!(
+            read_head(&path).as_deref(),
+            Some("new-sha"),
+            "reading the base's commit would send a sync back over work already done"
+        );
+    }
+
+    #[test]
+    fn a_file_deleted_after_the_base_does_not_come_back() {
+        // The base still holds it. Without a tombstone it would be returned
+        // forever — and the check that skips rewriting an unchanged graph looks
+        // for exactly this leftover, so it would never fire again either.
+        let c = corpus();
+        let tree = TempTree::new("cache-gone");
+        let path = tree.path().join("cache.bin");
+        write_view(&path, &c, &[0, 1], "base", true);
+        write_view(&path, &c, &[0], "after-delete", false);
+
+        let back = read(&path, &c.interner, &c.root).expect("read");
+        let left: Vec<_> = back.iter().map(|e| e.path.display().to_string()).collect();
+        assert_eq!(back.len(), 1, "the deleted file must be gone: {left:?}");
+        assert!(back[0].path.ends_with("app.py"));
+    }
+
+    #[test]
+    fn enough_churn_folds_the_delta_back_into_the_base() {
+        // Past a share of the tree, reading two files costs more than writing
+        // one. Without this the delta grows without bound.
+        let c = corpus();
+        let tree = TempTree::new("cache-compact");
+        let path = tree.path().join("cache.bin");
+        write_view(&path, &c, &[0, 1], "base", true);
+        // One of two files deleted is 50% churn, past the threshold.
+        write_view(&path, &c, &[0], "churned", false);
+        assert!(
+            !delta_path(&path).exists(),
+            "past the threshold the base is rewritten and the delta dropped"
+        );
+        assert_eq!(read(&path, &c.interner, &c.root).unwrap().len(), 1);
     }
 
     #[test]
