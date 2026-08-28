@@ -36,7 +36,12 @@ impl Default for Budget {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Why {
+    /// A name in the question that resolves in this repository.
     Seed,
+    /// A file the question addressed by where it lives rather than by name.
+    PathSeed,
+    /// A node whose comments, docstring or strings the question describes.
+    ProseSeed,
     OnPath,
     Caller,
     Callee,
@@ -48,6 +53,8 @@ impl Why {
     pub fn label(self) -> &'static str {
         match self {
             Why::Seed => "seed",
+            Why::PathSeed => "path",
+            Why::ProseSeed => "prose",
             Why::OnPath => "on-path",
             Why::Caller => "caller",
             Why::Callee => "callee",
@@ -59,6 +66,12 @@ impl Why {
     fn weight(self) -> f32 {
         match self {
             Why::Seed => 1.0,
+            // Deliberately equal to a named seed for now. Whether a hint in a
+            // comment should outrank, match or trail a name that resolves is a
+            // question for the benchmarks, and changing two things at once
+            // would make their answer unreadable.
+            Why::PathSeed => 1.0,
+            Why::ProseSeed => 1.0,
             Why::OnPath => 0.9,
             Why::Caller => 0.6,
             Why::Callee => 0.5,
@@ -299,6 +312,19 @@ fn seeds_from_prose(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
 }
 
 pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
+    seeds_from_text_why(g, text, max)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// The same seeds, each carrying which signal produced it.
+///
+/// Provenance is not decoration. It is what lets the ranking treat a name that
+/// resolves differently from a word in a comment, what lets the budget give a
+/// signal its own slice, and what tells whoever reads the context back why a
+/// fragment is in front of them.
+pub fn seeds_from_text_why(g: &Graph, text: &str, max: usize) -> Vec<(NodeId, Why)> {
     let mut hits: Vec<(u8, usize, NodeId)> = Vec::new();
     // Tokens rejected only for being stopwords, kept in case nothing else
     // survives. The stopword list is a proxy for "too common to be a lead";
@@ -354,13 +380,16 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
         // exists exactly once here. Better a narrow lead than no context.
         fallback.sort_by_key(|&(spec, n)| (spec, n));
         fallback.dedup_by_key(|&mut (_, n)| n);
-        let mut out: Vec<NodeId> = fallback.into_iter().map(|(_, n)| n).collect();
+        let mut out: Vec<(NodeId, Why)> = fallback
+            .into_iter()
+            .map(|(_, n)| (n, Why::Seed))
+            .collect();
         // `contains` rather than `dedup`, which only removes *neighbours*: a
         // fallback lead and a path seed can be the same node without landing
         // next to each other, and a repeated seed silently spends a slot twice.
         for n in seeds_from_path(g, text, max) {
-            if !out.contains(&n) {
-                out.push(n);
+            if !out.iter().any(|&(m, _)| m == n) {
+                out.push((n, Why::PathSeed));
             }
         }
         fill_from_prose(g, text, max, &mut out);
@@ -368,7 +397,10 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
     }
     // identifier-shaped first, then most specific
     hits.sort_by_key(|&(shape, spec, _)| (shape, spec));
-    let mut out: Vec<NodeId> = hits.into_iter().map(|(_, _, n)| n).collect();
+    let mut out: Vec<(NodeId, Why)> = hits
+        .into_iter()
+        .map(|(_, _, n)| (n, Why::Seed))
+        .collect();
 
     // Path evidence *after* symbol evidence, never instead of it: a name that
     // resolves in this repository is the stronger signal, and appending can
@@ -398,14 +430,35 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
     // -1.6 points. So the tail of the path ranking is not padding. The right
     // file is frequently *not* the best-scoring path match, and the extra
     // roots earn the dilution they cause. Declined, on the measurement.
-    if out.len() < max {
-        for n in seeds_from_path(g, text, max - out.len()) {
-            if !out.contains(&n) {
-                out.push(n);
+    // Paths take what the names left, minus a slice held back for prose.
+    //
+    // Without the reservation prose is not outranked, it is never asked.
+    // Measured over a stratified sample of SWE-bench: of 2,015 seeds, 1,145
+    // came from paths and 213 from prose, and 78% of instances got no prose
+    // seed at all. Path seeding is greedy by construction — it takes two nodes
+    // per matching file until the budget is gone — so on any issue whose names
+    // resolve thinly it fills every remaining slot before the question of what
+    // the comments say is ever put.
+    let quota = max / 4;
+    let room = max.saturating_sub(quota);
+    if out.len() < room {
+        for n in seeds_from_path(g, text, room - out.len()) {
+            if !out.iter().any(|&(m, _)| m == n) {
+                out.push((n, Why::PathSeed));
             }
         }
     }
     fill_from_prose(g, text, max, &mut out);
+    // Prose may leave its slice unspent — a question whose words this
+    // repository never writes down has nothing to give. Paths get the
+    // remainder rather than letting it go to waste.
+    if out.len() < max {
+        for n in seeds_from_path(g, text, max - out.len()) {
+            if !out.iter().any(|&(m, _)| m == n) {
+                out.push((n, Why::PathSeed));
+            }
+        }
+    }
     out.into_iter().take(max).collect()
 }
 
@@ -415,13 +468,13 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
 /// name that resolves here is a fact, and a word in a comment is a hint. Which
 /// of them should give way when the seed budget is full is a question the two
 /// benchmarks answer, not this comment.
-fn fill_from_prose(g: &Graph, text: &str, max: usize, out: &mut Vec<NodeId>) {
+fn fill_from_prose(g: &Graph, text: &str, max: usize, out: &mut Vec<(NodeId, Why)>) {
     if out.len() >= max {
         return;
     }
     for n in seeds_from_prose(g, text, max - out.len()) {
-        if !out.contains(&n) {
-            out.push(n);
+        if !out.iter().any(|&(m, _)| m == n) {
+            out.push((n, Why::ProseSeed));
         }
     }
 }
@@ -513,7 +566,10 @@ fn charged_bytes(g: &Graph, n: NodeId, budget: &Budget) -> u32 {
 }
 
 pub fn build(g: &Graph, symbols: &[String], budget: &Budget) -> Context {
-    build_from(g, seeds(g, symbols), budget)
+    // Asking for a symbol by name is the one case with no ambiguity about
+    // where the seed came from.
+    let s = seeds(g, symbols).into_iter().map(|n| (n, Why::Seed)).collect();
+    build_from(g, s, budget)
 }
 
 /// Same ranking, but seeded from free text instead of a symbol list.
@@ -523,16 +579,17 @@ pub fn build(g: &Graph, symbols: &[String], budget: &Budget) -> Context {
 /// recall flattened while the budget went unused.
 pub fn build_from_text(g: &Graph, text: &str, budget: &Budget) -> Context {
     let max_seeds = (budget.max_nodes / 3).clamp(4, 32);
-    let s = seeds_from_text(g, text, max_seeds);
+    let s = seeds_from_text_why(g, text, max_seeds);
     build_from(g, s, budget)
 }
 
-fn build_from(g: &Graph, seed_nodes: Vec<NodeId>, budget: &Budget) -> Context {
+fn build_from(g: &Graph, seed_nodes: Vec<(NodeId, Why)>, budget: &Budget) -> Context {
     let mut scored: FxHashMap<NodeId, (Why, f32)> = FxHashMap::default();
 
-    for &s in &seed_nodes {
-        scored.insert(s, (Why::Seed, Why::Seed.weight()));
+    for &(s, why) in &seed_nodes {
+        scored.insert(s, (why, why.weight()));
     }
+    let seed_nodes: Vec<NodeId> = seed_nodes.into_iter().map(|(n, _)| n).collect();
 
     // The flow between the first two named symbols, if there is one.
     let mut flow = Vec::new();
@@ -623,7 +680,7 @@ fn build_from(g: &Graph, seed_nodes: Vec<NodeId>, budget: &Budget) -> Context {
     let mut co_used = 0usize;
 
     for it in items {
-        let is_seed = it.why == Why::Seed;
+        let is_seed = matches!(it.why, Why::Seed | Why::PathSeed | Why::ProseSeed);
         let is_co = it.why == Why::CoChange;
         let room = if is_co {
             co_used < quota && kept.len() < budget.max_nodes + quota
