@@ -142,6 +142,46 @@ figure is recall at a fixed budget, both variants sit well inside it, and 5%
 more tokens for 1.6 points is a trade worth making — but a reader who prefers
 the efficiency ratio should know it points the other way.
 
+### Query expansion, and why there is none
+
+The seeder matches a query word to a stored word exactly. Two local expansions
+were built and measured against that, neither needing a synonym list or a model.
+
+**Splitting identifiers into words does nothing.** `WaitApprovalStepExecutor`
+holds `approval`, so indexing the parts of every definition's name alongside its
+prose ought to reach code the comments never describe. Measured over the audited
+reports it adds 27,000 words to 297,000 — 9% more index — and moves not one
+number, at any rank. The reason is visible once stated: a docstring almost
+always says what its function is called, so the name's words were already there.
+
+**Stemming hurts, and the file-level prototype said it would help.** A blunt
+suffix table so that a report saying "denying" reaches a docstring that says
+"denied". Prototyped in Python over whole files it looked worth building —
+recall@10 rose from 57.0% to 61.8%. Built, it cost 9.7 points:
+
+| | audited reports | SWE-bench |
+|---|---:|---:|
+| exact match | **44.6%** | **81.8%** |
+| stemmed, one combined suffix list | 34.9% | 81.4% |
+| stemmed, plural and verb rules ordered | 34.9% | — |
+
+The first stemmer over-cut — `refused` lost `ed` to give `refus`, which then
+looked like a plural and gave `refu` — so a second was built with the two stages
+ordered and `ss`/`us` protected, and it scored identically. Two stemmers of very
+different aggressiveness landing on the same number is the answer: the loss is
+not over-stemming, it is stemming.
+
+What the prototype measured was a *file*, ranked against 653 others, scored at
+k=10. What the seeder does is pick a handful of *nodes* out of 16,000 on a tight
+budget. Merging words lowers the IDF that separates them, and recall bought at
+rank 10 is worth nothing to something that only ever takes the first few. A
+proxy that ranks a different unit at a different depth can point the wrong way,
+and this one did.
+
+Left undone rather than left unmeasured: expansion that reaches a word the
+repository never writes down at all needs a source of synonyms, and there is no
+local one.
+
 ### Where it loses
 
 Keyword top-10 beats us outright on **8.4%** of instances, and we return nothing
