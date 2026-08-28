@@ -132,6 +132,81 @@ pub fn seeds(g: &Graph, symbols: &[String]) -> Vec<NodeId> {
 /// repo, which is precise by construction — a word that names nothing here
 /// contributes nothing — and rank by specificity, because `get` appearing in
 /// an issue is noise while `SQLCompiler` is the whole answer.
+/// Files whose **path** the query describes.
+///
+/// "Use subprocess.run and PGPASSWORD for client in postgres backend" names no
+/// symbol that exists anywhere, and points squarely at
+/// `django/db/backends/postgresql/client.py` — `postgres`, `backend` and
+/// `client` are all segments of that path. Seeding from symbol names alone
+/// could not see it, and this is not a rare shape: of the 121 SWE-bench
+/// instances where the context came back with nothing useful, 57 wanted a file
+/// under `django/db`, and those issues describe behaviour rather than name code.
+///
+/// Two distinct tokens are required. One is a coincidence — every repository
+/// has a `utils` and a `core` — and the second is what makes it an address.
+fn seeds_from_path(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
+    let mut want: Vec<String> = Vec::new();
+    for raw in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        let t = raw.to_ascii_lowercase();
+        if t.len() >= 4 && !is_stopword(&t) && !want.contains(&t) {
+            want.push(t);
+        }
+    }
+    if want.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut scored: Vec<(usize, usize, u32)> = Vec::new();
+    for f in 0..g.n_files() {
+        let path = g.path(f).to_ascii_lowercase();
+        let depth = path.matches('/').count();
+        let hits = want
+            .iter()
+            .filter(|t| {
+                path.split(|c| c == '/' || c == '.' || c == '_' || c == '-')
+                    .any(|seg| {
+                        // `postgres` should reach `postgresql`, and `migration`
+                        // `migrations`, without `code` reaching `codecs`.
+                        seg == t.as_str() || (t.len() >= 5 && seg.starts_with(t.as_str()))
+                    })
+            })
+            .count();
+        if hits >= 2 {
+            scored.push((hits, depth, f));
+        }
+    }
+    if scored.is_empty() {
+        return Vec::new();
+    }
+    // Most tokens matched, then the shallower path: `db/backends/postgresql`
+    // over a test fixture that happens to repeat the same words.
+    scored.sort_by_key(|&(hits, depth, f)| (std::cmp::Reverse(hits), depth, f));
+    let keep: Vec<u32> = scored.into_iter().take(max).map(|(_, _, f)| f).collect();
+
+    // One pass over the nodes rather than one per file: a repository with
+    // 68,000 nodes and eight candidate files would otherwise be eight scans.
+    let mut per_file: FxHashMap<u32, Vec<NodeId>> = FxHashMap::default();
+    for n in (0..g.n_nodes()).map(NodeId) {
+        let f = g.location(n).0;
+        if keep.contains(&f) && !g.name(n).is_empty() {
+            per_file.entry(f).or_default().push(n);
+        }
+    }
+
+    let mut out = Vec::new();
+    for f in keep {
+        let Some(mut ns) = per_file.remove(&f) else {
+            continue;
+        };
+        ns.sort_by_key(|&n| candidate_rank(g, n));
+        out.extend(ns.into_iter().take(2));
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
 pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
     let mut hits: Vec<(u8, usize, NodeId)> = Vec::new();
     // Tokens rejected only for being stopwords, kept in case nothing else
@@ -188,11 +263,49 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
         // exists exactly once here. Better a narrow lead than no context.
         fallback.sort_by_key(|&(spec, n)| (spec, n));
         fallback.dedup_by_key(|&mut (_, n)| n);
-        return fallback.into_iter().map(|(_, n)| n).take(max).collect();
+        let mut out: Vec<NodeId> = fallback.into_iter().map(|(_, n)| n).collect();
+        // `contains` rather than `dedup`, which only removes *neighbours*: a
+        // fallback lead and a path seed can be the same node without landing
+        // next to each other, and a repeated seed silently spends a slot twice.
+        for n in seeds_from_path(g, text, max) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+        return out.into_iter().take(max).collect();
     }
     // identifier-shaped first, then most specific
     hits.sort_by_key(|&(shape, spec, _)| (shape, spec));
-    hits.into_iter().map(|(_, _, n)| n).take(max).collect()
+    let mut out: Vec<NodeId> = hits.into_iter().map(|(_, _, n)| n).collect();
+
+    // Path evidence *after* symbol evidence, never instead of it: a name that
+    // resolves in this repository is the stronger signal, and appending can
+    // only fill slots the names left empty rather than take any.
+    //
+    // Appending rather than falling back is the whole of the gain, and that is
+    // not what it looks like it should be. The obvious reading of "24% of
+    // contexts come back with nothing useful" is that no name resolved there —
+    // so restricting path seeds to that case ought to buy the same rescues
+    // without disturbing anything. Measured over the same 500 instances, it
+    // does not: the fallback branch fires on only 25 of those 121, rescues 5,
+    // and lands at -0.5 points with p = 0.58. In the other 96 the names
+    // resolve perfectly well and simply point at the wrong code, and path
+    // evidence is worth having precisely where it sits *beside* a name that
+    // did not pan out. Appending: +4.0 points, 41 of the 121 rescued, p = 0.03.
+    //
+    // It is not free. The expansion has a hundred nodes to spend and every
+    // extra root spreads them thinner, so 20 contexts that had the right file
+    // lost it — django__django-11815 went from 3,904 tokens holding the answer
+    // to 10,316 tokens without it. Net of both halves the change is worth
+    // making, and the losing half is real and concentrated in sphinx.
+    if out.len() < max {
+        for n in seeds_from_path(g, text, max - out.len()) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out.into_iter().take(max).collect()
 }
 
 /// How much a token looks like it was copied out of source rather than typed
@@ -632,5 +745,91 @@ mod tests {
         let ctx = build(&g, &["no_such_thing".to_string()], &Budget::default());
         assert!(ctx.items.is_empty());
         assert!(seeds(&g, &["no_such_thing".to_string()]).is_empty());
+    }
+    // ---- seed selection from paths ----------------------------------------
+
+    /// The shape `seeds_from_path` exists for: an issue that describes
+    /// behaviour, names no symbol that resolves anywhere, and addresses a file
+    /// by where it lives.
+    #[test]
+    fn an_issue_that_names_only_a_path_still_reaches_the_file() {
+        let c = Corpus::build(&[
+            (
+                "django/db/backends/postgresql/client.py",
+                "def runshell(conn):\n    return conn\n",
+            ),
+            (
+                "django/core/mail/message.py",
+                "def sanitize(addr):\n    return addr\n",
+            ),
+        ]);
+        let g = c.graph();
+        let seeds = seeds_from_text(
+            &g,
+            "Use subprocess and PGPASSWORD when starting a shell for the postgres backend client.",
+            8,
+        );
+        let names: Vec<&str> = seeds.iter().map(|n| g.name(*n)).collect();
+        assert!(
+            names.contains(&"runshell"),
+            "three path segments name this file and nothing else: {names:?}"
+        );
+        assert!(
+            !names.contains(&"sanitize"),
+            "a file the path words do not address must not come along: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_path_word_is_a_coincidence_not_an_address() {
+        let c = Corpus::build(&[
+            (
+                "django/db/backends/postgresql/client.py",
+                "def runshell(conn):\n    return conn\n",
+            ),
+            ("django/utils/http.py", "def urlencode(q):\n    return q\n"),
+        ]);
+        let g = c.graph();
+        let seeds = seeds_from_text(&g, "The client hangs occasionally on startup.", 8);
+        assert!(
+            seeds.is_empty(),
+            "one segment is every repository's `utils`: {:?}",
+            seeds.iter().map(|n| g.name(*n)).collect::<Vec<_>>()
+        );
+    }
+
+    /// Path evidence is the weaker signal and must only ever fill slots the
+    /// names left empty — never take one.
+    #[test]
+    fn path_evidence_fills_slots_that_symbols_left_empty() {
+        let c = Corpus::build(&[
+            (
+                "django/db/backends/postgresql/client.py",
+                "def runshell(conn):\n    return conn\n",
+            ),
+            (
+                "django/utils/formats.py",
+                "def sanitize_separators(value):\n    return value\n",
+            ),
+        ]);
+        let g = c.graph();
+        let text = "sanitize_separators breaks for the postgres backend client.";
+
+        let seeds = seeds_from_text(&g, text, 8);
+        let names: Vec<&str> = seeds.iter().map(|n| g.name(*n)).collect();
+        assert_eq!(
+            names.first(),
+            Some(&"sanitize_separators"),
+            "a name that resolves here outranks a path that matches: {names:?}"
+        );
+        assert!(
+            names.contains(&"runshell"),
+            "and the path still fills the slots left over: {names:?}"
+        );
+
+        // With room for one seed, the symbol takes it and the path gets none.
+        let tight = seeds_from_text(&g, text, 1);
+        let tight: Vec<&str> = tight.iter().map(|n| g.name(*n)).collect();
+        assert_eq!(tight, vec!["sanitize_separators"]);
     }
 }

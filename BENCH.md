@@ -13,6 +13,126 @@ Reproduce: `cargo build --release && ./bench/run.sh`
 This is the claim that matters and the one nobody in this space publishes.
 "Faster" is a stopwatch; "cheaper" needs ground truth.
 
+### SWE-bench Verified — 500 real issues, 12 repositories
+
+`bench/swebench.py`. Each instance is pinned to the commit its issue was filed
+against. The query is the issue **as filed**, before anyone knew the answer; the
+ground truth is the files the accepted patch touched, with test files dropped,
+since pointing at the test that proves a bug is not finding the bug.
+
+| approach | file recall | tokens/query |
+|---|---:|---:|
+| **leangraph, 100 nodes** | **77.6%** | **14,863** |
+| keyword, top 10 | 51.3% | 244,672 |
+| keyword, at our budget | 15.1% | 34,502 |
+
+**Better recall than reading ten whole files, for a sixteenth of the tokens.**
+At least one file that had to change is in the context 80.8% of the time
+(95% CI 77–84). Bootstrapped over *repositories* rather than instances — django
+is 231 of the 500 and its idioms are its own — recall is 77.6%, CI [71.8, 85.5].
+Wide, and it should be: twelve repositories is a small sample of repositories
+however many instances they carry.
+
+The third row needs its caveat stated rather than left to be found. At our token
+budget keyword can afford **1.06 files**, because a single Python file usually
+exceeds the whole budget already, and the first file is taken whether it fits or
+not — so that row spends 34,502 tokens against our 14,863. It is generous on
+tokens and narrow on files. Read it as "its top-ranked file is the right one 15%
+of the time", not as a rich comparison.
+
+Reproduce with `bench/swebench_fetch.py` (dataset from the Hub, full clones of
+the twelve repositories, ~2.1 GB) and then `bench/swebench.py --repos <dir>`.
+
+### The protocol, and why it is not the obvious one
+
+Every instance is indexed from scratch. `--reuse-index` keeps `.leangraph`
+between them, which is faster and is how the first runs were done — but then each
+measurement is an incremental sync from whatever commit was measured *before* it,
+and two things follow.
+
+**A measurement that depends on its predecessor is not one measurement.** Same
+binary, same code, carried state versus fresh: **20 of 500 instances move**
+(14 better, 6 worse, p = 0.12). That 4% is the noise floor of this harness, and
+it is the number any result here has to clear to mean anything.
+
+**The co-change cache was reused from the future.** Its staleness gate asked
+`git rev-list --count <cached>..HEAD`, which counts only what HEAD has that the
+cache does not. Check out an older commit and it returns zero — no drift, reuse
+the cache. Measured on the astropy checkout: a cache **16,722 commits ahead**
+reported zero drift. In this benchmark that is co-change evidence derived from
+history containing the fix itself, which is the same class of leak the commit
+message query had. Fixed in `cochange::drift`, which now counts both directions
+(`--left-right <cached>...HEAD`), with regression tests for a HEAD that moved
+forward, a HEAD that moved *backwards*, and a commit the repository no longer
+has.
+
+Worth stating plainly: **the leak was not inflating the numbers.** Under the
+fresh protocol recall goes *up*, 76.6% → 77.6%. The reuse was adding noise, not
+signal. But the gate was wrong outside this benchmark too — `git bisect`, an
+older branch, and a worktree pinned to an old tag all move HEAD backwards.
+
+### Seeding from paths, and the hypothesis it refuted
+
+Issues that describe behaviour often name no symbol that resolves anywhere while
+addressing a file squarely by where it lives. "Use subprocess.run and PGPASSWORD
+for client in postgres backend" names nothing in django and points at
+`django/db/backends/postgresql/client.py`; three segments of that path are in
+the sentence. `seeds_from_path` requires two distinct tokens — one is a
+coincidence, every repository has a `utils` — and ranks by tokens matched, then
+by the shallower path.
+
+Measured against the same 500 instances, both runs on a fresh index:
+
+| | recall | tokens | contexts with nothing useful |
+|---|---:|---:|---:|
+| before | 72.0% | 13,555 | 126 |
+| after | **77.6%** | 14,863 | **96** |
+
+Paired per instance, which is the only comparison that answers the question —
+two aggregate means cannot separate a change that helps 56 and hurts 23 from one
+that does nothing, and with django at 231 of 500 a mean is mostly a statement
+about django:
+
+```
+recall    +5.6 points        tokens +1,308 per query (+9.6%)
+moved     56 better, 23 worse, 421 unchanged
+empty     47 of 126 rescued; 17 went the other way
+sign test p = 0.00026 over the 79 that moved
+per repo  django 28+/7-  pylint 6+/0-  sphinx 7+/6-  sympy 6+/5-  matplotlib 3+/3-
+```
+
+**The obvious version of this change is the wrong one.** "24% of contexts come
+back with nothing useful" reads as "no name resolved there", so restricting path
+seeds to that case ought to buy the same rescues while disturbing nothing. It
+does not: the fallback branch fires on only 25 of those 121, rescues 5, and
+lands at −0.5 points with p = 0.58 (measured under the earlier protocol, but a
+null that size does not survive a cleaner one). In the other 96 the names
+resolve perfectly well and simply point at the wrong code. Path evidence is
+worth having precisely where it sits *beside* a name that did not pan out —
+appended after symbol seeds, never instead of them.
+
+It is not free. The expansion has a hundred nodes to spend and every extra root
+spreads them thinner, so 17 contexts that held the right file lost it —
+`django__django-11815` went from 3,904 tokens holding the answer to 10,316
+tokens without it. Net of both halves the change is worth making; the losing
+half is real.
+
+### Where it loses
+
+Keyword top-10 beats us outright on **8.4%** of instances, and we return nothing
+useful at all on **19.2%**. That is a retrieval problem and a bigger budget will
+not fix it. sphinx is the weakest repository at 58.0%, and it is the one where
+path seeding is closest to a wash.
+
+### The earlier benchmark, and why it was replaced
+
+`bench/cost.py` used a bug-fix commit's message as the query and the files it
+touched as the answer — local, reproducible, and leaky. A commit message is
+written *after* the fix, by someone who knows it, and frequently names the
+function that changed; real issue text does not. The leak flattered us, which is
+the direction nobody audits. Its numbers are kept here because the co-change
+result below was established on them.
+
 `bench/cost.py`, django, 30 bug-fix commits. Ground truth is the set of files
 each fix actually touched; the query is the commit message. Entirely local and
 reproducible — no API token, no curated dataset. The baseline is keyword search
@@ -820,8 +940,8 @@ systematically from the rest.
 
 ## Reproducibility of the benchmarks themselves
 
-Two defects found while re-running everything after the fixes, both of which had
-been silently moving published numbers.
+Three defects found while re-running everything after the fixes, all of which
+had been silently moving published numbers.
 
 **The keyword baseline was a random draw.** `bench/cost.py` picked its search
 terms with `list(set(tokenize(text)))[:12]`. Set iteration order for strings
@@ -834,6 +954,19 @@ and rename detection was on. django's corpus is a shallow clone; rename detectio
 compares blob *contents* and fetches them lazily, so its answers depend on which
 blobs happen to be local. Running the indexer in between changed the object store
 and therefore changed which commits qualified.
+
+**A benchmark inherited its predecessor's state.** `bench/swebench.py` kept
+`.leangraph` between instances, so each measurement was an incremental sync from
+the commit measured before it rather than an index of the commit being measured.
+Two runs of the same binary differed on 20 of 500 instances. Worse, the
+co-change cache's staleness gate was asymmetric and reported zero drift for a
+cache built 16,722 commits *ahead* of the checkout, feeding the ranker history
+that contained the fix. Both are fixed — a fresh index per instance, and a
+symmetric `drift` — and the full account is under [Cost](#cost--tokens-to-reach-the-files-that-actually-changed).
+
+The shape these three share is worth naming: every one of them is a cache or a
+carried state that was correct in the direction the code normally moves, and
+wrong the moment something moved the other way.
 
 Three consecutive runs now agree on every row.
 
@@ -882,7 +1015,8 @@ things, and only one of them is a decision.
 
 - **Edge precision outside flask.** Now measured directly where the runtime oracle can settle it — 78.1% over 688 edges at 560 call sites, and 94.8% in the confidence-100 bucket (`bench/edgeprecision.py`). That subset is one repository in one language, because it needs a test suite that runs offline. Everywhere else it is still a floor from `edgefacts` and a ceiling from fan-out.
 - **Edge recall outside flask.** django's suite needs dependencies this machine cannot fetch offline; excalidraw has no Python. One repository, one language.
-- **Whether the answer is right, as opposed to the context.** Localization is measured on SWE-bench Verified — 72.7% of the files that had to change, over 500 real issues (`bench/swebench.py`). The benchmark also ships the tests that decide whether a *patch* is correct, and those have not been run against fix mode. That is the next thing worth measuring and the first that would judge the agent rather than the retrieval.
+- **Whether the answer is right, as opposed to the context.** Localization is measured on SWE-bench Verified — 77.6% of the files that had to change, over 500 real issues (`bench/swebench.py`). The benchmark also ships the tests that decide whether a *patch* is correct, and those have not been run against fix mode. That is the next thing worth measuring and the first that would judge the agent rather than the retrieval.
+- **Embedding retrieval as a baseline.** Keyword search is what an agent without an index falls back to; what people who build context for agents actually deploy is embedding retrieval over chunked source. `bench/ragbase.py` implements it — chunked so it pays only for what it reads, at leangraph's own token budget so the comparison is at equal cost — but the column is not filled in here yet.
 - **The agent against the real API.** Every agent assertion runs against a stub. Shape, safety and caching structure are checked; answer quality is not.
 - **Fix mode against a real provider.** The git half is real; GitHub is a stub, so nothing here says how often a proposed patch is *correct* — only that a wrong one cannot escalate.
 - **Whether running the tests catches anything.** They run now, and the pull request reports what happened; nobody has measured how often a proposed patch passes a suite it should have failed, because that needs proposed patches against real repositories.
