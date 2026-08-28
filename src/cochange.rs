@@ -197,19 +197,34 @@ pub fn head(root: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// How many commits HEAD has advanced since `since`. `None` when the histories
-/// have diverged — a force-push or a branch switch — in which case the cache is
-/// not merely stale but wrong, and must be discarded.
+/// How far HEAD stands from `since`, counting **both** directions. `None` when
+/// the commit is not in this repository at all — a force-push that dropped it —
+/// in which case the cache is not merely stale but wrong, and must be discarded.
+///
+/// The two-dot form `since..HEAD` counts only what HEAD has that `since` does
+/// not, which is the whole answer while a checkout moves forward and silently
+/// zero the moment it moves back: a cache built 564 commits *later* than the
+/// current checkout reported no drift at all and was reused, so co-change
+/// evidence derived from commits this tree has never seen fed the ranking.
+/// Nothing in normal use moves HEAD backwards, which is why this held for so
+/// long — but `git bisect`, an older branch, and a worktree pinned to an old
+/// tag all do, and so does any benchmark that walks a repository's history.
 pub fn drift(root: &Path, since: &str) -> Option<u32> {
     let out = Command::new("git")
-        .args(["rev-list", "--count", &format!("{since}..HEAD")])
+        .args(["rev-list", "--count", "--left-right", &format!("{since}...HEAD")])
         .current_dir(root)
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    // "<behind>\t<ahead>": either side moving is drift, and their sum is the
+    // distance a reuse decision should be made on.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut sides = text.split_whitespace();
+    let behind: u32 = sides.next()?.parse().ok()?;
+    let ahead: u32 = sides.next()?.parse().ok()?;
+    Some(behind + ahead)
 }
 
 pub fn save(path: &Path, head: &str, pairs: &[(String, String, u8)]) -> Result<()> {
@@ -310,4 +325,76 @@ pub fn pairs_to_edges(
             })
         })
         .collect()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::TempTree;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("git must be on PATH");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repository with four commits, returning the sha of each.
+    fn history(tree: &TempTree) -> Vec<String> {
+        let root = tree.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        let mut shas = Vec::new();
+        for i in 0..4 {
+            tree.write("f.py", &format!("x = {i}\n"));
+            git(root, &["add", "f.py"]);
+            git(root, &["commit", "-q", "-m", &format!("c{i}")]);
+            shas.push(git(root, &["rev-parse", "HEAD"]));
+        }
+        shas
+    }
+
+    #[test]
+    fn drift_counts_a_head_that_has_advanced() {
+        let tree = TempTree::new("drift-fwd");
+        let shas = history(&tree);
+        assert_eq!(drift(tree.path(), &shas[0]), Some(3));
+        assert_eq!(drift(tree.path(), &shas[3]), Some(0));
+    }
+
+    /// The regression: a cache built *ahead* of the checkout is not fresh, and
+    /// reporting zero drift for it reuses history the tree does not contain.
+    #[test]
+    fn drift_counts_a_head_that_has_gone_backwards() {
+        let tree = TempTree::new("drift-back");
+        let shas = history(&tree);
+        git(tree.path(), &["checkout", "-q", &shas[0]]);
+        assert_eq!(
+            drift(tree.path(), &shas[3]),
+            Some(3),
+            "three commits the checkout has never seen is three commits of drift"
+        );
+    }
+
+    #[test]
+    fn a_commit_this_repository_does_not_have_is_not_drift_but_ruin() {
+        let tree = TempTree::new("drift-gone");
+        history(&tree);
+        assert_eq!(
+            drift(tree.path(), "0000000000000000000000000000000000000000"),
+            None,
+            "an unknown commit must discard the cache, not measure against it"
+        );
+    }
 }
