@@ -415,6 +415,12 @@ pub struct Spec {
     namespaced: Vec<u16>,
     /// field id holding that local name
     f_alias: Vec<u16>,
+    /// nodes whose text is prose rather than code — comments, docstrings and
+    /// string literals. The extractor drops these today, and they are the only
+    /// place a codebase writes down what it does in the words its users would
+    /// use: an issue saying "the run never continued after approval" matches
+    /// the docstring on the approval executor and matches no identifier at all.
+    prose: Vec<u16>,
 }
 
 /// Names a spec asked for that its grammar does not have.
@@ -485,7 +491,7 @@ pub fn spec_for(lang: Lang) -> Spec {
     if let Ok(mut b) = BUILDING.lock() {
         *b = lang.name();
     }
-    let spec = match lang {
+    let mut spec = match lang {
         Lang::Python => Spec {
             defs: tagged(
                 &l,
@@ -514,6 +520,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: kinds(&l, &["aliased_import"]),
             namespaced: Vec::new(),
             f_alias: fields(&l, &["alias"]),
+            prose: Vec::new(),
         },
         Lang::TypeScript | Lang::Tsx => Spec {
             defs: tagged(
@@ -575,6 +582,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: kinds(&l, &["import_specifier", "namespace_import"]),
             namespaced: kinds(&l, &["namespace_import"]),
             f_alias: fields(&l, &["alias"]),
+            prose: Vec::new(),
         },
 
         // rust — high confidence. Verified against the real grammar by building a scratch dumper (tree-sitter 0.
@@ -637,6 +645,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: kinds(&l, &["use_as_clause"]),
             namespaced: Vec::new(),
             f_alias: fields(&l, &["alias"]),
+            prose: Vec::new(),
         },
         // go — high confidence. Verified by dumping real trees with tree-sitter-go 0.
         Lang::Go => Spec {
@@ -668,6 +677,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: Vec::new(),
             namespaced: Vec::new(),
             f_alias: Vec::new(),
+            prose: Vec::new(),
         },
         // java — high confidence. Verified by parsing sample Java and re-running extract.
         Lang::Java => Spec {
@@ -716,6 +726,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: Vec::new(),
             namespaced: Vec::new(),
             f_alias: Vec::new(),
+            prose: Vec::new(),
         },
         // c — medium confidence. Verified against the real tree (scratch tree-sitter-c dumper) and by building leangraph with three candidate C specs and indexing tree-sitter's own C .
         Lang::C => Spec {
@@ -752,6 +763,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: Vec::new(),
             namespaced: Vec::new(),
             f_alias: Vec::new(),
+            prose: Vec::new(),
         },
         // cpp — high confidence. Definitions: C++ hangs the name off a declarator chain, not a `name` field.
         Lang::Cpp => Spec {
@@ -796,6 +808,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: kinds(&l, &["namespace_alias_definition"]),
             namespaced: Vec::new(),
             f_alias: fields(&l, &["name"]),
+            prose: Vec::new(),
         },
         // csharp — high confidence. Verified by parsing C# samples with tree-sitter-c-sharp 0.
         Lang::CSharp => Spec {
@@ -853,6 +866,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: Vec::new(),
             namespaced: Vec::new(),
             f_alias: Vec::new(),
+            prose: Vec::new(),
         },
         // ruby — high confidence. Non-obvious choices, all checked against a real parse and a real extraction run.
         Lang::Ruby => Spec {
@@ -884,6 +898,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: kinds(&l, &["alias"]),
             namespaced: Vec::new(),
             f_alias: fields(&l, &["alias"]),
+            prose: Vec::new(),
         },
         // php — medium confidence. Verified by parsing a feature-heavy sample with tree-sitter-php 0.
         Lang::Php => Spec {
@@ -938,6 +953,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: kinds(&l, &["namespace_use_clause"]),
             namespaced: Vec::new(),
             f_alias: fields(&l, &["alias"]),
+            prose: Vec::new(),
         },
         // kotlin — high confidence. The decisive fact: tree-sitter-kotlin-ng has only EIGHT fields in the entire grammar — argument, condition, label, left, name, operator, right, type —.
         Lang::Kotlin => Spec {
@@ -972,6 +988,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: Vec::new(),
             namespaced: Vec::new(),
             f_alias: Vec::new(),
+            prose: Vec::new(),
         },
         // swift — medium confidence. Verified against tree-sitter-swift 0.
         Lang::Swift => Spec {
@@ -1011,6 +1028,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: Vec::new(),
             namespaced: Vec::new(),
             f_alias: Vec::new(),
+            prose: Vec::new(),
         },
         // scala — high confidence. Verified by parsing Scala samples with tree-sitter-scala 0.
         Lang::Scala => Spec {
@@ -1063,6 +1081,7 @@ pub fn spec_for(lang: Lang) -> Spec {
             aliased: kinds(&l, &["arrow_renamed_identifier", "as_renamed_identifier"]),
             namespaced: Vec::new(),
             f_alias: fields(&l, &["alias"]),
+            prose: Vec::new(),
         },
     };
     // `kinds` drops names the grammar does not know, so a typo here produces an
@@ -1077,7 +1096,45 @@ pub fn spec_for(lang: Lang) -> Spec {
         "{:?}: alias nodes named but no alias field resolved",
         lang
     );
+
+    // Prose kinds are named almost identically across grammars, so they are
+    // resolved once here rather than repeated in fourteen literals. `opt_kinds`
+    // rather than `kinds` because every grammar spells only some of these — a
+    // name the grammar lacks is expected, not a typo, and warning on each would
+    // bury the warnings that mean something.
+    spec.prose = opt_kinds(
+        &l,
+        &[
+            "comment",
+            "line_comment",
+            "block_comment",
+            "doc_comment",
+            "string",
+            "string_literal",
+            "string_content",
+            "raw_string_literal",
+            "interpreted_string_literal",
+            "template_string",
+            "heredoc_body",
+        ],
+    );
+    debug_assert!(
+        !spec.prose.is_empty(),
+        "{:?}: no prose node kinds resolved — the grammar spells them differently",
+        lang
+    );
     spec
+}
+
+/// Node kinds a grammar may or may not have, resolved without complaint.
+fn opt_kinds(l: &Language, names: &[&str]) -> Vec<u16> {
+    names
+        .iter()
+        .filter_map(|n| match l.id_for_node_kind(n, true) {
+            0 => None,
+            id => Some(id),
+        })
+        .collect()
 }
 
 impl Spec {
@@ -1170,6 +1227,11 @@ impl Spec {
     #[inline]
     pub fn is_heritage(&self, k: u16) -> bool {
         self.heritage.contains(&k)
+    }
+
+    #[inline]
+    pub fn is_prose(&self, k: u16) -> bool {
+        self.prose.contains(&k)
     }
 
     /// The named segment of a dotted access, and nothing else.

@@ -24,7 +24,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const MAGIC: [u8; 8] = *b"LGRPHG\x00\x04";
+const MAGIC: [u8; 8] = *b"LGRPHG\x00\x05";
 const N_SECTIONS: usize = 25;
 
 // section ids
@@ -50,6 +50,13 @@ const S_PATH_BLOB: usize = 18;
 const S_ROOT: usize = 19;
 const S_NODE_KEY: usize = 20;
 const S_FILE_STAMP: usize = 21;
+/// Per-node offsets into `S_PROSE_WORD`, CSR-style like the adjacency.
+const S_PROSE_OFF: usize = 22;
+/// Symbol ids of the words in each node's comments, docstring and string
+/// literals. Ids rather than text, so matching a query word against the whole
+/// repository is integer work, and a word costs four bytes per node however
+/// often it repeats across the tree.
+const S_PROSE_WORD: usize = 23;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -114,6 +121,8 @@ pub struct Graph {
     /// query that the bytes it is about to slice are no longer the bytes that
     /// were parsed.
     file_stamp: &'static [u64],
+    prose_off: &'static [u32],
+    prose_word: &'static [u32],
     /// Built on first lookup, not at open time — keeping `open` a pure mmap is
     /// the point of the format, and many callers never search by name.
     name_index: OnceLock<FxHashMap<&'static str, Vec<NodeId>>>,
@@ -190,6 +199,9 @@ pub fn write(
     // makes the file a pure function of the graph — which is what lets a cache
     // be trusted and a divergence be a real signal rather than noise.
     let mut used: Vec<u32> = r.nodes.iter().map(|m| m.name).collect();
+    // Prose words are symbols too. Without this the table keeps only the names
+    // of nodes, and every prose id points at whatever lands in its slot.
+    used.extend(r.prose.iter().map(|&(_, w)| w));
     used.sort_unstable();
     used.dedup();
     used.sort_unstable_by(|&a, &b| {
@@ -227,6 +239,23 @@ pub fn write(
         node_file[i] = m.file;
         node_start[i] = m.start;
         node_end[i] = m.end;
+    }
+
+    // Prose in the same shape as the adjacency: one word array, one offset per
+    // node. `r.prose` arrives sorted by node, so this is a single pass and a
+    // node's words are a contiguous slice.
+    let mut prose_off = vec![0u32; n_nodes as usize + 1];
+    let mut prose_word: Vec<u32> = Vec::with_capacity(r.prose.len());
+    {
+        let mut at = 0usize;
+        for n in 0..n_nodes as usize {
+            prose_off[n] = prose_word.len() as u32;
+            while at < r.prose.len() && r.prose[at].0 .0 as usize == n {
+                prose_word.push(remap_sym(r.prose[at].1));
+                at += 1;
+            }
+        }
+        prose_off[n_nodes as usize] = prose_word.len() as u32;
     }
 
     // string tables: offsets + one blob, so lookup is a slice, never an alloc
@@ -306,6 +335,8 @@ pub fn write(
         .flat_map(|&(size, mtime)| [size, mtime as u64])
         .collect();
     section!(S_FILE_STAMP, &stamp_flat[..]);
+    section!(S_PROSE_OFF, &prose_off[..]);
+    section!(S_PROSE_WORD, &prose_word[..]);
 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok();
@@ -399,6 +430,8 @@ impl Graph {
                 conf: sec_u8(S_REV_CONF),
                 prov: sec_u8(S_REV_PROV),
             },
+            prose_off: sec_u32(S_PROSE_OFF),
+            prose_word: sec_u32(S_PROSE_WORD),
             sym_off: sec_u32(S_SYM_OFF),
             sym_blob: sec_u8(S_SYM_BLOB),
             path_off: sec_u32(S_PATH_OFF),
@@ -452,6 +485,41 @@ impl Graph {
             Some(&id) => self.sym(id),
             None => "",
         }
+    }
+
+    /// The words of this node's comments, docstring and string literals, as
+    /// symbol ids. Empty for a node whose author wrote none, which is most of
+    /// them — hence the sparse layout.
+    #[inline]
+    pub fn prose(&self, n: NodeId) -> &[u32] {
+        let i = n.0 as usize;
+        if i + 1 >= self.prose_off.len() {
+            return &[];
+        }
+        let (a, b) = (self.prose_off[i] as usize, self.prose_off[i + 1] as usize);
+        self.prose_word.get(a..b).unwrap_or(&[])
+    }
+
+    /// The id of a symbol, or `None` if this repository never uses that word.
+    ///
+    /// The table is written in sorted order — `write` canonicalises it so that
+    /// two indexes of identical source produce identical bytes — so this is a
+    /// binary search over offsets rather than a hash map that would have to be
+    /// built at open time. Which matters: opening the graph is an mmap and
+    /// nothing else, and a query that resolves eight words should not pay for
+    /// an index over twenty thousand.
+    pub fn sym_id(&self, word: &str) -> Option<u32> {
+        let n = self.sym_off.len().saturating_sub(1);
+        let (mut lo, mut hi) = (0usize, n);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match self.sym(mid as u32).cmp(word) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(mid as u32),
+            }
+        }
+        None
     }
 
     #[inline]

@@ -212,6 +212,17 @@ pub struct FileUnit {
     pub had_parse_error: bool,
     /// Local bindings introduced by `as`.
     pub aliases: Vec<Alias>,
+    /// Words lifted from comments, docstrings and string literals, each
+    /// attributed to the definition that encloses it (`NO_SCOPE` for file
+    /// level). Interned like every other name, so what is carried around is a
+    /// `u32` and matching a query word against a repository is integer work.
+    ///
+    /// This is the only part of a file written in the language its *users*
+    /// speak. A report saying "the run never continued after approval" names
+    /// no symbol that resolves, and matches the sentence above the function
+    /// that handles it. Deduplicated per definition: term frequency inside one
+    /// function says little, and dropping it keeps this to a bounded size.
+    pub prose: Vec<(DefIdx, SymId)>,
 }
 
 /// Global node id.

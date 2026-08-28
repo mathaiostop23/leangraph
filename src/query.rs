@@ -207,6 +207,97 @@ fn seeds_from_path(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
     out
 }
 
+/// Nodes whose *prose* the query describes — comments, docstrings and the
+/// strings a program prints.
+///
+/// This is the only part of a repository written in the language its users
+/// speak, and it is the half the seeder was blind to. "The run never continued
+/// after the reviewer approved it" resolves no symbol: `run` and `approved` are
+/// too common to be leads, and nothing in that sentence is an identifier. It is
+/// almost word-for-word the docstring above the function that handles it.
+///
+/// Scored as BM25 with a binary term frequency. Frequency is binary because a
+/// word is stored once per definition — how often a comment repeats itself is
+/// not evidence about the code under it — which collapses the usual saturation
+/// term into a constant per node, leaving length-normalised IDF. Length
+/// normalisation is what stops a 2,000-line module with a long licence header
+/// from answering every question.
+fn seeds_from_prose(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
+    // Only words this repository actually writes down. One binary search each,
+    // and a word nobody here has ever typed costs nothing further.
+    let mut want: Vec<u32> = Vec::new();
+    for raw in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        if raw.len() < 4 || raw.len() > 24 {
+            continue;
+        }
+        let lower = raw.to_ascii_lowercase();
+        if let Some(id) = g.sym_id(&lower) {
+            if !want.contains(&id) {
+                want.push(id);
+            }
+        }
+    }
+    if want.is_empty() {
+        return Vec::new();
+    }
+    let wanted: FxHashSet<u32> = want.iter().copied().collect();
+
+    // One pass over the prose of every node: which query words it holds, and
+    // how long its prose is. Nodes with none — most of them — cost a bounds
+    // check and nothing else.
+    let mut hits: Vec<(NodeId, u32)> = Vec::new();
+    let mut lens: FxHashMap<NodeId, u32> = FxHashMap::default();
+    let mut total_len = 0u64;
+    let mut n_docs = 0u64;
+    for n in (0..g.n_nodes()).map(NodeId) {
+        let words = g.prose(n);
+        if words.is_empty() {
+            continue;
+        }
+        n_docs += 1;
+        total_len += words.len() as u64;
+        let mut any = false;
+        for &w in words {
+            if wanted.contains(&w) {
+                hits.push((n, w));
+                any = true;
+            }
+        }
+        if any {
+            lens.insert(n, words.len() as u32);
+        }
+    }
+    if hits.is_empty() {
+        return Vec::new();
+    }
+
+    let mut df: FxHashMap<u32, u32> = FxHashMap::default();
+    for &(_, w) in &hits {
+        *df.entry(w).or_default() += 1;
+    }
+    let n_docs = n_docs.max(1) as f32;
+    let avg = (total_len as f32 / n_docs).max(1.0);
+
+    const B: f32 = 0.75;
+    let mut score: FxHashMap<NodeId, f32> = FxHashMap::default();
+    for &(n, w) in &hits {
+        let d = *df.get(&w).unwrap_or(&1) as f32;
+        let idf = (1.0 + (n_docs - d + 0.5) / (d + 0.5)).ln();
+        let len = *lens.get(&n).unwrap_or(&1) as f32;
+        *score.entry(n).or_default() += idf / (1.0 - B + B * len / avg);
+    }
+
+    let mut ranked: Vec<(NodeId, f32)> = score.into_iter().collect();
+    // Ties broken by node id so the same repository and query always answer the
+    // same way; a ranking that shuffles is a benchmark that cannot be repeated.
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    ranked.into_iter().take(max).map(|(n, _)| n).collect()
+}
+
 pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
     let mut hits: Vec<(u8, usize, NodeId)> = Vec::new();
     // Tokens rejected only for being stopwords, kept in case nothing else
@@ -272,6 +363,7 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
                 out.push(n);
             }
         }
+        fill_from_prose(g, text, max, &mut out);
         return out.into_iter().take(max).collect();
     }
     // identifier-shaped first, then most specific
@@ -313,7 +405,25 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
             }
         }
     }
+    fill_from_prose(g, text, max, &mut out);
     out.into_iter().take(max).collect()
+}
+
+/// Prose last, into whatever the names and the paths left empty.
+///
+/// Last because it is the broadest signal and the easiest to be wrong about: a
+/// name that resolves here is a fact, and a word in a comment is a hint. Which
+/// of them should give way when the seed budget is full is a question the two
+/// benchmarks answer, not this comment.
+fn fill_from_prose(g: &Graph, text: &str, max: usize, out: &mut Vec<NodeId>) {
+    if out.len() >= max {
+        return;
+    }
+    for n in seeds_from_prose(g, text, max - out.len()) {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
 }
 
 /// How much a token looks like it was copied out of source rather than typed

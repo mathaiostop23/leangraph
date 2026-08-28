@@ -487,6 +487,14 @@ pub struct NodeMeta {
 
 pub struct Resolved {
     pub space: NodeSpace,
+    /// `(node, word)` — a definition's prose, mapped out of per-file indices
+    /// into the graph's own node ids. Done here because this is the only place
+    /// that holds both the units and the node space; the writer would otherwise
+    /// have to be handed the units and rediscover the mapping.
+    ///
+    /// File-level prose — a module docstring, a licence header — hangs off the
+    /// file node, which is a node like any other.
+    pub prose: Vec<(NodeId, u32)>,
     /// Indexed by node id, so it has holes where nodes were retired.
     pub nodes: Vec<NodeMeta>,
     pub edges: Vec<Edge>,
@@ -983,8 +991,26 @@ pub fn resolve(
         }
     }
 
+    let mut prose: Vec<(NodeId, u32)> = Vec::new();
+    for (f, u) in units.iter().enumerate() {
+        let fid = f as FileId;
+        for &(scope, word) in &u.prose {
+            let n = if scope == NO_SCOPE {
+                space.file_node(fid)
+            } else {
+                space.def_node(fid, scope)
+            };
+            if n.0 != u32::MAX {
+                prose.push((n, word.into_usize() as u32));
+            }
+        }
+    }
+    prose.sort_unstable();
+    prose.dedup();
+
     Resolved {
         space,
+        prose,
         nodes,
         edges,
         stats,

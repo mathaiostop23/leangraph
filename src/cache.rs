@@ -23,8 +23,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAGIC: [u8; 8] = *b"LGRPHC\x00\x06";
-const N_SECTIONS: usize = 12;
+const MAGIC: [u8; 8] = *b"LGRPHC\x00\x07";
+const N_SECTIONS: usize = 13;
 
 const S_FILES: usize = 0;
 const S_DEFS: usize = 1;
@@ -42,6 +42,9 @@ const S_ALIASES: usize = 9;
 /// again.
 const S_GONE_OFF: usize = 10;
 const S_GONE_BLOB: usize = 11;
+/// `(scope, word)` pairs — the words of a file's comments, docstrings and
+/// string literals. Interned, so each is two `u32`s.
+const S_PROSE: usize = 12;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -70,6 +73,8 @@ struct CFile {
     had_error: u32,
     alias_at: u32,
     alias_n: u32,
+    prose_at: u32,
+    prose_n: u32,
 }
 
 #[repr(C)]
@@ -345,6 +350,7 @@ fn write_set(
     let mut refs = Vec::new();
     let mut imports = Vec::new();
     let mut aliases: Vec<CAlias> = Vec::new();
+    let mut prose: Vec<[u32; 2]> = Vec::new();
 
     let mut sym_idx: FxHashMap<u32, u32> = FxHashMap::default();
     let mut sym_strings: Vec<String> = Vec::new();
@@ -375,6 +381,8 @@ fn write_set(
             ref_n: u.refs.len() as u32,
             imp_at: imports.len() as u32,
             imp_n: u.imports.len() as u32,
+            prose_at: prose.len() as u32,
+            prose_n: u.prose.len() as u32,
             alias_at: aliases.len() as u32,
             alias_n: u.aliases.len() as u32,
             lang: lang_id(langs[i]),
@@ -407,6 +415,9 @@ fn write_set(
                 },
                 _pad: 0,
             });
+        }
+        for &(scope, word) in &u.prose {
+            prose.push([scope, sym!(word)]);
         }
         for m in &u.imports {
             imports.push(CImport {
@@ -459,6 +470,7 @@ fn write_set(
     section!(S_HEAD, head.as_bytes());
     section!(S_GONE_OFF, &gone_off[..]);
     section!(S_GONE_BLOB, &gone_blob[..]);
+    section!(S_PROSE, &prose[..]);
 
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).ok();
@@ -513,6 +525,7 @@ fn read_one(path: &Path, interner: &Interner, root: &Path) -> Result<(Vec<Entry>
     let refs: &[CRef] = bytemuck::cast_slice(sec(S_REFS));
     let imports: &[CImport] = bytemuck::cast_slice(sec(S_IMPORTS));
     let aliases: &[CAlias] = bytemuck::cast_slice(sec(S_ALIASES));
+    let prose: &[[u32; 2]] = bytemuck::cast_slice(sec(S_PROSE));
     let sym_off: &[u32] = bytemuck::cast_slice(sec(S_SYM_OFF));
     let sym_blob = sec(S_SYM_BLOB);
     let path_off: &[u32] = bytemuck::cast_slice(sec(S_PATH_OFF));
@@ -538,6 +551,10 @@ fn read_one(path: &Path, interner: &Interner, root: &Path) -> Result<(Vec<Entry>
         let (a, b) = (path_off[i] as usize, path_off[i + 1] as usize);
         let rel = std::str::from_utf8(&path_blob[a..b]).unwrap_or("");
         let unit = FileUnit {
+            prose: prose[cf.prose_at as usize..(cf.prose_at + cf.prose_n) as usize]
+                .iter()
+                .map(|&[scope, word]| (scope, map(word)))
+                .collect(),
             aliases: aliases[cf.alias_at as usize..(cf.alias_at + cf.alias_n) as usize]
                 .iter()
                 .map(|a| (map(a.local), map(a.original)))
@@ -806,6 +823,7 @@ mod tests {
             imports: u.imports.clone(),
             had_parse_error: u.had_parse_error,
             aliases: u.aliases.clone(),
+            prose: u.prose.clone(),
         }
     }
 

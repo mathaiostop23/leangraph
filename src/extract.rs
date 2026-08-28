@@ -4,9 +4,7 @@
 //! so this parallelises across files with no coordination.
 
 use crate::cache::FileMeta;
-use crate::core::{
-    Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, Recv, Ref, RefKind, Span, NO_SCOPE,
-};
+use crate::core::{Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, NO_SCOPE, Recv, Ref, RefKind, Span, SymId};
 use crate::lang::{node_text, Lang, Spec};
 use memmap2::Mmap;
 use rustc_hash::FxHashSet;
@@ -30,6 +28,116 @@ pub struct Timings {
 /// A stack of `(definition index, tree depth)` gives every node its enclosing
 /// definition as we go, so the containment tree falls out of the same pass
 /// rather than needing a second traversal.
+/// The words of one comment, docstring or string literal, attributed to the
+/// definition around it.
+///
+/// Bounded deliberately. Words shorter than four characters carry no retrieval
+/// signal and are most of the volume; anything past 24 is a token, a hash or a
+/// base64 blob rather than a word. The per-definition ceiling exists for the
+/// file that embeds a fixture or a minified asset as a string literal, where
+/// the alternative is one node quietly owning tens of thousands of words.
+const PROSE_MIN: usize = 4;
+const PROSE_MAX: usize = 24;
+const PROSE_PER_DEF: usize = 96;
+
+fn harvest_prose(
+    src: &[u8],
+    node: &tree_sitter::Node,
+    scope: DefIdx,
+    interner: &Interner,
+    unit: &mut FileUnit,
+    seen: &mut FxHashSet<(DefIdx, SymId)>,
+) {
+    let Ok(text) = std::str::from_utf8(&src[node.byte_range()]) else {
+        return;
+    };
+    let mut kept = 0usize;
+    for raw in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if kept >= PROSE_PER_DEF {
+            break;
+        }
+        if raw.len() < PROSE_MIN || raw.len() > PROSE_MAX {
+            continue;
+        }
+        // A run of digits, a hex blob or an identifier-shaped token that is all
+        // caps-and-numbers is not a word anyone would type into a bug report.
+        if !raw.chars().any(|c| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        let lower = raw.to_ascii_lowercase();
+        if is_prose_stopword(&lower) {
+            continue;
+        }
+        let sym = interner.get_or_intern(lower.as_str());
+        if seen.insert((scope, sym)) {
+            unit.prose.push((scope, sym));
+            kept += 1;
+        }
+    }
+}
+
+/// Only the words that are common in *every* English text. Anything narrower is
+/// left to the ranking, where a word that appears in half the repository earns a
+/// low weight on its own rather than by being guessed at here.
+#[inline]
+fn is_prose_stopword(w: &str) -> bool {
+    matches!(
+        w,
+        "this"
+            | "that"
+            | "with"
+            | "from"
+            | "have"
+            | "been"
+            | "were"
+            | "will"
+            | "would"
+            | "could"
+            | "should"
+            | "when"
+            | "then"
+            | "than"
+            | "they"
+            | "them"
+            | "their"
+            | "there"
+            | "these"
+            | "those"
+            | "which"
+            | "while"
+            | "what"
+            | "into"
+            | "onto"
+            | "over"
+            | "under"
+            | "each"
+            | "some"
+            | "such"
+            | "only"
+            | "also"
+            | "more"
+            | "most"
+            | "other"
+            | "does"
+            | "done"
+            | "here"
+            | "must"
+            | "very"
+            | "just"
+            | "like"
+            | "make"
+            | "made"
+            | "same"
+            | "both"
+            | "because"
+            | "about"
+            | "after"
+            | "before"
+            | "between"
+            | "through"
+    )
+}
+
 fn walk(
     tree: &tree_sitter::Tree,
     src: &[u8],
@@ -45,6 +153,11 @@ fn walk(
     let mut consumed: FxHashSet<usize> = FxHashSet::default();
     // Depths at which we entered a base-class / implements list.
     let mut heritage: Vec<i32> = Vec::new();
+    // Prose nodes nest — a `string` holds a `string_content`, and both are
+    // prose — so the same word arrives more than once. Deduplication is what
+    // makes that harmless, and it is wanted anyway: how often a word repeats
+    // inside one function is not evidence about that function.
+    let mut prose_seen: FxHashSet<(DefIdx, SymId)> = FxHashSet::default();
     let mut depth: i32 = 0;
 
     loop {
@@ -67,6 +180,10 @@ fn walk(
         let kind = node.kind_id();
         let scope = stack.last().map(|&(i, _)| i).unwrap_or(NO_SCOPE);
         t.ast_nodes += 1;
+
+        if spec.is_prose(kind) {
+            harvest_prose(src, &node, scope, interner, unit, &mut prose_seen);
+        }
 
         // A heritage list only counts as one when it actually hangs off a class:
         // Python reuses `argument_list` for ordinary call arguments.
@@ -616,5 +733,57 @@ mod tests {
         let c = Corpus::build(&[("empty.py", "")]);
         assert!(c.units[0].defs.is_empty());
         assert!(c.units[0].refs.is_empty());
+    }
+
+
+    // ---- prose ------------------------------------------------------------
+
+    /// Words a user would write live in comments, docstrings and messages, and
+    /// they are attributed to the definition around them rather than the file.
+    #[test]
+    fn prose_is_harvested_and_attributed_to_its_definition() {
+        let c = Corpus::build(&[(
+            "a.py",
+            "def runshell(conn):\n             \x20   \"Open an interactive shell against the configured database.\"\n             \x20   # the password is passed through the environment\n             \x20   raise RuntimeError(\"connection refused\")\n",
+        )]);
+        let u = &c.units[0];
+        let words: Vec<&str> = u
+            .prose
+            .iter()
+            .map(|&(_, w)| c.interner.resolve(&w))
+            .collect();
+        for want in ["interactive", "shell", "database", "password", "environment", "refused"] {
+            assert!(words.contains(&want), "{want:?} missing from {words:?}");
+        }
+        // Short words and pure punctuation carry nothing and are not stored.
+        assert!(!words.iter().any(|w| w.len() < 4), "{words:?}");
+
+        let def = u.defs.iter().position(|d| c.interner.resolve(&d.name) == "runshell");
+        assert!(
+            u.prose.iter().any(|&(scope, _)| Some(scope as usize) == def),
+            "prose must hang off the function it was written inside"
+        );
+    }
+
+    /// The same word repeated inside one definition says nothing about it, and
+    /// prose node kinds nest, so the same text arrives more than once.
+    #[test]
+    fn a_word_is_stored_once_per_definition() {
+        let c = Corpus::build(&[(
+            "a.py",
+            "def f():\n             \x20   # retry retry retry\n             \x20   return \"retry\"\n",
+        )]);
+        let n = c.units[0]
+            .prose
+            .iter()
+            .filter(|&&(_, w)| c.interner.resolve(&w) == "retry")
+            .count();
+        assert_eq!(n, 1, "{:?}", c.units[0].prose.len());
+    }
+
+    #[test]
+    fn code_without_prose_stores_none() {
+        let c = Corpus::build(&[("a.py", "def f(x):\n    return x + 1\n")]);
+        assert!(c.units[0].prose.is_empty());
     }
 }

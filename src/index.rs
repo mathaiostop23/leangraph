@@ -605,9 +605,10 @@ pub fn run(cfg: &Config) -> Result<Summary> {
             let s = &r.stats;
             let tot = s.total_refs().max(1) as f64;
             println!(
-                "\n  \x1b[1mgraph\x1b[0m           {} nodes · {} edges",
+                "\n  \x1b[1mgraph\x1b[0m           {} nodes · {} edges · {} prose words",
                 r.space.total,
-                r.edges.len()
+                r.edges.len(),
+                r.prose.len()
             );
             let in_repo = s.in_repo().max(1) as f64;
             println!(
