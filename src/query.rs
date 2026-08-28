@@ -294,10 +294,18 @@ pub fn seeds_from_text(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
     // did not pan out. Appending: +4.0 points, 41 of the 121 rescued, p = 0.03.
     //
     // It is not free. The expansion has a hundred nodes to spend and every
-    // extra root spreads them thinner, so 20 contexts that had the right file
+    // extra root spreads them thinner, so 17 contexts that had the right file
     // lost it — django__django-11815 went from 3,904 tokens holding the answer
     // to 10,316 tokens without it. Net of both halves the change is worth
-    // making, and the losing half is real and concentrated in sphinx.
+    // making, and the losing half is real.
+    //
+    // Capping these at a reserved fifth was tried against exactly that half,
+    // a reserved slice being what fixed the same shape for co-change edges,
+    // and it is worse: rescues fall from 47 to 34 while only 6 of the 17
+    // losses are avoided — about two rescues surrendered per loss prevented,
+    // -1.6 points. So the tail of the path ranking is not padding. The right
+    // file is frequently *not* the best-scoring path match, and the extra
+    // roots earn the dilution they cause. Declined, on the measurement.
     if out.len() < max {
         for n in seeds_from_path(g, text, max - out.len()) {
             if !out.contains(&n) {

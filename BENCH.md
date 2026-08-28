@@ -117,6 +117,31 @@ spreads them thinner, so 17 contexts that held the right file lost it —
 tokens without it. Net of both halves the change is worth making; the losing
 half is real.
 
+**A reserved share was tried against that losing half, and declined.** Co-change
+edges had the same shape — a different kind of evidence losing on one scale —
+and a reserved fifth of the budget fixed it. Path seeds capped the same way come
+out worse:
+
+| | recall | tokens | tokens / recall point |
+|---|---:|---:|---:|
+| before path seeds | 72.0% | 13,555 | 188.2 |
+| **appended, uncapped** | **77.6%** | 14,863 | 191.5 |
+| capped at a reserved fifth | 76.0% | 14,159 | **186.3** |
+
+The cap saves 6 of the 17 losses and gives up 13 of the 47 rescues — about two
+rescues surrendered per loss prevented. What that says is worth more than the
+decision: the **tail** of the path ranking is not padding. The file that had to
+change is frequently not the best-scoring path match, so the extra roots earn
+the dilution they cause, and ranking path candidates better is a more promising
+line than rationing them.
+
+One honest wrinkle, since this benchmark's older sibling treats tokens per
+recall point as the durable number: by *that* measure the capped variant wins,
+186.3 against 191.5. It is the cheaper engine and the worse one. The published
+figure is recall at a fixed budget, both variants sit well inside it, and 5%
+more tokens for 1.6 points is a trade worth making — but a reader who prefers
+the efficiency ratio should know it points the other way.
+
 ### Where it loses
 
 Keyword top-10 beats us outright on **8.4%** of instances, and we return nothing
