@@ -22,21 +22,29 @@ since pointing at the test that proves a bug is not finding the bug.
 
 | approach | file recall | tokens/query |
 |---|---:|---:|
-| **leangraph, 100 nodes** | **77.6%** | **14,863** |
+| **leangraph, 100 nodes** | **81.8%** | **15,742** |
 | keyword, top 10 | 51.3% | 244,672 |
-| keyword, at our budget | 15.1% | 34,502 |
+| keyword, at our budget | 15.0% | 34,541 |
 
 **Better recall than reading ten whole files, for a sixteenth of the tokens.**
-At least one file that had to change is in the context 80.8% of the time
-(95% CI 77–84). Bootstrapped over *repositories* rather than instances — django
-is 231 of the 500 and its idioms are its own — recall is 77.6%, CI [71.8, 85.5].
+At least one file that had to change is in the context 85.6% of the time
+(95% CI 82–88). Bootstrapped over *repositories* rather than instances — django
+is 231 of the 500 and its idioms are its own — recall is 81.8%, CI [77.0, 87.0].
 Wide, and it should be: twelve repositories is a small sample of repositories
 however many instances they carry.
 
+| repo | n | recall | | repo | n | recall |
+|---|---:|---:|---|---|---:|---:|
+| django | 231 | 82.5% | | astropy | 22 | 94.3% |
+| sympy | 75 | 77.5% | | xarray | 22 | 88.6% |
+| sphinx | 44 | 68.9% | | pytest | 19 | 94.7% |
+| matplotlib | 34 | 76.5% | | pylint | 10 | 50.8% |
+| scikit-learn | 32 | 93.8% | | requests, seaborn, flask | 11 | 100% |
+
 The third row needs its caveat stated rather than left to be found. At our token
-budget keyword can afford **1.06 files**, because a single Python file usually
+budget keyword can afford **1.07 files**, because a single Python file usually
 exceeds the whole budget already, and the first file is taken whether it fits or
-not — so that row spends 34,502 tokens against our 14,863. It is generous on
+not — so that row spends 34,541 tokens against our 15,742. It is generous on
 tokens and narrow on files. Read it as "its top-ranked file is the right one 15%
 of the time", not as a rich comparison.
 
@@ -142,6 +150,86 @@ figure is recall at a fixed budget, both variants sit well inside it, and 5%
 more tokens for 1.6 points is a trade worth making — but a reader who prefers
 the efficiency ratio should know it points the other way.
 
+### The half of a repository nobody indexed
+
+Extraction kept definitions, references, imports and scopes, and threw away
+every comment, docstring and string literal. That is the only part of a codebase
+written in the language its *users* speak, and without it an issue that names no
+identifier has nothing to seed from.
+
+How much that costs was not visible on SWE-bench, whose issues are filed by
+developers who paste stack traces and function names. It is visible on a
+codebase audited on purpose: 31 bug reports against a real FastAPI service,
+each written as a user would file it and then *mechanically checked* so that no
+report contains a word which alone retrieves its own answer — the operational
+form of the commit-message leak, settled by asking the tool one query per word.
+
+| | file recall | tokens/query |
+|---|---:|---:|
+| leangraph, symbols only | 22.0% | 18,569 |
+| keyword top-10 | 28.5% | 397,998 |
+
+Losing to grep, at a twenty-first of its cost. Grep matches text anywhere —
+docstrings, log lines, error messages; we matched only names.
+
+Prose is now stored as interned word ids rather than text, so a word costs four
+bytes per node however often it repeats across the tree and matching a query
+against a repository is integer work. It is collected inside the existing cursor
+walk, and deduplicated per definition: prose node kinds nest, so the same text
+arrives more than once, and how often a comment repeats itself is not evidence
+about the code beneath it.
+
+Ranked as BM25 with a **binary** term frequency. Because a word is stored once
+per definition the usual saturation term collapses to a constant, leaving
+length-normalised IDF — and the length normalisation is what stops a 2,000-line
+module with a licence header from answering every question.
+
+Query words are found by binary search over the symbol table, which `write`
+already sorts to keep the format a pure function of the graph. Nothing is built
+at open time, because opening the graph being an mmap and nothing else is the
+property the 15 µs load and the 2.4 ms startup rest on.
+
+### Prose was not outranked, it was never asked
+
+Seeds are capped at 32 and were filled in order: names, then paths, then prose.
+Path seeding is greedy by construction — two nodes per matching file until the
+budget is gone — so on any issue whose names resolve thinly it took every
+remaining slot before the question of what the comments say was ever put.
+Counted over a stratified sample, six instances from each of the twelve
+repositories:
+
+```
+seeds by origin   path 1,145   name 657   prose 213
+instances with no prose seed at all   49 of 63   (78%)
+```
+
+A quarter of the seed budget is now held back for prose; paths take what the
+names left minus that slice, and get the remainder back when prose does not
+spend it. Seeds also carry their origin — `seed`, `path`, `prose` — which is
+what made the starvation countable, and which tells whoever reads the context
+back which fragments came from a comment rather than from a name they typed.
+
+**This is the opposite move to the reservation declined above, though the two
+look identical.** That one capped path seeds and lost 13 rescues to save 6: it
+removed seeds that were working. This one removes none — it puts a floor under
+a signal that was never consulted, and hands back what the floor does not use.
+
+Both benchmarks, one change at a time:
+
+| | audited reports | SWE-bench |
+|---|---:|---:|
+| symbols and paths | 22.0% | 77.6% |
+| + prose | 41.4% | 79.1% |
+| + a reserved quarter | **44.6%** | **81.8%** |
+
+Note how surgical prose is on SWE-bench — 9 instances better, 1 worse — against
+path seeding's 56 and 23. Prose fills only what the names left empty, and on
+issues written by developers the names usually fill it. It earns its keep
+exactly where they do not.
+
+It is not free. django's graph grows from 6.9 MB to 9.0 MB and its index from
+750 ms to 830 ms, roughly 30% and 10%. Query cost is unchanged.
+
 ### Query expansion, and why there is none
 
 The seeder matches a query word to a stored word exactly. Two local expansions
@@ -184,10 +272,10 @@ local one.
 
 ### Where it loses
 
-Keyword top-10 beats us outright on **8.4%** of instances, and we return nothing
-useful at all on **19.2%**. That is a retrieval problem and a bigger budget will
-not fix it. sphinx is the weakest repository at 58.0%, and it is the one where
-path seeding is closest to a wash.
+Keyword top-10 beats us outright on **5.2%** of instances, and we return nothing
+useful at all on **14.4%**. That is a retrieval problem and a bigger budget will
+not fix it. pylint is the weakest repository at 50.8% and sphinx the next at
+68.9%, though pylint is ten instances and should not be read as a finding.
 
 ### The earlier benchmark, and why it was replaced
 
@@ -1080,7 +1168,7 @@ things, and only one of them is a decision.
 
 - **Edge precision outside flask.** Now measured directly where the runtime oracle can settle it — 78.1% over 688 edges at 560 call sites, and 94.8% in the confidence-100 bucket (`bench/edgeprecision.py`). That subset is one repository in one language, because it needs a test suite that runs offline. Everywhere else it is still a floor from `edgefacts` and a ceiling from fan-out.
 - **Edge recall outside flask.** django's suite needs dependencies this machine cannot fetch offline; excalidraw has no Python. One repository, one language.
-- **Whether the answer is right, as opposed to the context.** Localization is measured on SWE-bench Verified — 77.6% of the files that had to change, over 500 real issues (`bench/swebench.py`). The benchmark also ships the tests that decide whether a *patch* is correct, and those have not been run against fix mode. That is the next thing worth measuring and the first that would judge the agent rather than the retrieval.
+- **Whether the answer is right, as opposed to the context.** Localization is measured on SWE-bench Verified — 81.8% of the files that had to change, over 500 real issues (`bench/swebench.py`). The benchmark also ships the tests that decide whether a *patch* is correct, and those have not been run against fix mode. That is the next thing worth measuring and the first that would judge the agent rather than the retrieval.
 - **Embedding retrieval as a baseline.** Keyword search is what an agent without an index falls back to; what people who build context for agents actually deploy is embedding retrieval over chunked source. `bench/ragbase.py` implements it — chunked so it pays only for what it reads, at leangraph's own token budget so the comparison is at equal cost — but the column is not filled in here yet.
 - **The agent against the real API.** Every agent assertion runs against a stub. Shape, safety and caching structure are checked; answer quality is not.
 - **Fix mode against a real provider.** The git half is real; GitHub is a stub, so nothing here says how often a proposed patch is *correct* — only that a wrong one cannot escalate.

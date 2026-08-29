@@ -61,7 +61,9 @@ Our bet: **a single-process, zero-FFI Rust pipeline where resolution is native a
 │    refs    : Vec<Ref>     { name: SymId, scope, span } │
 │    imports : Vec<Import>                               │
 │    scopes  : Vec<Scope>   { parent, range }            │
-│  every identifier interned to u32 on the way in        │
+│    prose   : Vec<(DefIdx, SymId)>  comments, docstrings│
+│                                    and string literals │
+│  every identifier AND every prose word interned to u32 │
 └────────────────────────────────────────────────────────┘
                           ↓
 ┌── 3. RESOLVE  (build once, then sharded parallel read) ┐

@@ -49,7 +49,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 6 · Breadth | 🟡 **14 languages.** Specs verified against each grammar; 11 verified against an oracle on a real repository, 96.5% presence recall across 10 corpora |
 | — · Node verification | ✅ **Done.** 96.5% presence recall vs oracle, 10 corpora |
 | — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, clustered p=0.008 |
-| — · Cost benchmark | ✅ **Done on SWE-bench Verified.** 500 real issues, 77.6% file recall at 16x fewer tokens than keyword top-10 |
+| — · Cost benchmark | ✅ **Done on SWE-bench Verified.** 500 real issues, 81.8% file recall at 16x fewer tokens than keyword top-10 |
 
 **Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:
 

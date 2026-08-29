@@ -8,8 +8,11 @@ That graph then answers the question an agent actually has: *given this bug
 report, which forty lines should I read?*
 
 Without it, an agent greps. Grep returns every file containing the word, the
-agent reads them all, and you pay for the ones that were irrelevant. Across 500
-real issues in SWE-bench Verified that is the difference between **14,863 tokens
+agent reads them all, and you pay for the ones that were irrelevant. leangraph
+indexes both halves of a repository — the call graph, and the comments,
+docstrings and messages that are the only part of it written in the words its
+users actually use — and returns the few dozen places most likely to matter. Across 500
+real issues in SWE-bench Verified that is the difference between **15,742 tokens
 and 244,672** — for better recall of the files that actually had to change.
 
 ```bash
@@ -125,6 +128,12 @@ subtracted from its side. Reproduce with `./bench/run.sh`.
 Full pipeline on both sides — discover, parse, resolve *and* persist. **10× faster**
 on django, and 4× smaller counting everything.
 
+Those rows predate prose indexing, which grew django's graph from 6.9 MB to
+9.0 MB and its index from 0.75 s to 0.83 s — roughly 30% and 10%, for the
+retrieval that buys. They are left as measured rather than half-updated:
+re-running them fairly needs the same checkouts and the same CodeGraph install,
+and excalidraw is no longer on this machine.
+
 Two size columns because two things are true. The **graph** is what a query
 loads: 6.9 MB against CodeGraph's 156 MB database, which is the comparison that
 matters for startup and memory. But `.leangraph/` also holds a 33 MB extraction
@@ -153,26 +162,26 @@ corpus with `bench/swebench_fetch.py`, then reproduce with `bench/swebench.py
 
 | | file recall | tokens / query |
 |---|---:|---:|
-| **leangraph, 100 nodes** | **77.6%** | **14,863** |
+| **leangraph, 100 nodes** | **81.8%** | **15,742** |
 | keyword, top 10 | 51.3% | 244,672 |
-| keyword, what fits in our budget | 15.1% | 34,502 |
+| keyword, what fits in our budget | 15.0% | 34,541 |
 
 **Better recall than reading ten whole files, for 1/16th the tokens.** At least
-one file that had to change is in the context 80.8% of the time (95% CI
-77–84). Bootstrapped over *repositories* rather than instances — django is 231
-of the 500 and its idioms are its own — recall is 77.6%, CI [71.8, 85.5]. Wide,
+one file that had to change is in the context 85.6% of the time (95% CI
+82–88). Bootstrapped over *repositories* rather than instances — django is 231
+of the 500 and its idioms are its own — recall is 81.8%, CI [77.0, 87.0]. Wide,
 and it should be: twelve repositories is a small sample of repositories however
 many instances they carry.
 
 The third row needs its caveat stated rather than left to be discovered: at our
-token budget keyword can afford **1.06 files**, because a single Python file
-usually exceeds the whole budget already. It is generous on tokens — 34,502
-against our 14,863, since the first file is taken whether it fits or not — and
+token budget keyword can afford **1.07 files**, because a single Python file
+usually exceeds the whole budget already. It is generous on tokens — 34,541
+against our 15,742, since the first file is taken whether it fits or not — and
 narrow on files. Read it as "its top-ranked file is the right one 15% of the
 time", not as a rich comparison.
 
-Where it loses: keyword top-10 beats us outright on **8.4%** of instances, and
-we return nothing useful at all on **19.2%**.
+Where it loses: keyword top-10 beats us outright on **5.2%** of instances, and
+we return nothing useful at all on **14.4%**.
 
 <details>
 <summary>The benchmark this replaced, and why</summary>
@@ -364,10 +373,10 @@ measured it.
   confidence 100, over the 560 call sites flask's test suite settles. Elsewhere
   it is still a floor from the falsification rules and a ceiling from fan-out,
   because settling it needs a suite that runs offline.
-- **We return nothing useful on a fifth of issues.** 19.2% of SWE-bench
-  Verified, and keyword top-10 beats us outright on 8.4%. Raising that needs
+- **We return nothing useful on a seventh of issues.** 14.4% of SWE-bench
+  Verified, and keyword top-10 beats us outright on 5.2%. Raising that needs
   better retrieval signals, not a bigger budget.
-- **Localization is not an answer.** 77.6% of the files that had to change is
+- **Localization is not an answer.** 81.8% of the files that had to change is
   where the *context* is right; whether an answer built on it is correct is the
   benchmark's tests, which have not been run.
 - **Sync still rewrites the whole graph.** The extraction cache is a base plus a
