@@ -32,6 +32,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_NOTE = "all-MiniLM-L6-v2, chunked at 40 lines"
 LEANGRAPH = os.path.join(HERE, "..", "target", "release", "leangraph")
 BYTES_PER_TOKEN = 3.5  # source tokenises denser than prose
+# What counts as a source file for the keyword baseline. SWE-bench Verified is
+# Python and only Python; Multi-SWE-bench brings TypeScript, and giving grep a
+# `.py` filter there would rank it against nothing.
+SOURCE_EXT = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".go")
 
 STOP = {
     "the", "and", "for", "not", "but", "with", "from", "this", "that", "when",
@@ -63,7 +67,10 @@ def patched_files(patch):
     for m in re.finditer(r"^diff --git a/(\S+) b/(\S+)", patch, re.M):
         f = m.group(2)
         base = os.path.basename(f)
-        if base.startswith("test_") or base.endswith("_test.py") or "/tests/" in f:
+        if (base.startswith("test_") or base.endswith("_test.py")
+                or base.endswith("_test.go")
+                or re.search(r"\.(spec|test)\.[jt]sx?$", base)
+                or re.search(r"(^|/)(tests?|__tests__|__mocks__|e2e|cypress)/", f)):
             continue
         out.append(f)
     return sorted(set(out))
@@ -90,7 +97,7 @@ def keyword_ranked(repo, text):
     hits = defaultdict(int)
     for t in set(terms):
         for f in sh(["git", "grep", "-l", "-F", "--", t], cwd=repo).splitlines():
-            if f.endswith(".py"):
+            if f.endswith(SOURCE_EXT):
                 hits[f] += 1
     return sorted(hits, key=lambda f: (-hits[f], f))
 
@@ -124,7 +131,7 @@ def keyword_files(repo, text, top):
     hits = defaultdict(int)
     for t in set(terms):
         for f in sh(["git", "grep", "-l", "-F", "--", t], cwd=repo).splitlines():
-            if f.endswith(".py"):
+            if f.endswith(SOURCE_EXT):
                 hits[f] += 1
     ranked = sorted(hits, key=lambda f: (-hits[f], f))[:top]
     return ranked, sum(file_tokens(repo, f) for f in ranked)
@@ -314,7 +321,8 @@ def main():
 
         rg, rg_tok = None, 0.0
         if rag is not None:
-            py = [f for f in sh(["git", "ls-files", "*.py"], cwd=repo).splitlines()]
+            py = [f for f in sh(["git", "ls-files"], cwd=repo).splitlines()
+                  if f.endswith(SOURCE_EXT)]
             idx = rag.index(repo, py)
             # The same budget leangraph spent on the same query, so the two are
             # compared at equal cost rather than at equal k.
