@@ -270,6 +270,56 @@ Left undone rather than left unmeasured: expansion that reaches a word the
 repository never writes down at all needs a source of synonyms, and there is no
 local one.
 
+### CodeGraph on the same 500 issues
+
+Speed and size have been measured against CodeGraph since Phase 0. Retrieval
+never had, and the objection that leaves open is the one that matters: being ten
+times faster to index is worth nothing if the other engine puts better files in
+front of the agent. `codegraph explore` is its counterpart to `leangraph
+context` — its *primary* MCP tool, by its own design note that agents under-pick
+secondary ones — and it answers the same question from the same text.
+
+Both engines indexed fresh for every instance, `@colbymchenry/codegraph@1.5.0`.
+
+| | file recall | tokens/query | at-least-one |
+|---|---:|---:|---:|
+| **leangraph, 100 nodes** | **81.8%** | 15,742 | 85.6% |
+| **leangraph, at CodeGraph's cost** | **65.1%** | 5,904 | 69.2% |
+| codegraph `explore` | 37.1% | 6,099 | 41.0% |
+| codegraph, counting files it only *names* | 45.4% | — | — |
+
+**At matched cost, 65.1% against 37.1%.** CodeGraph wins outright on 1.4% of
+instances, and 6.4% when we are held to its budget.
+
+Three things had to be decided before this was a fair table, and each is a place
+the number could have been made to say what we wanted.
+
+**The equal-cost row runs the wrong way round, because it has to.** `explore`
+takes `--max-files`, so the obvious move is to raise it until CodeGraph spends
+what we spend. It does not respond: at 3, 5, 8 and 12 files it returns the same
+2.5 files and the same ~6,700 tokens. That is not a cap being lifted, it is the
+whole of its answer. So the comparison brings *us* down to its budget instead —
+35 nodes, which lands at 5,904 tokens against its 6,099.
+
+**What counts as returned.** `explore` prints source for a couple of files and
+*names* others in a blast-radius list. Source is the like-for-like set; a name
+is a pointer, not content. Both are scored, and the generous reading is in the
+table rather than in a footnote.
+
+**Cost is the whole output.** The prose framing and the blast-radius list are
+tokens the agent pays for, so they count. For the record, 3,934 of CodeGraph's
+6,099 tokens are source and the remaining third is framing.
+
+Worth saying plainly, because this benchmark exists to be believed rather than
+to flatter: **CodeGraph is far better than the keyword baseline it is being
+graphed against.** 37.1% at 6,099 tokens beats reading grep's top ten — 51.3% at
+244,672 — on any per-token reading, and it does it while returning a fifth of
+what we return. The gap here is recall at a budget, not efficiency.
+
+And the usual limits hold. Twelve repositories, all Python, one machine.
+CodeGraph covers 30+ languages with framework awareness where we cover fourteen;
+nothing here measures that.
+
 ### Where it loses
 
 Keyword top-10 beats us outright on **5.2%** of instances, and we return nothing

@@ -229,6 +229,13 @@ def main():
                     help="a previous --out, to compare against per instance")
     ap.add_argument("--rag", action="store_true",
                     help="also run the embedding baseline (needs sentence-transformers)")
+    ap.add_argument("--codegraph", default="",
+                    help="path to the codegraph binary; adds it as a column")
+    ap.add_argument("--codegraph-nodes", type=int, default=35,
+                    help="node budget for the leangraph row held to codegraph's "
+                         "own token cost. `explore` does not grow when given a "
+                         "larger --max-files, so the equal-cost comparison has "
+                         "to bring us down to it rather than send it up to us")
     ap.add_argument("--rag-cache",
                     default=os.path.expanduser("~/.cache/swebench/rag.pkl"))
     args = ap.parse_args()
@@ -248,6 +255,13 @@ def main():
     print(f"\n\033[1mSWE-bench Verified — localization\033[0m")
     print(f"  {len(rows)} instances, {len({r['repo'] for r in rows})} repositories")
     print(f"  query: the issue as filed.  answer: the files the accepted patch touched.\n")
+
+    cg = None
+    if args.codegraph:
+        sys.path.insert(0, HERE)
+        import cgbase as cg
+        cg.BIN = cg.available(os.path.abspath(args.codegraph))
+        print(f"  codegraph: {cg.BIN}, indexed fresh per instance\n")
 
     rag = None
     if args.rag:
@@ -286,6 +300,18 @@ def main():
         # ...and the same baseline held to leangraph's own token budget.
         eq, eq_tok = take_within(repo, ranked, lg_tok)
 
+        cg_r, cg_any_r, cg_tok, cg_src = None, None, 0.0, 0.0
+        lg_eq_r, lg_eq_tok = None, 0.0
+        if cg is not None:
+            cg.index(repo)
+            src, cited, cg_tok, cg_src = cg.explore(repo, text)
+            cg_r = recall(src, want)
+            cg_any_r = recall(cited, want)
+            # ...and us, held to roughly what it spent.
+            eq_files, lg_eq_tok = leangraph_files(
+                repo, text, args.codegraph_nodes, args.max_bytes)
+            lg_eq_r = recall(eq_files, want)
+
         rg, rg_tok = None, 0.0
         if rag is not None:
             py = [f for f in sh(["git", "ls-files", "*.py"], cwd=repo).splitlines()]
@@ -301,6 +327,9 @@ def main():
             "kw": recall(kw, want), "kw_tokens": kw_tok,
             "eq": recall(eq, want), "eq_tokens": eq_tok, "eq_files": len(eq),
             "rag": rg, "rag_tokens": rg_tok,
+            "cg": cg_r, "cg_cited": cg_any_r,
+            "cg_tokens": cg_tok, "cg_src_tokens": cg_src,
+            "lg_eq": lg_eq_r, "lg_eq_tokens": lg_eq_tok,
         })
         if rag is not None and i % 25 == 0:
             rag.save_cache()
@@ -328,6 +357,15 @@ def main():
         lg_any = sum(1 for x in rows if x["lg"] > 0)
         kw_any = sum(1 for x in rows if x["kw"] > 0)
         lo, hi = wilson(lg_any, n)
+        cg_rows = [x for x in rows if x.get("cg") is not None]
+        cg_txt = le_txt = "        —      "
+        if cg_rows:
+            c = sum(x["cg"] for x in cg_rows) / len(cg_rows)
+            ct = sum(x["cg_tokens"] for x in cg_rows) / len(cg_rows)
+            cg_txt = f"{c * 100:>5.1f}% / {ct:>7,.0f}"
+            le = sum(x["lg_eq"] for x in cg_rows) / len(cg_rows)
+            let = sum(x["lg_eq_tokens"] for x in cg_rows) / len(cg_rows)
+            le_txt = f"{le * 100:>5.1f}% / {let:>7,.0f}"
         rg_rows = [x for x in rows if x.get("rag") is not None]
         rg_txt = "        —      "
         if rg_rows:
@@ -336,15 +374,17 @@ def main():
             rg_txt = f"{rg * 100:>5.1f}% / {rgt:>7,.0f}"
         print(f"  {label:<16} {n:>4}   "
               f"{lg * 100:>5.1f}% / {lgt:>7,.0f}   "
+              f"{le_txt}   "
+              f"{cg_txt}   "
               f"{rg_txt}   "
               f"{eq * 100:>5.1f}% / {eqt:>7,.0f}   "
               f"{kw * 100:>5.1f}% / {kwt:>9,.0f}   "
               f"{100 * lg_any / n:>5.1f}%")
 
     print(f"\n\033[1m  file recall / mean tokens per query\033[0m")
-    print(f"  {'':<16} {'n':>4}   {'leangraph':^15}   {'embedding RAG':^15}   "
+    print(f"  {'':<16} {'n':>4}   {'leangraph':^15}   {'leangraph, its':^15}   {'codegraph':^15}   {'embedding RAG':^15}   "
           f"{'keyword, same':^15}   {'keyword top-10':^17}   leangraph")
-    print(f"  {'':<16} {'':>4}   {'':^15}   {'same budget':^15}   "
+    print(f"  {'':<16} {'':>4}   {'':^15}   {'budget':^15}   {'explore':^15}   {'same budget':^15}   "
           f"{'budget':^15}   {'':^17}   at-least-one")
     by_repo = defaultdict(list)
     for x in results:
