@@ -357,10 +357,43 @@ prose words per node against django's 4.4 — more, not fewer. vue is thinner at
 the wrong way round for that theory.
 
 Nor is it size alone: vue is 488 files and scores 59.0%, django is 3,038 and
-scores 82.5%. What is left is the shape of the issues themselves — a
-material-ui report is a styling bug whose answer is one specific file among
-hundreds of near-identical component packages — but that is a hypothesis with
-no measurement behind it, and it is written here as one.
+scores 82.5%.
+
+**Two thirds of the gap is real and one third is the question.** Patches are far
+larger here — 86% of SWE-bench patches touch a single file against 47% of these,
+and 13% of these touch more than ten, the largest 163. Recall tracks patch size
+almost identically in both languages once you hold it constant:
+
+| files in patch | TypeScript | Python |
+|---|---:|---:|
+| 1 | 60.4% | 84.4% |
+| 2–3 | 34.7% | 72.7% |
+| 4–10 | 29.8% | 31.3% |
+| 11+ | 9.1% | 9.5% |
+
+Standardising TypeScript's own per-band rates to Python's mix of patch sizes
+lifts it from 42.6% to **56.6%**. So of the 39.3-point gap, 14.0 points are the
+benchmark asking a harder question and **25.3 points are us doing genuinely
+worse**. Documentation in the ground truth is not the culprit: 51 of 224
+instances include a `docs/` file but only 2 are documentation alone.
+
+**Where the real gap goes: a repository that ships its own documentation as
+code.** On a sample of material-ui instances, 38% of the files returned come
+from `docs/`, `benchmark/` or `examples/` — trees holding 2,691 of the
+repository's 26,753 source files, 10%. They are over-represented four to one.
+
+The reason is uncomfortable, because it is the prose feature working exactly as
+designed. A documentation demo *is* the component's behaviour described in the
+words a user would use — that is what makes it documentation. Asked "the sx
+field's outlineColor ignores the theme", the demo that renders an `sx` prop with
+an outline colour matches the sentence better than the implementation does, and
+the implementation is what has to change.
+
+The obvious fix — exclude `docs/` — is wrong: 51 instances here have a
+documentation file as part of the answer. The signal that separates them is
+structural rather than textual: a demo is a leaf, imported by nothing, while an
+implementation has callers. That is in the graph already and unused by seeding,
+and it is a hypothesis until measured.
 
 ### Where it loses
 
