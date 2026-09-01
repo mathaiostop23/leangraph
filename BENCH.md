@@ -320,6 +320,48 @@ And the usual limits hold. Twelve repositories, all Python, one machine.
 CodeGraph covers 30+ languages with framework awareness where we cover fourteen;
 nothing here measures that.
 
+### TypeScript, where the number does not carry over
+
+Every figure above is a Python figure, because SWE-bench Verified is Python.
+Multi-SWE-bench supplies 224 TypeScript instances across darkreader,
+material-ui and vuejs/core, converted by `bench/multiswe_fetch.py` — issue text
+as filed, patch files as the answer, tests excluded, and the pull request's own
+title and body discarded because they are written by whoever fixed the bug.
+
+| | file recall | tokens/query |
+|---|---:|---:|
+| **leangraph, 100 nodes** | **42.6%** | 9,149 |
+| leangraph, 35 nodes | 25.3% | 2,852 |
+| codegraph `explore` | 17.0% | 5,301 |
+| keyword top-10 | 16.2% | 1,203,945 |
+
+**42.6% against 81.8% on Python.** The headline does not generalise, and it
+should be quoted as a Python number until it does.
+
+We stay ahead — 2.5x CodeGraph's recall, and still ahead of it at a *lower* cost
+than it spends, 25.3% at 2,852 tokens against its 17.0% at 5,301. Both engines
+fall by roughly half moving from Python to TypeScript, so whatever this is, it
+is not specific to us. And grep collapses outright: 16.2% for 1.2 million tokens
+a query, because material-ui is a monorepo whose files are enormous.
+
+Two explanations were tested and neither survives:
+
+**It is not resolution.** These repositories resolve *better* than django:
+97.0% of in-repo references on vue and 96.1% on material-ui, against django's
+87.7%. The graph being built is a good graph.
+
+**It is not prose density.** The seeding win came from comments and docstrings,
+so the obvious guess is that TypeScript writes fewer. material-ui carries 8.2
+prose words per node against django's 4.4 — more, not fewer. vue is thinner at
+3.1, and vue scores *better* than material-ui (59.0% against 37.7%), which is
+the wrong way round for that theory.
+
+Nor is it size alone: vue is 488 files and scores 59.0%, django is 3,038 and
+scores 82.5%. What is left is the shape of the issues themselves — a
+material-ui report is a styling bug whose answer is one specific file among
+hundreds of near-identical component packages — but that is a hypothesis with
+no measurement behind it, and it is written here as one.
+
 ### Where it loses
 
 Keyword top-10 beats us outright on **5.2%** of instances, and we return nothing

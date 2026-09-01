@@ -155,7 +155,9 @@ notes name startup as the reason agents give up and reach for grep first.
 ### Cost — the claim that matters
 
 **SWE-bench Verified**, 500 real issues across twelve repositories, each pinned
-to the commit its issue was filed against. The query is the issue as filed; the
+to the commit its issue was filed against. This is a **Python** number: the same
+harness over 224 TypeScript issues returns 42.6%, and why it does not carry over
+is not yet known — see [BENCH.md](./BENCH.md). The query is the issue as filed; the
 answer is the files the accepted patch touched, test files excluded. Fetch the
 corpus with `bench/swebench_fetch.py`, then reproduce with `bench/swebench.py
 --repos <dir>`.
