@@ -50,18 +50,32 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | — · Node verification | ✅ **Done.** 96.5% presence recall vs oracle, 10 corpora |
 | — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, clustered p=0.008 |
 | — · Cost benchmark | ✅ **Done on SWE-bench Verified.** 500 real issues, 81.8% file recall at 16x fewer tokens than keyword top-10 |
+| — · Prose indexing | ✅ **Done.** Comments, docstrings and string literals, interned and ranked as BM25. The half of a repository written in the words users use: +4.2 points on SWE-bench, +22.6 on reports written as a user would file them |
+| — · CodeGraph on retrieval | ✅ **Done, first time.** At its own token cost, 65.1% against 37.1%. It wins outright on 1.4% of instances |
+| — · Reproducible corpus | ✅ **Done.** `bench/swebench_fetch.py` rebuilds dataset and checkouts from nothing; the headline number could not be reproduced before |
+| — · Retrieval beyond Python | 🟡 **Corpus ready, not measured.** 224 TypeScript instances via `bench/multiswe_fetch.py`. Every retrieval figure published is a Python figure |
 
-**Measured today** — django, 3,038 files / 19.7 MB, M1 Pro:
+**Measured** — django, 3,038 files / 19.7 MB, M1 Pro:
 
 ```
                         leangraph        CodeGraph
-index (full pipeline)   0.77 s       7.76 s        10x
-graph on disk           6.8 MB       156 MB        23x
+index (full pipeline)   0.83 s       7.76 s         9x
+graph on disk           9.0 MB       156 MB        17x
 graph load              ~15 us       —
 MCP startup             2.3 ms       552 ms       239x
 nodes / edges           67,970 / 270,108   62,114 / 195,802
 in-repo refs resolved   88.4%
+
+file recall, SWE-bench   81.8%        37.1%     at its cost, 65.1% vs 37.1%
 ```
+
+Index and size moved *against* us when prose indexing landed — 0.75 s to 0.83 s
+and 6.9 MB to 9.0 MB — because comments and docstrings are now in the graph. The
+retrieval those buy is the last row.
+
+One number from a larger repository, worth having beside these: material-ui is
+27,730 files, nine times django. leangraph indexes it in 1.64 s and CodeGraph in
+25.6 s — 15.6x. One repo, one machine, and not yet in the table it belongs in.
 
 Full table and methodology: [BENCH.md](./BENCH.md).
 
@@ -105,25 +119,59 @@ See [SERVER.md](./SERVER.md). Shipped as a single Rust binary with SQLite compil
 
 ### 6 · Breadth
 
-Declarative TOML language specs → ~20 languages at tier 2.5 in 2–3 weeks. Tier 3 for Go, Rust, Java, C#.
+Fourteen languages ship, from declarative specs in `lang.rs` rather than the TOML
+this once planned — the specs stayed in Rust because they resolve node-kind ids
+against each grammar at startup, and a text format would have moved that check to
+runtime. Eleven are verified against an oracle on a real repository.
+
+What is *not* known is how well each one resolves, as opposed to how many of its
+definitions are found. Presence recall is measured and reported per corpus;
+resolution tier is reported per corpus and compared against nothing. Retrieval is
+measured in Python only — the corpus for TypeScript exists and the run does not.
 
 ---
 
-## The two claims we have to earn
+## The two claims, and where they stand
 
-Both need measurement, neither can be asserted:
+Both were written here as things to earn. Both have been measured, and the
+harder one came out better than the plan asked for.
 
-1. **Faster** — `bench/run.sh` exists and runs. Honest target: 5–7× on a full pipeline, not the 17× the partial pipeline suggests.
-2. **Cheaper** — `bench/cost.sh` does not exist yet. 40 closed issues with linked merged PRs as ground truth; measure recall@k vs tokens returned against CodeGraph explore and plain embedding RAG. Headline: *"same file recall, N% fewer context tokens."* Nobody publishes that number.
+1. **Faster** — earned. 9× on django's full pipeline against the honest 5–7×
+   target, and 15.6× on a 27,730-file monorepo. The 17× the partial pipeline
+   once suggested was right to distrust; the real number is repo-dependent and
+   moves *down* as prose indexing adds work.
 
-The cost claim is the harder one and the more valuable one. From CodeGraph's own CLAUDE.md: *"don't optimize for token cost."* That axis is uncontested.
+2. **Cheaper** — earned, and against a better opponent than planned. The plan
+   was 40 closed issues and a comparison with CodeGraph explore and embedding
+   RAG. What exists is 500 real issues from SWE-bench Verified across twelve
+   repositories, with CodeGraph explore measured on the same 500:
+
+   ```
+   leangraph, 100 nodes           81.8%   15,742 tok
+   leangraph, at CodeGraph's cost 65.1%    5,904 tok
+   codegraph explore              37.1%    6,099 tok
+   keyword top-10                 51.3%  244,672 tok
+   ```
+
+   The headline the plan asked for — *"same file recall, N% fewer context
+   tokens"* — turned out to understate it: better recall at a sixteenth of the
+   tokens, and nearly double CodeGraph's recall at its own cost.
+
+**One third of that plan is still undone:** embedding RAG. `bench/ragbase.py`
+implements it at leangraph's own token budget and has never been run to
+completion. The bar it has to clear went up in the process — BM25 over the prose
+already inside the code is most of what a small embedding model would find, and
+costs no model at all.
+
+From CodeGraph's own CLAUDE.md: *"don't optimize for token cost."* That axis was
+uncontested, and it is where the difference turned out to live.
 
 ---
 
 ## What we are not competing on
 
 - **Auto-fix / issue → PR.** [OpenHands](https://github.com/OpenHands/OpenHands) has 84k stars and GitHub ships a first-party coding agent. Not our differentiation.
-- **Language breadth, today.** CodeGraph has 30+ languages and 17 frameworks. We will have 2 for months.
+- **Language breadth.** CodeGraph has 30+ languages with framework awareness; we have 14, eleven of them oracle-verified. That gap is real and is not closing soon. Worth separating from quality, though: covering more languages is not retrieving better in them, and only the second was measured.
 - **MCP as the headline.** Building it for distribution and dogfooding, not as the claim.
 
 ## What nobody occupies
