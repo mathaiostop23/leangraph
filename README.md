@@ -13,7 +13,7 @@ indexes both halves of a repository — the call graph, and the comments,
 docstrings and messages that are the only part of it written in the words its
 users actually use — and returns the few dozen places most likely to matter. Across 500
 real issues in SWE-bench Verified that is the difference between **15,742 tokens
-and 244,672** — for better recall of the files that actually had to change.
+and 282,720** — for better recall of the files that actually had to change.
 
 ```bash
 cargo install --path .               # or: cargo build --release, then ./target/release/leangraph
@@ -165,10 +165,10 @@ corpus with `bench/swebench_fetch.py`, then reproduce with `bench/swebench.py
 | | file recall | tokens / query |
 |---|---:|---:|
 | **leangraph, 100 nodes** | **81.8%** | **15,742** |
-| keyword, top 10 | 51.3% | 244,672 |
-| keyword, what fits in our budget | 15.0% | 34,541 |
+| keyword, top 10 | 50.6% | 282,720 |
+| keyword, what fits in our budget | 12.3% | 41,229 |
 
-**Better recall than reading ten whole files, for 1/16th the tokens.** At least
+**Better recall than reading ten whole files, for 1/18th the tokens.** At least
 one file that had to change is in the context 85.6% of the time (95% CI
 82–88). Bootstrapped over *repositories* rather than instances — django is 231
 of the 500 and its idioms are its own — recall is 81.8%, CI [77.0, 87.0]. Wide,

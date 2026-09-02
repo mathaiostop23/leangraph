@@ -49,7 +49,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 6 · Breadth | 🟡 **14 languages.** Specs verified against each grammar; 11 verified against an oracle on a real repository, 96.5% presence recall across 10 corpora |
 | — · Node verification | ✅ **Done.** 96.5% presence recall vs oracle, 10 corpora |
 | — · Edge verification | ✅ **Done.** Runtime oracle + falsifiers; confidence orders correctness, clustered p=0.008 |
-| — · Cost benchmark | ✅ **Done on SWE-bench Verified.** 500 real issues, 81.8% file recall at 16x fewer tokens than keyword top-10 |
+| — · Cost benchmark | ✅ **Done on SWE-bench Verified.** 500 real issues, 81.8% file recall at 18x fewer tokens than keyword top-10 |
 | — · Prose indexing | ✅ **Done.** Comments, docstrings and string literals, interned and ranked as BM25. The half of a repository written in the words users use: +4.2 points on SWE-bench, +22.6 on reports written as a user would file them |
 | — · CodeGraph on retrieval | ✅ **Done, first time.** At its own token cost, 65.1% against 37.1%. It wins outright on 1.4% of instances |
 | — · Reproducible corpus | ✅ **Done.** `bench/swebench_fetch.py` rebuilds dataset and checkouts from nothing; the headline number could not be reproduced before |
@@ -150,11 +150,11 @@ harder one came out better than the plan asked for.
    leangraph, 100 nodes           81.8%   15,742 tok
    leangraph, at CodeGraph's cost 65.1%    5,904 tok
    codegraph explore              37.1%    6,099 tok
-   keyword top-10                 51.3%  244,672 tok
+   keyword top-10                 50.6%  282,720 tok
    ```
 
    The headline the plan asked for — *"same file recall, N% fewer context
-   tokens"* — turned out to understate it: better recall at a sixteenth of the
+   tokens"* — turned out to understate it: better recall at an eighteenth of the
    tokens, and nearly double CodeGraph's recall at its own cost.
 
 **One third of that plan is still undone:** embedding RAG. `bench/ragbase.py`

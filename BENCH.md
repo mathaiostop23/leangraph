@@ -23,10 +23,10 @@ since pointing at the test that proves a bug is not finding the bug.
 | approach | file recall | tokens/query |
 |---|---:|---:|
 | **leangraph, 100 nodes** | **81.8%** | **15,742** |
-| keyword, top 10 | 51.3% | 244,672 |
-| keyword, at our budget | 15.0% | 34,541 |
+| keyword, top 10 | 50.6% | 282,720 |
+| keyword, at our budget | 12.3% | 41,229 |
 
-**Better recall than reading ten whole files, for a sixteenth of the tokens.**
+**Better recall than reading ten whole files, for an eighteenth of the tokens.**
 At least one file that had to change is in the context 85.6% of the time
 (95% CI 82–88). Bootstrapped over *repositories* rather than instances — django
 is 231 of the 500 and its idioms are its own — recall is 81.8%, CI [77.0, 87.0].
@@ -50,6 +50,13 @@ of the time", not as a rich comparison.
 
 Reproduce with `bench/swebench_fetch.py` (dataset from the Hub, full clones of
 the twelve repositories, ~2.1 GB) and then `bench/swebench.py --repos <dir>`.
+
+The keyword rows moved when the harness stopped being Python-only — it now ranks
+`.js`, `.ts` and the rest alongside `.py`, so grep sees the JavaScript these
+repositories also contain. That is the more correct baseline, grep having no
+notion of a project's language, and it is a touch weaker: 51.3% at 244,672
+tokens under the old filter, 50.6% at 282,720 under this one. Our own rows are
+untouched by it, and the ground truth is identical on all 500 instances.
 
 ### The protocol, and why it is not the obvious one
 
@@ -312,8 +319,8 @@ tokens the agent pays for, so they count. For the record, 3,934 of CodeGraph's
 
 Worth saying plainly, because this benchmark exists to be believed rather than
 to flatter: **CodeGraph is far better than the keyword baseline it is being
-graphed against.** 37.1% at 6,099 tokens beats reading grep's top ten — 51.3% at
-244,672 — on any per-token reading, and it does it while returning a fifth of
+graphed against.** 37.1% at 6,099 tokens beats reading grep's top ten — 50.6% at
+282,720 — on any per-token reading, and it does it while returning a fifth of
 what we return. The gap here is recall at a budget, not efficiency.
 
 And the usual limits hold. Twelve repositories, all Python, one machine.
@@ -390,10 +397,35 @@ an outline colour matches the sentence better than the implementation does, and
 the implementation is what has to change.
 
 The obvious fix — exclude `docs/` — is wrong: 51 instances here have a
-documentation file as part of the answer. The signal that separates them is
-structural rather than textual: a demo is a leaf, imported by nothing, while an
-implementation has callers. That is in the graph already and unused by seeding,
-and it is a hypothesis until measured.
+documentation file as part of the answer.
+
+**The structural fix was built and declined.** A demo is a leaf and an
+implementation has dependents; the graph knows this and seeding never asked. Two
+formulations, both measured:
+
+| | audited sample (n=12) | TypeScript (n=224) | Python (n=500) |
+|---|---:|---:|---:|
+| no penalty | 30.2% | 42.6% | 81.8% |
+| demote nodes with no dependents | 30.2% | — | — |
+| demote nodes with no *cross-file* dependents | 38.6% | 42.9% | 81.6% |
+
+The first formulation changed nothing, for a reason worth keeping: a
+documentation demo *does* have dependents. `SimpleDialogDemo` calls
+`SimpleDialog` from the very file that defines it — being self-contained is what
+being a demo means. Asking instead for a dependent in another file separates
+them properly.
+
+And on twelve instances it looked like it worked: 30.2% to 38.6%. On 224 it is
++0.3 points, p = 0.23. **The sample lied**, and the warning was visible at the
+time — the share of documentation in the returned context barely moved, 38% to
+35%, so whatever produced the sample's gain was not the mechanism the change was
+built on.
+
+What did move is cost: 9,149 tokens to 8,107, about 11%, at flat recall — 214.9
+tokens per recall point down to 189.0. Real, and not what the change was for.
+Keeping it on that basis would be rationalising an untuned constant (the penalty
+is 0.5 because 0.5 was typed) into a result it did not earn. Declined; the
+decoy stands undiagnosed.
 
 ### Where it loses
 
