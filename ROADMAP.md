@@ -53,7 +53,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | — · Prose indexing | ✅ **Done.** Comments, docstrings and string literals, interned and ranked as BM25. The half of a repository written in the words users use: +4.2 points on SWE-bench, +22.6 on reports written as a user would file them |
 | — · CodeGraph on retrieval | ✅ **Done, first time.** At its own token cost, 65.1% against 37.1%. It wins outright on 1.4% of instances |
 | — · Reproducible corpus | ✅ **Done.** `bench/swebench_fetch.py` rebuilds dataset and checkouts from nothing; the headline number could not be reproduced before |
-| — · Retrieval beyond Python | 🟠 **Measured, and it does not carry over.** 224 TypeScript instances: 42.6% against 81.8% on Python. Still 2.5x CodeGraph and ahead of it at lower cost, but the headline is a Python number. Resolution (96–97%) and prose density are both ruled out as causes |
+| — · Retrieval beyond Python | ✅ **Measured on two more languages.** Rust 74.2% over 239 instances and ten repositories — 83.8% standardised to Python`s patch sizes, slightly *above* Python. TypeScript 42.6% is the exception, and its cause is diagnosed: a documentation tree the prose signal cannot help preferring |
 
 **Measured** — django, 3,038 files / 19.7 MB, M1 Pro:
 

@@ -327,7 +327,38 @@ And the usual limits hold. Twelve repositories, all Python, one machine.
 CodeGraph covers 30+ languages with framework awareness where we cover fourteen;
 nothing here measures that.
 
-### TypeScript, where the number does not carry over
+### Rust, where it does carry over
+
+239 instances across ten repositories — clap, tokio, tracing, ripgrep, nushell,
+fd, bat, bytes, rayon, serde — fetched the same way and asked the same question.
+
+| | file recall | tokens/query | at-least-one |
+|---|---:|---:|---:|
+| **leangraph, 100 nodes** | **74.2%** | 12,646 | 92.5% |
+| leangraph, at CodeGraph's cost | 42.7% | 4,816 | — |
+| codegraph `explore` | 12.4% | 3,220 | — |
+| keyword top-10 | 55.0% | 134,730 | — |
+
+74.2% against Python's 81.8% understates it, because Rust's patches are far
+larger: only 41% touch a single file against Python's 86%. Standardised to
+Python's mix of patch sizes it is **83.8%** — a little *above* Python — and it
+is at or above Python in every band taken separately:
+
+| files in patch | Python | Rust |
+|---|---:|---:|
+| 1 | 84.4% | 85.7% |
+| 2–3 | 72.7% | 73.9% |
+| 4–10 | 31.3% | 63.9% |
+| 11+ | 9.5% | 38.6% |
+
+At-least-one is 92.5%, higher than Python's 85.6%. Ten repositories also make
+the bootstrap worth reading for once: 74.2%, CI [71.0, 83.3], against
+TypeScript's uselessly wide [38.3, 75.0] over three.
+
+CodeGraph struggles here more than anywhere: 12.4%, against its 37.1% on Python
+and 17.0% on TypeScript.
+
+### TypeScript, the one that does not
 
 Every figure above is a Python figure, because SWE-bench Verified is Python.
 Multi-SWE-bench supplies 224 TypeScript instances across darkreader,
@@ -342,8 +373,10 @@ title and body discarded because they are written by whoever fixed the bug.
 | codegraph `explore` | 17.0% | 5,301 |
 | keyword top-10 | 16.2% | 1,203,945 |
 
-**42.6% against 81.8% on Python.** The headline does not generalise, and it
-should be quoted as a Python number until it does.
+**42.6%, against 81.8% on Python and 74.2% on Rust.** With Rust measured, the
+first reading of this — "the headline is a Python number" — is wrong. Two of
+three languages agree; TypeScript is the exception, and the exception has a
+cause.
 
 We stay ahead — 2.5x CodeGraph's recall, and still ahead of it at a *lower* cost
 than it spends, 25.3% at 2,852 tokens against its 17.0% at 5,301. Both engines

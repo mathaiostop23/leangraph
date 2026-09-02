@@ -155,9 +155,11 @@ notes name startup as the reason agents give up and reach for grep first.
 ### Cost — the claim that matters
 
 **SWE-bench Verified**, 500 real issues across twelve repositories, each pinned
-to the commit its issue was filed against. This is a **Python** number: the same
-harness over 224 TypeScript issues returns 42.6%, and why it does not carry over
-is not yet known — see [BENCH.md](./BENCH.md). The query is the issue as filed; the
+to the commit its issue was filed against. It holds outside Python: the same
+harness returns **74.2%** over 239 Rust issues across ten repositories — 83.8%
+once patch sizes are held constant, since Rust's patches are much larger. It
+does *not* hold on TypeScript, 42.6%, where the cause is diagnosed and
+uncomfortable. See [BENCH.md](./BENCH.md). The query is the issue as filed; the
 answer is the files the accepted patch touched, test files excluded. Fetch the
 corpus with `bench/swebench_fetch.py`, then reproduce with `bench/swebench.py
 --repos <dir>`.
