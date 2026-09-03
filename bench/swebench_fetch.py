@@ -28,7 +28,11 @@ PARQUET = ("https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified"
            "/resolve/main/data/test-00000-of-00001.parquet")
 # Everything the harness reads, and nothing else: the full dataset carries
 # environment setup and test commands this measurement has no use for.
-KEEP = ["instance_id", "repo", "base_commit", "problem_statement", "patch"]
+KEEP = ["instance_id", "repo", "base_commit", "problem_statement", "patch",
+        # The test side, for `swefix.py`. Dropped from the first version of
+        # this script because localization does not need it, which quietly made
+        # the corpus unable to answer the question that matters more.
+        "test_patch", "FAIL_TO_PASS", "PASS_TO_PASS", "environment_setup_commit"]
 DEFAULT_DIR = os.path.expanduser("~/.cache/swebench")
 
 
