@@ -432,15 +432,17 @@ the implementation is what has to change.
 The obvious fix — exclude `docs/` — is wrong: 51 instances here have a
 documentation file as part of the answer.
 
-**The structural fix was built and declined.** A demo is a leaf and an
-implementation has dependents; the graph knows this and seeding never asked. Two
-formulations, both measured:
+**The structural fix was built three ways and declined three times.** A demo is a
+leaf and an implementation has dependents; the graph knows this and seeding
+never asked. Each formulation puts that question at a coarser grain than the
+last:
 
-| | audited sample (n=12) | TypeScript (n=224) | Python (n=500) |
+| | sample (n=12) | TypeScript (n=224) | Python (n=500) |
 |---|---:|---:|---:|
-| no penalty | 30.2% | 42.6% | 81.8% |
+| no penalty | 30.2% | **42.6%** | **81.8%** |
 | demote nodes with no dependents | 30.2% | — | — |
 | demote nodes with no *cross-file* dependents | 38.6% | 42.9% | 81.6% |
+| demote *trees* nothing outside consumes | — | 40.9% | — |
 
 The first formulation changed nothing, for a reason worth keeping: a
 documentation demo *does* have dependents. `SimpleDialogDemo` calls
@@ -454,11 +456,34 @@ time — the share of documentation in the returned context barely moved, 38% to
 35%, so whatever produced the sample's gain was not the mechanism the change was
 built on.
 
-What did move is cost: 9,149 tokens to 8,107, about 11%, at flat recall — 214.9
-tokens per recall point down to 189.0. Real, and not what the change was for.
-Keeping it on that basis would be rationalising an untuned constant (the penalty
-is 0.5 because 0.5 was typed) into a result it did not earn. Declined; the
-decoy stands undiagnosed.
+What did move is cost: 9,149 tokens to 8,107, about 11% at flat recall. Real,
+and not what the change was for; keeping it on that basis would rationalise an
+untuned constant into a result it did not earn.
+
+**The third formulation is the one that explains the other two.** Asking whether
+anything *outside a tree* consumes it separates `docs/` from `packages/` exactly
+as intended — and makes recall worse, 42.6% to 40.9%, 22 instances better
+against 35 worse. Where it did the damage is the finding:
+
+| | n | before | after |
+|---|---:|---:|---:|
+| answer includes a `docs/` file | 51 | 15.8% | 12.7% |
+| answer is `packages/` only | 169 | 50.3% | 49.0% |
+
+Losing 3.1 points where documentation *was* the answer is the price the change
+knowingly bought. Losing 1.3 points where the answer was implementation is not —
+those are the instances it existed to help.
+
+The simplest reading of that second row: a demo imports the component it
+demonstrates, so it is a **bridge** as much as a distraction. Seed the demo and
+the expansion walks its imports into the implementation; demote the demo and the
+path leaves with the noise. Not proven — but it accounts for all three
+formulations failing at once, which "documentation merely competes for slots"
+does not.
+
+So the 38% documentation share is not waste waiting to be reclaimed, and the
+next attempt should not begin by assuming it is. Declined. The decoy is real,
+measured from both sides, and has no fix here.
 
 ### Where it loses
 
