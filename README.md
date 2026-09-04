@@ -398,11 +398,17 @@ measured it.
   own per-instance containers and is validated three ways — the gold patch
   resolves, an empty patch does not, a meaningless one does not — but it has
   never been run with a model behind it.
-- **Sync still rewrites the whole graph.** The extraction cache is a base plus a
-  delta now, which was the larger half — 36 MB down to 10 KB for a one-file
-  change. The CSR is still rewritten and resolve still redoes everything;
-  measured at ~15 ms of a 140 ms sync and declined, with the reasoning in
-  [BENCH.md](./BENCH.md).
+- **A one-file change re-resolves the whole repository.** 167 ms on django,
+  555 ms on a 27,730-file monorepo — and 56% of the larger one is `resolve`,
+  not the graph rewrite the heading of that section in
+  [BENCH.md](./BENCH.md) implies. Rewriting the graph is 18%, and patching the
+  CSR would address part of that while complicating the read path the 15 µs
+  open depends on; measured and declined. The order worth doing is a
+  filesystem watcher first (`--since` already exists and the server uses it),
+  incremental resolution second, CSR patching last.
+- **No local watcher.** A push webhook syncs the server automatically. On a
+  developer's machine nothing watches the filesystem — you re-run `index`, and
+  the extraction cache makes that cheap rather than instant.
 - **Fix mode runs the tests, but supplies no sandbox.** A repository sets
   `test_command` and the patch is checked against its own suite. The process
   gets a scrubbed environment, its own process group and a timeout — not

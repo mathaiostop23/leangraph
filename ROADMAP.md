@@ -37,7 +37,7 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 4b · Stable node ids | ✅ **Done.** Persistent key table; ids survive edits |
 | 4c · Git tree-diff sync | ✅ **Done.** `--since <sha>` for push webhooks |
 | 4d · Delta cache | ✅ **Done.** A one-file sync appends 10 KB instead of rewriting 33 MB; persist 84 ms → 41 ms |
-| 4e · CSR patching | ⛔ **Not worth it, measured.** 140 ms sync: discover 38, resolve 48, persist 44. Patching the CSR touches ~15 ms of that and complicates the read path the 15 µs open and 3.0 ms startup depend on |
+| 4e · CSR patching | ⛔ **Not worth it, measured.** A one-file sync is 167 ms on django and 555 ms on a 27,730-file monorepo, where **resolve is 56%** and the whole graph rewrite is 18%. Patching the CSR addresses part of that 18% and complicates the read path the 15 µs open and 3.0 ms startup depend on. The share it fixes shrinks as repositories grow |
 | 5 · Server (**A ships**) | ✅ **Done.** SQLite, webhooks, agent, dashboard, Docker |
 | 5b · Fix mode | ✅ **Done, opt-in.** Three independent switches; draft PRs only |
 | 5c · Issue dedup | ✅ **Done.** Local signals, no embedding API; a duplicate costs zero |

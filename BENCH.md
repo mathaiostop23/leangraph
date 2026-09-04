@@ -1346,35 +1346,54 @@ Three consecutive runs now agree on every row.
 - **Not yet a general claim.** The *speed* numbers are one machine, one OS, three repos, two languages. Node verification is broader — ten repositories across eleven languages, `bench/langverify.sh` — but timing was not re-measured on the seven added for it.
 - **CodeGraph's own progress line self-reports ~2.0 s for django**, but wall clock minus startup is 7.7 s — its counter evidently covers only part of the pipeline. We use wall clock, which is what a user experiences.
 
-## Why the CSR is still rewritten whole
+## Where a sync actually spends its time
 
-A one-file sync on django is 140 ms, and it goes:
+A one-file change, measured at two scales:
 
 ```
-discover   38 ms   walking 3,038 files
-extract     2 ms   3,037 of them served from cache
-resolve    48 ms   full re-resolution
-co-change   8 ms
-persist    44 ms   graph.bin ~28, delta cache ~1, rest overhead
+                django (3,038 files)   material-ui (27,730)
+discover              57 ms                  107 ms
+extract                2 ms                   16 ms   served from cache
+resolve               51 ms                  312 ms
+co-change              9 ms                   19 ms
+persist               48 ms                  101 ms
+total                167 ms                  555 ms
 ```
 
-Persist was 84 ms before the extraction cache became a base plus a delta;
-rewriting 33 MB to record one changed file was the single largest cost in a
-sync, and it is now 10 KB.
+Persist was 84 ms on django before the extraction cache became a base plus a
+delta; rewriting 33 MB to record one changed file was the single largest cost in
+a sync, and it is now 10 KB.
 
-What remains is the graph: symbol table 6 ms, CSR sort 10 ms, write 1 ms,
-fsync 11 ms. Patching the CSR in place instead would recover perhaps 15 of
-those — and the CSR is offset-addressed, so an overlay means every `callees`
-and `callers` merges a base with a delta on the read path. That path is the
+**The second column is the point.** Rewriting the graph is 48 ms of 167 on
+django and 101 of 555 on the monorepo — 18%, and only part of that is the CSR. `resolve` is 56% of
+a monorepo sync, because a single changed file still re-resolves the entire
+repository.
+
+Of the persist that remains, the graph is: symbol table 6 ms, CSR sort 10 ms,
+write 1 ms, fsync 11 ms. Patching the CSR in place would recover perhaps 15 of
+those — and the CSR is offset-addressed, so an overlay means every `callees` and
+`callers` merges a base with a delta on the read path. That path is the
 project's headline: `Graph::open` is an mmap and a header check, 15 µs on a
 68,000-node graph and 3.0 ms to MCP `initialize`.
 
-Fifteen milliseconds off a sync, against complicating the thing the whole design
-is built to be fast at, is the wrong trade. The two candidates worth more are
-`discover`, which the server already skips with `--since`, and `resolve`, which
-needs per-name dependency tracking to be sound — and unsound incremental
-resolution would cost the convergence invariant, which is the strongest
-correctness guarantee here.
+Fifteen milliseconds against complicating the thing the whole design is built to
+be fast at is the wrong trade, and it is a worse trade at scale than it looked
+when only django was measured — the share it addresses *falls* as a repository
+grows, while resolve's rises.
+
+So the order worth doing is the opposite of the obvious one:
+
+1. **A watcher.** `--since <sha>` already replaces the tree walk with a git tree
+   diff (57 ms to 30 ms on django) and the server uses it on push webhooks. What
+   does not exist is a local daemon that watches the filesystem and calls it —
+   the pieces are there and nothing binds them into a loop.
+2. **Incremental resolve.** The 56%. Hard for a real reason rather than an
+   incidental one: resolution is *global*. A definition added anywhere can
+   change what a reference elsewhere binds to — that is what tier 3's global
+   name match is — so doing it incrementally means knowing which references
+   could be affected, and getting that wrong costs the convergence invariant,
+   which is the strongest correctness guarantee here.
+3. **CSR patching**, last, for the reasons above.
 
 Written down because "not built" and "measured and declined" are different
 things, and only one of them is a decision.
