@@ -200,6 +200,12 @@ fn shell_quote(s: &str) -> String {
 /// runs — the one thing a patch written from a hostile issue would want. A
 /// build needs a PATH and somewhere to put its caches; it does not need the
 /// keys to the install.
+/// How long to wait for a killed command's output before giving up on it.
+///
+/// Generous enough that a suite which dies properly still gets its failures
+/// reported, short enough that one which does not cannot hold the server.
+const OUTPUT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 const ENV_KEEP: [&str; 6] = ["PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR"];
 
 fn run_with_timeout(
@@ -268,7 +274,32 @@ fn run_with_timeout(
         }
     }
 
-    let out = child.wait_with_output().ok();
+    // Collecting the output must not be able to outlast the timeout.
+    //
+    // `wait_with_output` reads the pipes to end-of-file, and end-of-file only
+    // arrives when the *last* holder of the write end closes it. A descendant
+    // that survives the kill — one the group signal missed, or one that put
+    // itself in a new session — keeps that pipe open, and the call blocks for
+    // as long as that descendant lives. A repository's test suite would then
+    // decide how long the server waits, which is the one thing a timeout exists
+    // to prevent. Measured: a 400 ms limit on `sleep 30` returned after 30.003
+    // seconds on a CI runner, having killed nothing it could reach.
+    //
+    // So the read happens on its own thread and the answer is claimed with a
+    // deadline. Missing the tail of a suite's output is a cosmetic loss; a
+    // server that cannot be freed is not.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let out = match rx.recv_timeout(OUTPUT_GRACE) {
+        Ok(Ok(o)) => Some(o),
+        Ok(Err(_)) => None,
+        // The reader is still blocked on a pipe nothing will close. Leave it to
+        // exit with the process rather than joining it.
+        Err(_) => None,
+    };
+
     let ok = !timed_out && out.as_ref().is_some_and(|o| o.status.success());
     let mut text = out
         .map(|o| {
@@ -276,7 +307,13 @@ fn run_with_timeout(
             t.push_str(&String::from_utf8_lossy(&o.stderr));
             t
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            if timed_out {
+                "the test command was killed and did not release its output".to_string()
+            } else {
+                String::new()
+            }
+        });
     if text.len() > TEST_OUTPUT_CHARS {
         // The tail: a failing suite says what failed at the end.
         let cut = text.len() - TEST_OUTPUT_CHARS;
@@ -609,6 +646,36 @@ mod tests {
         );
         // ...but a build still needs to find its tools.
         assert!(r.output.contains("PATH="), "{}", r.output);
+    }
+
+    /// The failure the CI runner caught and three local machines did not.
+    ///
+    /// A descendant that leaves the process group — its own session, a daemon,
+    /// anything the group signal cannot reach — still holds the write end of
+    /// the pipe. `wait_with_output` waits for end-of-file, so before the grace
+    /// deadline existed the call returned only when that descendant chose to
+    /// exit: a 400 ms limit on `sleep 30` came back after 30.003 seconds.
+    ///
+    /// Linux only, because `setsid` is how a shell escapes its group and macOS
+    /// does not ship it — which is exactly why this went unseen locally.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_survivor_holding_the_pipe_cannot_hold_the_server() {
+        let t = TempTree::new("fixtests-detach");
+        let started = std::time::Instant::now();
+        let r = run_with_timeout(
+            t.path(),
+            "setsid sh -c 'sleep 25' & wait",
+            &[],
+            "",
+            std::time::Duration::from_millis(300),
+        );
+        let waited = started.elapsed();
+        assert!(r.timed_out, "{r:?}");
+        assert!(
+            waited < std::time::Duration::from_secs(15),
+            "{waited:?}: gave up on the output rather than waiting out the survivor"
+        );
     }
 
     #[test]
