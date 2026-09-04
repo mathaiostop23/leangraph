@@ -30,14 +30,14 @@ One linear path. B ships ~week 4, A ships ~week 8.
 | 0 · Speed premise | ✅ **Done, measured.** Parse+extract is 2–6% of CodeGraph's pipeline |
 | 1 · Extraction | ✅ **Done.** Interned symbols, containment scopes, imports |
 | 1b · Resolution | ✅ **Done.** 3 tiers, receiver-aware; 88.4–99.4% of in-repo refs |
-| 2 · CSR + persistence | ✅ **Done.** 6.8 MB vs 156 MB; ~15 µs load |
+| 2 · CSR + persistence | ✅ **Done.** 9.0 MB vs 156 MB; ~15 µs load |
 | 2b · Context builder | ✅ **Done.** Confidence-ranked, budget-capped |
-| 3 · MCP server (**B ships**) | ✅ **Done.** 2.3 ms startup vs 552 ms |
+| 3 · MCP server (**B ships**) | ✅ **Done.** 3.0 ms startup vs 580 ms |
 | 4 · Incremental sync | ✅ **Done.** 5–8x; semantically identical to a full reindex |
 | 4b · Stable node ids | ✅ **Done.** Persistent key table; ids survive edits |
 | 4c · Git tree-diff sync | ✅ **Done.** `--since <sha>` for push webhooks |
 | 4d · Delta cache | ✅ **Done.** A one-file sync appends 10 KB instead of rewriting 33 MB; persist 84 ms → 41 ms |
-| 4e · CSR patching | ⛔ **Not worth it, measured.** 140 ms sync: discover 38, resolve 48, persist 44. Patching the CSR touches ~15 ms of that and complicates the read path the 15 µs open and 2.4 ms startup depend on |
+| 4e · CSR patching | ⛔ **Not worth it, measured.** 140 ms sync: discover 38, resolve 48, persist 44. Patching the CSR touches ~15 ms of that and complicates the read path the 15 µs open and 3.0 ms startup depend on |
 | 5 · Server (**A ships**) | ✅ **Done.** SQLite, webhooks, agent, dashboard, Docker |
 | 5b · Fix mode | ✅ **Done, opt-in.** Three independent switches; draft PRs only |
 | 5c · Issue dedup | ✅ **Done.** Local signals, no embedding API; a duplicate costs zero |
@@ -59,10 +59,10 @@ One linear path. B ships ~week 4, A ships ~week 8.
 
 ```
                         leangraph        CodeGraph
-index (full pipeline)   0.83 s       7.76 s         9x
+index (full pipeline)   0.84 s       7.76 s         9x
 graph on disk           9.0 MB       156 MB        17x
 graph load              ~15 us       —
-MCP startup             2.3 ms       552 ms       239x
+MCP startup             3.0 ms       580 ms       190x
 nodes / edges           67,970 / 270,108   62,114 / 195,802
 in-repo refs resolved   88.4%
 

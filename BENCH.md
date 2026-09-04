@@ -194,7 +194,7 @@ module with a licence header from answering every question.
 Query words are found by binary search over the symbol table, which `write`
 already sorts to keep the format a pure function of the graph. Nothing is built
 at open time, because opening the graph being an mmap and nothing else is the
-property the 15 µs load and the 2.4 ms startup rest on.
+property the 15 µs load and the 3.0 ms startup rest on.
 
 ### Prose was not outranked, it was never asked
 
@@ -698,14 +698,14 @@ A speed number published before this ran would have been meaningless.
 `bench/mcp_startup.py`, median of 5 cold processes:
 
 ```
-leangraph          2.3 ms
-codegraph    552.0 ms        239x
+leangraph          3.0 ms   (2.3 ms before prose indexing)
+codegraph    580.0 ms        190x
 ```
 
 Structural, not tuning: `Graph::open` is an mmap plus a header check, so there
 is nothing to warm. CodeGraph's own CLAUDE.md names startup as the reason
 agents "dive into Read/grep before codegraph finishes its ~2-3s startup" — the
-552 ms measured here is with the npm package already resolved and warm, so it
+580 ms measured here is with the npm package already resolved and warm, so it
 is the friendly end of their range.
 
 ---
@@ -1367,7 +1367,7 @@ fsync 11 ms. Patching the CSR in place instead would recover perhaps 15 of
 those — and the CSR is offset-addressed, so an overlay means every `callees`
 and `callers` merges a base with a delta on the read path. That path is the
 project's headline: `Graph::open` is an mmap and a header check, 15 µs on a
-68,000-node graph and 2.4 ms to MCP `initialize`.
+68,000-node graph and 3.0 ms to MCP `initialize`.
 
 Fifteen milliseconds off a sync, against complicating the thing the whole design
 is built to be fast at, is the wrong trade. The two candidates worth more are

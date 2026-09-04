@@ -17,7 +17,7 @@ and 282,720** — for better recall of the files that actually had to change.
 
 ```bash
 cargo install --path .               # or: cargo build --release, then ./target/release/leangraph
-leangraph index /path/to/repo        # django, 3,038 files → 0.75 s
+leangraph index /path/to/repo        # django, 3,038 files → 0.84 s
 leangraph install                    # wire it into Claude Code, Cursor, Codex
 ```
 
@@ -129,24 +129,26 @@ Full pipeline on both sides — discover, parse, resolve *and* persist. **10× f
 on django, and 4× smaller counting everything.
 
 Those rows predate prose indexing, which grew django's graph from 6.9 MB to
-9.0 MB and its index from 0.75 s to 0.83 s — roughly 30% and 10%, for the
-retrieval that buys. They are left as measured rather than half-updated:
+9.0 MB and its index from 0.75 s to 0.84 s — roughly 30% and 12%, for the
+retrieval that buys, and takes the speed factor from 10× to about 9×. They are left as measured rather than half-updated:
 re-running them fairly needs the same checkouts and the same CodeGraph install,
 and excalidraw is no longer on this machine.
 
 Two size columns because two things are true. The **graph** is what a query
-loads: 6.9 MB against CodeGraph's 156 MB database, which is the comparison that
-matters for startup and memory. But `.leangraph/` also holds a 33 MB extraction
+loads: 9.0 MB against CodeGraph's 156 MB database, which is the comparison that
+matters for startup and memory. But `.leangraph/` also holds a 36 MB extraction
 cache, and quoting only the first number would be the kind of selective framing
-this project exists to avoid. The cache is what makes re-running after a change
-**0.13 s** instead of 0.77.
+this project exists to avoid. The cache is what makes re-running after a
+one-file change **0.20 s** instead of 0.84.
 
 It is written as a base plus a delta, because rewriting all 33 MB to record that
 one file moved was the single largest cost in a sync — more than resolution and
 the graph put together. A one-file change now appends **10 KB**.
 
-**Startup: 2.4 ms** against CodeGraph's 556 ms, spawn to MCP `initialize`
-(`bench/mcp_startup.py`). This gap is structural, not tuning: loading is not
+**Startup: 3.0 ms** against CodeGraph's 580 ms, spawn to MCP `initialize`
+(`bench/mcp_startup.py`, median of three runs) — about 190×. It was 2.4 ms
+before prose indexing grew the graph by a third; the cost of that is on this
+line, not hidden. The gap is structural rather than tuning: loading is not
 deserialization. `Graph::open` is an `mmap` plus a header check, so a
 68,000-node graph is queryable in 15 µs once its pages are resident, and
 under a millisecond on the very first touch. CodeGraph's own
@@ -168,7 +170,7 @@ corpus with `bench/swebench_fetch.py`, then reproduce with `bench/swebench.py
 |---|---:|---:|
 | **leangraph, 100 nodes** | **81.8%** | **15,742** |
 | keyword, top 10 | 50.6% | 282,720 |
-| keyword, what fits in our budget | 12.3% | 41,229 |
+| keyword, what fits in our budget | 12.4% | 41,290 |
 
 **Better recall than reading ten whole files, for 1/18th the tokens.** At least
 one file that had to change is in the context 85.6% of the time (95% CI
@@ -179,7 +181,7 @@ many instances they carry.
 
 The third row needs its caveat stated rather than left to be discovered: at our
 token budget keyword can afford **1.07 files**, because a single Python file
-usually exceeds the whole budget already. It is generous on tokens — 34,541
+usually exceeds the whole budget already. It is generous on tokens — 41,290
 against our 15,742, since the first file is taken whether it fits or not — and
 narrow on files. Read it as "its top-ranked file is the right one 15% of the
 time", not as a rich comparison.
@@ -299,7 +301,7 @@ Everything below runs in CI on every push, without the benchmark corpora — thi
 repository is Rust, which the indexer supports, so it can be its own corpus.
 
 ```
-69  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
+78  engine unit          resolution tiers, receivers, budgets, id stability, round-trips
 48  server unit          vetting rules, dedup scoring, SSRF, leases, sandboxing
  5  convergence          incremental sync equals a full reindex
 21  webhook gates        signature, replay, authorship, labels
