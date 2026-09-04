@@ -11,9 +11,10 @@ Without it, an agent greps. Grep returns every file containing the word, the
 agent reads them all, and you pay for the ones that were irrelevant. leangraph
 indexes both halves of a repository — the call graph, and the comments,
 docstrings and messages that are the only part of it written in the words its
-users actually use — and returns the few dozen places most likely to matter. Across 500
-real issues in SWE-bench Verified that is the difference between **15,742 tokens
-and 282,720** — for better recall of the files that actually had to change.
+users actually use — and returns the few dozen places most likely to matter.
+Across 500 real issues in SWE-bench Verified that is the difference between
+**15,742 tokens and 282,720** — for better recall of the files that actually
+had to change.
 
 ```bash
 cargo install --path .               # or: cargo build --release, then ./target/release/leangraph
@@ -130,7 +131,8 @@ on django, and 4× smaller counting everything.
 
 Those rows predate prose indexing, which grew django's graph from 6.9 MB to
 9.0 MB and its index from 0.75 s to 0.84 s — roughly 30% and 12%, for the
-retrieval that buys, and takes the speed factor from 10× to about 9×. They are left as measured rather than half-updated:
+retrieval that buys, and takes the speed factor from 10× to about 9×. They are
+left as measured rather than half-updated:
 re-running them fairly needs the same checkouts and the same CodeGraph install,
 and excalidraw is no longer on this machine.
 
@@ -382,11 +384,22 @@ measured it.
 - **We return nothing useful on a seventh of issues.** 14.4% of SWE-bench
   Verified, and keyword top-10 beats us outright on 5.2%. Raising that needs
   better retrieval signals, not a bigger budget.
-- **Localization is not an answer.** 81.8% of the files that had to change is
-  where the *context* is right; whether an answer built on it is correct is the
-  benchmark's tests, which have not been run.
+- **TypeScript is the weak language, and the reason is understood.** 42.6%
+  against 81.8% on Python and 74.2% on Rust. A third of that gap is the
+  benchmark asking a harder question — its patches reach 163 files — and the
+  rest is a repository that ships its own documentation as code, where a demo
+  matches a bug report better than the implementation does. Three fixes for it
+  were built and all three declined; the reasoning is in
+  [BENCH.md](./BENCH.md).
+- **Localization is not an answer, and this is the big one.** 81.8% of the
+  files that had to change is where the *context* is right. Whether a patch
+  built on it passes the repository's own tests is a different question, and
+  nobody has answered it. `bench/swefix.py` runs those tests in the benchmark's
+  own per-instance containers and is validated three ways — the gold patch
+  resolves, an empty patch does not, a meaningless one does not — but it has
+  never been run with a model behind it.
 - **Sync still rewrites the whole graph.** The extraction cache is a base plus a
-  delta now, which was the larger half — 33 MB down to 10 KB for a one-file
+  delta now, which was the larger half — 36 MB down to 10 KB for a one-file
   change. The CSR is still rewritten and resolve still redoes everything;
   measured at ~15 ms of a 140 ms sync and declined, with the reasoning in
   [BENCH.md](./BENCH.md).
