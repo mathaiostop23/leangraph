@@ -176,12 +176,11 @@ fn seeds_from_path(g: &Graph, text: &str, max: usize) -> Vec<NodeId> {
         let hits = want
             .iter()
             .filter(|t| {
-                path.split(|c| c == '/' || c == '.' || c == '_' || c == '-')
-                    .any(|seg| {
-                        // `postgres` should reach `postgresql`, and `migration`
-                        // `migrations`, without `code` reaching `codecs`.
-                        seg == t.as_str() || (t.len() >= 5 && seg.starts_with(t.as_str()))
-                    })
+                path.split(['/', '.', '_', '-']).any(|seg| {
+                    // `postgres` should reach `postgresql`, and `migration`
+                    // `migrations`, without `code` reaching `codecs`.
+                    seg == t.as_str() || (t.len() >= 5 && seg.starts_with(t.as_str()))
+                })
             })
             .count();
         if hits >= 2 {
@@ -380,10 +379,8 @@ pub fn seeds_from_text_why(g: &Graph, text: &str, max: usize) -> Vec<(NodeId, Wh
         // exists exactly once here. Better a narrow lead than no context.
         fallback.sort_by_key(|&(spec, n)| (spec, n));
         fallback.dedup_by_key(|&mut (_, n)| n);
-        let mut out: Vec<(NodeId, Why)> = fallback
-            .into_iter()
-            .map(|(_, n)| (n, Why::Seed))
-            .collect();
+        let mut out: Vec<(NodeId, Why)> =
+            fallback.into_iter().map(|(_, n)| (n, Why::Seed)).collect();
         // `contains` rather than `dedup`, which only removes *neighbours*: a
         // fallback lead and a path seed can be the same node without landing
         // next to each other, and a repeated seed silently spends a slot twice.
@@ -397,10 +394,7 @@ pub fn seeds_from_text_why(g: &Graph, text: &str, max: usize) -> Vec<(NodeId, Wh
     }
     // identifier-shaped first, then most specific
     hits.sort_by_key(|&(shape, spec, _)| (shape, spec));
-    let mut out: Vec<(NodeId, Why)> = hits
-        .into_iter()
-        .map(|(_, _, n)| (n, Why::Seed))
-        .collect();
+    let mut out: Vec<(NodeId, Why)> = hits.into_iter().map(|(_, _, n)| (n, Why::Seed)).collect();
 
     // Path evidence *after* symbol evidence, never instead of it: a name that
     // resolves in this repository is the stronger signal, and appending can
@@ -568,7 +562,10 @@ fn charged_bytes(g: &Graph, n: NodeId, budget: &Budget) -> u32 {
 pub fn build(g: &Graph, symbols: &[String], budget: &Budget) -> Context {
     // Asking for a symbol by name is the one case with no ambiguity about
     // where the seed came from.
-    let s = seeds(g, symbols).into_iter().map(|n| (n, Why::Seed)).collect();
+    let s = seeds(g, symbols)
+        .into_iter()
+        .map(|n| (n, Why::Seed))
+        .collect();
     build_from(g, s, budget)
 }
 

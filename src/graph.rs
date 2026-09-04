@@ -248,8 +248,8 @@ pub fn write(
     let mut prose_word: Vec<u32> = Vec::with_capacity(r.prose.len());
     {
         let mut at = 0usize;
-        for n in 0..n_nodes as usize {
-            prose_off[n] = prose_word.len() as u32;
+        for (n, slot) in prose_off.iter_mut().enumerate().take(n_nodes as usize) {
+            *slot = prose_word.len() as u32;
             while at < r.prose.len() && r.prose[at].0 .0 as usize == n {
                 prose_word.push(remap_sym(r.prose[at].1));
                 at += 1;

@@ -4,7 +4,10 @@
 //! so this parallelises across files with no coordination.
 
 use crate::cache::FileMeta;
-use crate::core::{Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, NO_SCOPE, Recv, Ref, RefKind, Span, SymId};
+use crate::core::{
+    Def, DefIdx, DefKind, FileId, FileUnit, Import, Interner, Recv, Ref, RefKind, Span, SymId,
+    NO_SCOPE,
+};
 use crate::lang::{node_text, Lang, Spec};
 use memmap2::Mmap;
 use rustc_hash::FxHashSet;
@@ -735,7 +738,6 @@ mod tests {
         assert!(c.units[0].refs.is_empty());
     }
 
-
     // ---- prose ------------------------------------------------------------
 
     /// Words a user would write live in comments, docstrings and messages, and
@@ -752,15 +754,27 @@ mod tests {
             .iter()
             .map(|&(_, w)| c.interner.resolve(&w))
             .collect();
-        for want in ["interactive", "shell", "database", "password", "environment", "refused"] {
+        for want in [
+            "interactive",
+            "shell",
+            "database",
+            "password",
+            "environment",
+            "refused",
+        ] {
             assert!(words.contains(&want), "{want:?} missing from {words:?}");
         }
         // Short words and pure punctuation carry nothing and are not stored.
         assert!(!words.iter().any(|w| w.len() < 4), "{words:?}");
 
-        let def = u.defs.iter().position(|d| c.interner.resolve(&d.name) == "runshell");
+        let def = u
+            .defs
+            .iter()
+            .position(|d| c.interner.resolve(&d.name) == "runshell");
         assert!(
-            u.prose.iter().any(|&(scope, _)| Some(scope as usize) == def),
+            u.prose
+                .iter()
+                .any(|&(scope, _)| Some(scope as usize) == def),
             "prose must hang off the function it was written inside"
         );
     }

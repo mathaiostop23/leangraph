@@ -211,7 +211,12 @@ pub fn head(root: &Path) -> Option<String> {
 /// tag all do, and so does any benchmark that walks a repository's history.
 pub fn drift(root: &Path, since: &str) -> Option<u32> {
     let out = Command::new("git")
-        .args(["rev-list", "--count", "--left-right", &format!("{since}...HEAD")])
+        .args([
+            "rev-list",
+            "--count",
+            "--left-right",
+            &format!("{since}...HEAD"),
+        ])
         .current_dir(root)
         .output()
         .ok()?;
@@ -326,7 +331,6 @@ pub fn pairs_to_edges(
         })
         .collect()
 }
-
 
 #[cfg(test)]
 mod tests {
