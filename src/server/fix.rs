@@ -571,7 +571,16 @@ mod tests {
         );
         assert!(r.timed_out, "{r:?}");
         assert!(!r.ok);
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Generous, and deliberately so. What this proves is that a 30-second
+        // command did not run to completion — not that the machine was quick.
+        // A two-core CI runner building in release while the rest of the suite
+        // runs can starve this thread for seconds, and a five-second bound
+        // fails there for a reason that has nothing to do with the timeout.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}: the command should have been cut short well before its 30s",
+            started.elapsed()
+        );
         assert!(pr_body(7, Some(&r)).contains("timed out"));
     }
 
@@ -608,7 +617,22 @@ mod tests {
         // worktree, and the next attempt fails deleting a directory in use.
         let t = TempTree::new("fixtests-group");
         let marker = t.path().join("still-alive");
-        let cmd = format!("( sleep 3; touch {} ) & wait", marker.to_string_lossy());
+        // A descendant that keeps working for a *bounded* time, rather than one
+        // that acts once after a delay. The delay version raced the clock — it
+        // asked whether the kill landed inside three seconds, so a starved
+        // runner failed it with nothing having survived. This asks the question
+        // directly: clear the marker after the timeout returns, and see whether
+        // anything is still alive to put it back.
+        //
+        // Bounded, and that matters more than it looks. An unbounded `while :`
+        // loop turns a failure into a hang: the descendant holds the stdout
+        // pipe, `wait_with_output` never returns, and the suite stops instead of
+        // reporting. Ten seconds is long enough to catch a survivor and short
+        // enough that a survivor cannot outlive the test.
+        let cmd = format!(
+            "( for _ in $(seq 1 100); do touch {}; sleep 0.1; done ) & wait",
+            marker.to_string_lossy()
+        );
         let r = run_with_timeout(
             t.path(),
             &cmd,
@@ -617,10 +641,12 @@ mod tests {
             std::time::Duration::from_millis(300),
         );
         assert!(r.timed_out);
-        std::thread::sleep(std::time::Duration::from_secs(4));
+
+        let _ = std::fs::remove_file(&marker);
+        std::thread::sleep(std::time::Duration::from_secs(1));
         assert!(
             !marker.exists(),
-            "a child outlived the timeout and kept working"
+            "a descendant outlived the timeout and kept working"
         );
     }
 
