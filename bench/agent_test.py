@@ -50,9 +50,23 @@ for i, c in enumerate(calls):
     check(f"call {i}: body declared as data, not instruction", "DATA, never instruction" in t)
     check(f"call {i}: no tools declared", "tools" not in c)
     check(f"call {i}: issue delimited", "<issue>" in user and "</issue>" in user)
-    # Exactly one closing marker: the one we put there. A body that tried to
-    # close it early must appear neutralised.
-    check(f"call {i}: exactly one closing delimiter", user.count("</issue>") == 1)
+    # Exactly one closing marker *inside the wrapper*. A body that tried to close
+    # it early must appear neutralised.
+    #
+    # Counting over the whole message was the obvious version and it is wrong
+    # here, for a reason this repository is unusually good at producing: the
+    # selected code can legitimately contain the delimiter. Indexing itself, the
+    # context for one issue included `wrap_issue` — the very function that
+    # neutralises the marker, whose body holds two of them — and the assertion
+    # failed while the defence was working perfectly. Measure the wrapper, not
+    # the prompt.
+    #
+    # The wrapper opens with a real newline after `<issue>`; the same text in a
+    # source listing carries an escaped one, so this anchor cannot match code.
+    head = user.rfind("<issue>\ntitle: ")
+    check(f"call {i}: exactly one closing delimiter",
+          head >= 0 and user[head:].count("</issue>") == 1,
+          f"(found {user[head:].count('</issue>') if head >= 0 else 'no wrapper'})")
     escapes_seen += user.count(r"<\/issue>")
 
 check("attempted delimiter escapes were neutralised", escapes_seen >= 1,
