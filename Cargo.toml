@@ -20,6 +20,12 @@ name = "leangraph"
 path = "src/main.rs"
 
 [dependencies]
+# One call: `killpg`. Shelling out to `kill` instead was the original
+# choice and it silently did nothing on a CI runner — a spawn failure or a
+# `kill` that parsed the negative pid differently is invisible when the
+# exit status is discarded, and the survivors were only visible as a
+# timeout that did not time out.
+libc = "0.2"
 ignore = "0.4"
 rayon = "1.10"
 memmap2 = "0.9"

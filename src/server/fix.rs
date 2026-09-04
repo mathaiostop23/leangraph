@@ -458,16 +458,26 @@ pub fn propose(
 
 /// Kill a whole process group.
 ///
-/// Shelling out to `kill` rather than taking a libc dependency for one call.
-/// Negative pid means the group, which is the point: `sh -c 'pytest'` that runs
-/// out of time leaves pytest running otherwise.
+/// The point is the group and not the child: `sh -c 'pytest'` that runs out of
+/// time leaves pytest holding the worktree otherwise, and the next attempt
+/// fails deleting a directory in use.
+///
+/// This shelled out to `kill -9 -pid` for a year to avoid one dependency, and
+/// on a CI runner it did nothing at all — the exit status was discarded, so a
+/// `kill` that could not be spawned, or one that read the negative pid as an
+/// option, was indistinguishable from success. What it looked like from the
+/// outside was a 400 ms timeout returning after 30 seconds and a descendant
+/// still writing files, neither of which points at the signal.
+///
+/// `killpg` is the call the shell-out was imitating. No PATH lookup, no
+/// argument parsing, and a return value.
 #[cfg(unix)]
 fn kill_group(pid: u32) {
-    let _ = std::process::Command::new("kill")
-        .args(["-9", &format!("-{pid}")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // SAFETY: `killpg` takes two integers and no pointers. A failure means the
+    // group is already gone, which is the outcome being asked for.
+    unsafe {
+        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    }
 }
 
 #[cfg(not(unix))]

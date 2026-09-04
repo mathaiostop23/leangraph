@@ -971,6 +971,7 @@ dependencies = [
  "hmac",
  "ignore",
  "lasso",
+ "libc",
  "memmap2",
  "rayon",
  "reqwest",
