@@ -11,10 +11,10 @@
 //! `webhook.rs` are the first line; this is the second.
 
 use super::db::{self, Db};
+use super::provider::{Ask, Block, Provider, Role};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-const API: &str = "https://api.anthropic.com/v1/messages";
 const VERSION: &str = "2023-06-01";
 
 /// Prices per million tokens, as of 2026-08. Read from here rather than
@@ -104,28 +104,15 @@ fn http_error(status: reqwest::StatusCode, v: &Value) -> anyhow::Error {
 /// One message object -> a `Reply`. Shared because a batch result carries the
 /// same shape a live call returns, and decoding it twice would let the two
 /// drift.
-fn reply_from(v: &Value) -> Reply {
-    let text = v
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
-    let u = v.get("usage").cloned().unwrap_or_else(|| json!({}));
-    let get = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+fn reply_from(p: Provider, v: &Value) -> Reply {
+    let (text, input, output, cache_read, cache_write, _) = p.parse(v);
     Reply {
         text,
         usage: Usage {
-            input: get("input_tokens"),
-            output: get("output_tokens"),
-            cache_read: get("cache_read_input_tokens"),
-            cache_write: get("cache_creation_input_tokens"),
+            input,
+            output,
+            cache_read,
+            cache_write,
         },
         model: v
             .get("model")
@@ -139,13 +126,29 @@ pub struct Client {
     http: reqwest::Client,
     key: String,
     base: String,
+    provider: Provider,
 }
 
 impl Client {
-    /// `None` when no key is configured — the worker then skips the issue with
+    /// `None` when nothing is configured — the worker then skips the issue with
     /// a log line rather than failing the job forever.
-    pub fn new(key: Option<String>) -> Option<Client> {
-        let key = key.filter(|k| !k.is_empty())?;
+    ///
+    /// Two keys and an optional name. With one key there is nothing to decide;
+    /// with two, `LEANGRAPH_PROVIDER` decides, and a name nobody recognises is
+    /// treated as a configuration error rather than quietly defaulting to
+    /// whichever key happened to be first.
+    pub fn new(
+        anthropic: Option<String>,
+        openai: Option<String>,
+        named: Option<String>,
+    ) -> Option<Client> {
+        let anthropic = anthropic.filter(|k| !k.is_empty());
+        let openai = openai.filter(|k| !k.is_empty());
+        let provider = Provider::choose(named.as_deref(), anthropic.is_some(), openai.is_some())?;
+        let key = match provider {
+            Provider::Anthropic => anthropic?,
+            Provider::OpenAi => openai?,
+        };
         Some(Client {
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(180))
@@ -153,18 +156,37 @@ impl Client {
                 .ok()?,
             key,
             // Overridable so the pipeline can be exercised against a stub
-            // without spending anything.
-            base: std::env::var("LEANGRAPH_ANTHROPIC_BASE").unwrap_or_else(|_| API.into()),
+            // without spending anything. One name for both, because what it
+            // overrides is "where the model lives", not whose model it is.
+            base: std::env::var("LEANGRAPH_ANTHROPIC_BASE")
+                .or_else(|_| std::env::var("LEANGRAPH_MODEL_BASE"))
+                .unwrap_or_else(|_| provider.default_base().into()),
+            provider,
         })
     }
 
+    pub fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    /// The model this provider uses for a given job.
+    pub fn model_for(&self, role: Role) -> &'static str {
+        self.provider.model(role)
+    }
+
     async fn call(&self, body: Value, model: &str) -> Result<Reply> {
-        let res = self
+        let mut req = self
             .http
             .post(&self.base)
-            .header("x-api-key", &self.key)
-            .header("anthropic-version", VERSION)
-            .header("content-type", "application/json")
+            .header(
+                self.provider.auth_header(),
+                self.provider.auth_value(&self.key),
+            )
+            .header("content-type", "application/json");
+        if self.provider == Provider::Anthropic {
+            req = req.header("anthropic-version", VERSION);
+        }
+        let res = req
             .json(&body)
             .send()
             .await
@@ -176,17 +198,22 @@ impl Client {
             return Err(http_error(status, &v));
         }
 
-        // A refusal is a successful HTTP 200 with an empty content array.
-        // Indexing content[0] without checking is how that becomes a panic.
-        if v.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
+        // A refusal is a successful HTTP 200 with no answer in it. Reading the
+        // first content block without checking is how that becomes a panic.
+        if self.provider.refused(&v) {
             bail!("the model declined this request");
         }
 
-        let mut r = reply_from(&v);
+        let mut r = reply_from(self.provider, &v);
         if r.model.is_empty() {
             r.model = model.to_string();
         }
         Ok(r)
+    }
+
+    /// Render a neutral request for whichever provider this client speaks.
+    fn body(&self, ask: &Ask, model: &str) -> Value {
+        self.provider.render(ask, model)
     }
 }
 
@@ -265,12 +292,20 @@ pub struct Triage {
 /// Stage 1. Classify, and pull out the symbol names worth seeding the graph
 /// with. Haiku, no thinking: this is extraction, not reasoning.
 pub async fn triage(c: &Client, title: &str, body: &str) -> Result<(Triage, Reply)> {
-    let model = "claude-haiku-4-5";
-    let req = json!({
-        "model": model,
-        "max_tokens": 512,
-        "system": SYSTEM,
-        "output_config": { "format": { "type": "json_schema", "schema": {
+    let model = c.model_for(Role::Triage);
+    let ask = Ask {
+        max_tokens: 512,
+        system: vec![Block {
+            text: SYSTEM.to_string(),
+            cached: false,
+        }],
+        user: format!(
+            "Classify this issue and list any function, method or class names it \
+    mentions that would be worth looking up in the codebase. Symbols only — not \
+    English words that happen to appear.\n\n{}",
+            wrap_issue(title, body)
+        ),
+        schema: Some(json!({
             "type": "object",
             "properties": {
                 "kind": { "type": "string", "enum": ["bug", "question", "feature", "invalid"] },
@@ -279,13 +314,9 @@ pub async fn triage(c: &Client, title: &str, body: &str) -> Result<(Triage, Repl
             },
             "required": ["kind", "summary", "symbols"],
             "additionalProperties": false
-        }}},
-        "messages": [{ "role": "user", "content": format!(
-            "Classify this issue and list any function, method or class names it \
-    mentions that would be worth looking up in the codebase. Symbols only — not \
-    English words that happen to appear.\n\n{}", wrap_issue(title, body)) }]
-    });
-    let reply = c.call(req, model).await?;
+        })),
+    };
+    let reply = c.call(c.body(&ask, model), model).await?;
     let v: Value = serde_json::from_str(reply.text.trim()).unwrap_or_else(|_| json!({}));
     Ok((
         Triage {
@@ -368,7 +399,15 @@ pub async fn analyse(
     title: &str,
     body: &str,
 ) -> Result<Reply> {
-    analyse_with(c, "claude-sonnet-5", preamble, context, title, body).await
+    analyse_with(
+        c,
+        c.model_for(Role::Analyse),
+        preamble,
+        context,
+        title,
+        body,
+    )
+    .await
 }
 
 /// The same analysis, escalated. Same prompt and same context deliberately:
@@ -381,7 +420,15 @@ pub async fn escalate(
     title: &str,
     body: &str,
 ) -> Result<Reply> {
-    analyse_with(c, "claude-opus-5", preamble, context, title, body).await
+    analyse_with(
+        c,
+        c.model_for(Role::Escalate),
+        preamble,
+        context,
+        title,
+        body,
+    )
+    .await
 }
 
 async fn analyse_with(
@@ -392,40 +439,38 @@ async fn analyse_with(
     title: &str,
     body: &str,
 ) -> Result<Reply> {
-    c.call(
-        analyse_request(model, preamble, context, title, body),
-        model,
-    )
-    .await
+    let ask = analyse_ask(preamble, context, title, body);
+    c.call(c.body(&ask, model), model).await
 }
 
 /// The analyse request body, so the live path and the batch cannot drift.
-fn analyse_request(
-    model: &str,
-    preamble: &str,
-    context: &str,
-    title: &str,
-    body: &str,
-) -> serde_json::Value {
-    json!({
-        "model": model,
-        "max_tokens": 4096,
-        "output_config": { "effort": "high" },
-        // 1h rather than the 5m default: issues arrive in bursts hours apart,
-        // and the write premium pays back after three reads.
-        "system": [
-            { "type": "text", "text": SYSTEM },
-            preamble_block(preamble)
+fn analyse_ask(preamble: &str, context: &str, title: &str, body: &str) -> Ask {
+    Ask {
+        max_tokens: 4096,
+        // The repo preamble carries the breakpoint where a breakpoint means
+        // anything: 1h rather than the 5m default, because issues arrive in
+        // bursts hours apart and the write premium pays back after three reads.
+        system: vec![
+            Block {
+                text: SYSTEM.to_string(),
+                cached: false,
+            },
+            Block {
+                text: preamble.to_string(),
+                cached: cacheable(preamble),
+            },
         ],
-        "messages": [{ "role": "user", "content": format!(
+        user: format!(
             "## Code selected for this issue\n\n{context}\n\n{}\n\nUsing only the code \
     above, explain the likely cause and where a fix would go. Be specific about files \
     and symbols. If what you were given is insufficient, say what else you would need.\
     \n\nEnd with a final line, exactly `confidence: high`, `confidence: medium` or \
     `confidence: low`, reporting how sure you are of the cause. Say low when the \
     selected code does not contain it.",
-            wrap_issue(title, body)) }]
-    })
+            wrap_issue(title, body)
+        ),
+        schema: None,
+    }
 }
 
 /// Stage 3, only in fix mode. Produce a unified diff and nothing else.
@@ -433,16 +478,6 @@ fn analyse_request(
 /// A diff rather than whole files: it applies with `git apply --check`, which
 /// means a patch built against stale code is *detected* instead of silently
 /// overwriting whatever moved. Whole-file output has no such check.
-/// The repo preamble, marked for caching only where caching can happen.
-fn preamble_block(preamble: &str) -> serde_json::Value {
-    if cacheable(preamble) {
-        json!({ "type": "text", "text": preamble,
-                "cache_control": { "type": "ephemeral", "ttl": "1h" } })
-    } else {
-        json!({ "type": "text", "text": preamble })
-    }
-}
-
 pub async fn propose_fix(
     c: &Client,
     preamble: &str,
@@ -450,22 +485,31 @@ pub async fn propose_fix(
     title: &str,
     body: &str,
 ) -> Result<Reply> {
-    let model = "claude-sonnet-5";
-    let req = json!({
-        "model": model,
-        "max_tokens": 8192,
-        "output_config": { "effort": "high" },
-        "system": [
-            { "type": "text", "text": SYSTEM },
-            preamble_block(preamble),
-            { "type": "text", "text": FIX_RULES }
+    let model = c.model_for(Role::Fix);
+    let ask = Ask {
+        max_tokens: 8192,
+        system: vec![
+            Block {
+                text: SYSTEM.to_string(),
+                cached: false,
+            },
+            Block {
+                text: preamble.to_string(),
+                cached: cacheable(preamble),
+            },
+            Block {
+                text: FIX_RULES.to_string(),
+                cached: false,
+            },
         ],
-        "messages": [{ "role": "user", "content": format!(
+        user: format!(
             "## Code selected for this issue\n\n{context}\n\n{}\n\nProduce a minimal \
     unified diff that fixes this. Output the diff and nothing else — no prose, no fences.",
-            wrap_issue(title, body)) }]
-    });
-    c.call(req, model).await
+            wrap_issue(title, body)
+        ),
+        schema: None,
+    };
+    c.call(c.body(&ask, model), model).await
 }
 
 /// A failure that is worth trying again.
@@ -607,9 +651,13 @@ pub fn batch_analyse(
     title: &str,
     body: &str,
 ) -> BatchItem {
+    // Rendered for Anthropic explicitly rather than for whichever provider the
+    // client speaks: the batch endpoint is Anthropic's, so a body in anyone
+    // else's shape would be submitted and rejected an hour later.
+    let ask = analyse_ask(preamble, context, title, body);
     BatchItem {
         custom_id: custom_id.to_string(),
-        body: analyse_request("claude-sonnet-5", preamble, context, title, body),
+        body: Provider::Anthropic.render(&ask, Provider::Anthropic.model(Role::Analyse)),
     }
 }
 
@@ -696,7 +744,9 @@ impl Client {
             else {
                 continue;
             };
-            out.push((id.to_string(), reply_from(msg)));
+            // Batch is Anthropic-only, so the shape here is that provider's
+            // whatever the client was configured with.
+            out.push((id.to_string(), reply_from(Provider::Anthropic, msg)));
         }
         Ok(Some(out))
     }
@@ -707,10 +757,23 @@ impl Client {
 /// Publishing what an answer cost is a feature, not instrumentation: a user who
 /// can see the number trusts it, and it is the number this whole design exists
 /// to keep small.
-pub fn receipt(nodes: usize, usage_total: i64, cached: i64, cost: f64) -> String {
-    format!(
-        "\n\n---\n<sub>{nodes} graph nodes · {usage_total} tokens ({cached} cached) · ${cost:.4}</sub>"
-    )
+pub fn receipt(
+    provider: Provider,
+    nodes: usize,
+    usage_total: i64,
+    cached: i64,
+    cost: f64,
+) -> String {
+    // The cached figure is only claimed where the provider was asked to cache
+    // and reports what that bought. Elsewhere prefixes may well be cached, but
+    // nobody placed the breakpoint and nobody can say what it saved, and a
+    // number printed under a receipt should be one somebody can check.
+    let cache = if provider.caching() {
+        format!(" ({cached} cached)")
+    } else {
+        String::new()
+    };
+    format!("\n\n---\n<sub>{nodes} graph nodes · {usage_total} tokens{cache} · ${cost:.4}</sub>")
 }
 
 pub fn kind_note(t: &Triage) -> String {

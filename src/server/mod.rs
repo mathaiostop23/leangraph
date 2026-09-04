@@ -10,6 +10,7 @@ pub mod crypto;
 pub mod db;
 pub mod dedup;
 pub mod fix;
+pub mod provider;
 pub mod ui;
 pub mod webhook;
 
@@ -1128,7 +1129,11 @@ If that is wrong, say so on the issue and I will look properly.\n",
         return Ok(Outcome::Done);
     }
 
-    let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
+    let Some(client) = agent::Client::new(
+        app.secret("anthropic_key"),
+        app.secret("openai_key"),
+        app.secret("provider"),
+    ) else {
         app.db.finish_run(
             run_id,
             "skipped",
@@ -1267,7 +1272,13 @@ willing to propose from the context available._\n",
     // against something there is actually a thread to point at.
     app.db.set_fingerprint(issue.id, &dedup::encode(&fp))?;
 
-    comment.push_str(&agent::receipt(nodes, tokens, cached, cost));
+    comment.push_str(&agent::receipt(
+        client.provider(),
+        nodes,
+        tokens,
+        cached,
+        cost,
+    ));
 
     let posted = post_comment(
         &repo.provider,
@@ -1356,9 +1367,22 @@ async fn backfill(app: &App, job: &db::Job, only_stale: bool) -> Result<Outcome>
             format!("{} is {}", repo.full_name, repo.state),
         ));
     }
-    let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
+    let Some(client) = agent::Client::new(
+        app.secret("anthropic_key"),
+        app.secret("openai_key"),
+        app.secret("provider"),
+    ) else {
         anyhow::bail!("backfill needs an API key");
     };
+    // Backfill is the batch path, and only one provider has a batch endpoint
+    // here. Refusing up front is better than submitting a body in the wrong
+    // shape and finding out when the results do not arrive.
+    if !client.provider().batch() {
+        anyhow::bail!(
+            "backfill submits a batch, which {} does not offer here —              set LEANGRAPH_PROVIDER=anthropic for this repository or answer              issues one at a time",
+            client.provider().name()
+        );
+    }
 
     let open = list_open_issues(app, &repo).await?;
     if open.is_empty() {
@@ -1466,7 +1490,11 @@ async fn collect_batch(app: &App, job: &db::Job) -> Result<Outcome> {
         .and_then(|x| x.as_str())
         .context("batch job without a batch id")?;
     let repo = app.repo(job.repo_id)?;
-    let Some(client) = agent::Client::new(app.secret("anthropic_key")) else {
+    let Some(client) = agent::Client::new(
+        app.secret("anthropic_key"),
+        app.secret("openai_key"),
+        app.secret("provider"),
+    ) else {
         anyhow::bail!("collecting a batch needs an API key");
     };
 
@@ -1511,6 +1539,7 @@ async fn collect_batch(app: &App, job: &db::Job) -> Result<Outcome> {
         )?;
         let mut comment = agent::split_confidence(&reply.text).0;
         comment.push_str(&agent::receipt(
+            client.provider(),
             0,
             reply.usage.total(),
             reply.usage.cache_read,

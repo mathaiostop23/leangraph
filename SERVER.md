@@ -589,7 +589,9 @@ longer inherits (§5.5).
 | `LEANGRAPH_ADMIN_TOKEN` | admin token. Generated into `admin.token` if unset |
 | `LEANGRAPH_MASTER_KEY` | 32 bytes, hex, for secret encryption. Generated into `master.key` if unset |
 | `LEANGRAPH_WEBHOOK_SECRET` | the shared secret the provider signs with |
-| `LEANGRAPH_ANTHROPIC_KEY` | your API key |
+| `LEANGRAPH_ANTHROPIC_KEY` | your Anthropic API key |
+| `LEANGRAPH_OPENAI_KEY` | your OpenAI API key, if you would rather use that |
+| `LEANGRAPH_PROVIDER` | `anthropic` or `openai`. Only needed when both keys are set — with one, the key decides |
 | `LEANGRAPH_GITHUB_TOKEN` | read for cloning; write only if fix mode is on |
 | `LEANGRAPH_ALLOWED_HOSTS` | pin cloning to named hosts (§5.4) |
 | `LEANGRAPH_RETRY_BASE_SECS` | first retry wait, default 30 (§1) |
@@ -603,6 +605,23 @@ curl -X POST localhost:7777/repos \
 ```
 
 ---
+
+**Two providers, not two of everything.** The agent speaks either API and picks
+the model per job — a cheap one to classify, a stronger one to explain, the
+strongest where low confidence escalates. Two things are Anthropic-only and the
+server says so rather than pretending:
+
+* **Prompt caching.** The breakpoint on the repository preamble is placed
+  explicitly and the receipt reports what it saved. OpenAI caches prefixes on
+  its own terms and reports only a read count, so on OpenAI the receipt omits
+  the cache figure instead of printing one nobody can check.
+* **Backfill.** It submits a batch at half price, and that endpoint is
+  Anthropic's. Asking for a backfill while configured for OpenAI fails
+  immediately with that reason, rather than submitting a body in the wrong
+  shape and going quiet for an hour.
+
+The cache-hit and half-price figures in [BENCH.md](./BENCH.md) are Anthropic
+measurements and stay that way until someone runs the other side.
 
 ## 9. Tests
 
