@@ -117,7 +117,11 @@ PRICE = {
 
 
 def call(provider, key, model, prompt, max_tokens=8192):
-    import urllib.request
+    # `requests` rather than `urllib`: urllib uses the platform trust store and
+    # fails with CERTIFICATE_VERIFY_FAILED on a machine whose Python was not
+    # installed with one — which is not a rare configuration and is a confusing
+    # way for a benchmark to die. requests carries its own roots.
+    import requests
     if provider == "anthropic":
         url = "https://api.anthropic.com/v1/messages"
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01",
@@ -129,9 +133,12 @@ def call(provider, key, model, prompt, max_tokens=8192):
         headers = {"authorization": f"Bearer {key}", "content-type": "application/json"}
         body = {"model": model, "max_completion_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}]}
-    req = urllib.request.Request(url, json.dumps(body).encode(), headers)
-    with urllib.request.urlopen(req, timeout=600) as r:
-        v = json.load(r)
+    r = requests.post(url, headers=headers, json=body, timeout=600)
+    if not r.ok:
+        # The message matters more than the status: "no credits" and "bad key"
+        # are both 4xx and only one of them is worth retrying tomorrow.
+        raise RuntimeError(f"{r.status_code}: {r.text[:200]}")
+    v = r.json()
     if provider == "anthropic":
         text = "".join(b.get("text", "") for b in v.get("content", [])
                        if b.get("type") == "text")
