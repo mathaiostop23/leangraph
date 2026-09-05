@@ -425,5 +425,6 @@ measured it.
 | [ENGINE.md](./ENGINE.md) | architecture, language tiers, cost design, risks |
 | [SERVER.md](./SERVER.md) | the self-hosted issue service |
 | [ROADMAP.md](./ROADMAP.md) | phases and where they stand |
+| [SECURITY.md](./SECURITY.md) | what is in scope, what is not, and where to report it privately |
 
 MIT.
