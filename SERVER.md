@@ -535,14 +535,29 @@ needs a rebuild or a redeploy:
 | `model_triage` `model_analyse` `model_fix` `model_escalate` | override one job; beats `model` |
 
 ```
-curl -H "Authorization: Bearer $TOKEN" -d 'sk-...' \
-     http://localhost:7017/secrets/openai_key
-curl -H "Authorization: Bearer $TOKEN" -d 'gpt-5.6-luna' \
-     http://localhost:7017/secrets/model
+curl -X POST http://localhost:7017/secrets/openai_key \
+     -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d '{"value":"sk-..."}'
+
+curl -X POST http://localhost:7017/secrets/model \
+     -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d '{"value":"gpt-5.6-luna"}'
 ```
 
+The body is `{"value": ...}` and an empty one is refused, so a choice is undone
+by removing it rather than by blanking it:
+
+```
+curl -X DELETE http://localhost:7017/secrets/model_fix \
+     -H "Authorization: Bearer $TOKEN"
+```
+
+`GET /secrets` lists what is set — names and hints, never values — which is how
+you check what an install is actually running on.
+
 Each also reads from `LEANGRAPH_MODEL`, `LEANGRAPH_MODEL_FIX` and so on, since
-`secret` falls back to the environment — which is what a container wants.
+`secret` falls back to the environment: the stored secret wins, the variable
+covers a container that would rather not make an HTTP call to configure itself.
 
 Set nothing and the defaults in `Provider::model` apply: a cheap model to
 triage, a stronger one to analyse and to write the patch, the strongest to
