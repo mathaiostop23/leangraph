@@ -42,6 +42,21 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+enum SecretCmd {
+    /// Store a value. Omit it and it is read from stdin, which keeps an API
+    /// key out of shell history and out of the process list.
+    Set {
+        /// `openai_key`, `anthropic_key`, `provider`, `model`, `model_fix`, …
+        name: String,
+        value: Option<String>,
+    },
+    /// Names and hints of what is stored. Never values.
+    List,
+    /// Remove one, which is how a model override is undone.
+    Rm { name: String },
+}
+
+#[derive(Subcommand, Debug)]
 enum Cmd {
     /// Index a repository and write its graph
     Index {
@@ -167,6 +182,16 @@ enum Cmd {
         /// nodes | edges | semantic
         #[arg(long, default_value = "nodes")]
         what: String,
+    },
+    /// Store the API key, provider and model choices the server runs on
+    Secret {
+        #[command(subcommand)]
+        op: SecretCmd,
+        /// The server's data directory. `global` so it reads the same either
+        /// side of the subcommand — nobody should have to learn that clap
+        /// wants parent flags first.
+        #[arg(long, default_value = ".leangraph-server", global = true)]
+        data: PathBuf,
     },
     /// Run the self-hosted HTTP server
     Server {
@@ -550,6 +575,26 @@ fn main() -> Result<()> {
                 other => bail!("unknown dump target `{other}` (nodes | edges | semantic)"),
             }
             Ok(())
+        }
+
+        Cmd::Secret { op, data } => {
+            use server::SecretOp;
+            let op = match op {
+                SecretCmd::Set { name, value } => {
+                    let value = match value {
+                        Some(v) => v,
+                        None => {
+                            let mut buf = String::new();
+                            std::io::stdin().read_line(&mut buf)?;
+                            buf.trim_end_matches(['\n', '\r']).to_string()
+                        }
+                    };
+                    SecretOp::Set { name, value }
+                }
+                SecretCmd::List => SecretOp::List,
+                SecretCmd::Rm { name } => SecretOp::Remove { name },
+            };
+            server::secret_cli(&data, op)
         }
 
         Cmd::Server {

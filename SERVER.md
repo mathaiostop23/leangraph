@@ -534,6 +534,23 @@ needs a rebuild or a redeploy:
 | `model` | overrides the model for every job |
 | `model_triage` `model_analyse` `model_fix` `model_escalate` | override one job; beats `model` |
 
+On the machine the server runs on, the subcommand is the short way — no
+listener, no admin token, same encrypted store:
+
+```
+leangraph secret set openai_key            # value read from stdin
+leangraph secret set model gpt-5.6-luna
+leangraph secret set model_triage gpt-4.1-mini
+leangraph secret list                      # names and hints, never values
+leangraph secret rm model_triage
+```
+
+`secret set` with no value reads stdin, so an API key never reaches shell
+history or the process list. `--data` points at the server's directory and
+defaults to `.leangraph-server`.
+
+Remotely, or from a script, the same store is behind the endpoint:
+
 ```
 curl -X POST http://localhost:7017/secrets/openai_key \
      -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \

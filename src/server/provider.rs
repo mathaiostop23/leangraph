@@ -51,10 +51,6 @@ impl Models {
             .or(self.all.as_deref())
             .filter(|m| !m.trim().is_empty())
     }
-
-    pub fn is_empty(&self) -> bool {
-        Role::ALL.into_iter().all(|r| self.pick(r).is_none())
-    }
 }
 
 impl Role {
@@ -435,7 +431,6 @@ mod tests {
     #[test]
     fn choosing_nothing_leaves_every_role_on_the_default() {
         let m = Models::default();
-        assert!(m.is_empty());
         for role in Role::ALL {
             assert_eq!(m.pick(role), None, "{role:?} should be untouched");
         }
@@ -463,7 +458,6 @@ mod tests {
         };
         assert_eq!(m.pick(Role::Triage), Some("gpt-4.1-mini"));
         assert_eq!(m.pick(Role::Fix), Some("gpt-5.6-luna"));
-        assert!(!m.is_empty());
     }
 
     #[test]
@@ -477,7 +471,6 @@ mod tests {
         };
         assert_eq!(m.pick(Role::Fix), None);
         assert_eq!(m.pick(Role::Analyse), None);
-        assert!(m.is_empty());
     }
 
     #[test]

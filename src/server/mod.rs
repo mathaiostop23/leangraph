@@ -233,6 +233,60 @@ async fn require_token(
     }
 }
 
+/// What the `secret` subcommand does, without a server or an admin token.
+///
+/// `POST /secrets` is the right shape for an install running somewhere else,
+/// and the wrong one for someone configuring a checkout on their own machine:
+/// it wants a listener, a token, and a correctly shaped JSON body before it
+/// will store an API key. This reaches the same encrypted store directly.
+pub enum SecretOp {
+    Set { name: String, value: String },
+    List,
+    Remove { name: String },
+}
+
+pub fn secret_cli(data_dir: &Path, op: SecretOp) -> Result<()> {
+    std::fs::create_dir_all(data_dir).ok();
+    let db = Db::open(&data_dir.join("leangraph.db"))?;
+    let vault = crypto::Vault::open(data_dir)?;
+    match op {
+        SecretOp::Set { name, value } => {
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                anyhow::bail!("name must be lowercase letters, digits and underscores");
+            }
+            if value.trim().is_empty() {
+                anyhow::bail!("value is empty — use `secret rm {name}` to clear it");
+            }
+            let (nonce, ct) = vault.seal(&value)?;
+            let hint = crypto::hint(&value);
+            db.put_secret(&name, &nonce, &ct, &hint)?;
+            // The hint, never the value. Printing back what was just stored is
+            // how a key ends up in a terminal log or a screen recording.
+            println!("  stored {name} ({hint})");
+        }
+        SecretOp::List => {
+            let items = db.secret_hints()?;
+            if items.is_empty() {
+                println!("  nothing stored in {}", data_dir.display());
+            }
+            for (name, hint) in items {
+                println!("  {name:<18} {hint}");
+            }
+        }
+        SecretOp::Remove { name } => {
+            if db.delete_secret(&name)? {
+                println!("  removed {name}");
+            } else {
+                println!("  {name} was not set");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.data_dir).ok();
     // Before anything else, and before the first repository is registered:
