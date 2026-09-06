@@ -235,8 +235,14 @@ enum Cmd {
     },
     /// Graph statistics and load time
     Status {
+        /// Positional, for `leangraph status ~/repo`.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Every other query command spells this `-p`, and someone who has just
+        /// typed `callers foo -p ~/repo` will type it here too. It was an error
+        /// before; now the flag wins and the positional still works.
+        #[arg(short = 'p', long = "path")]
+        path_flag: Option<PathBuf>,
     },
 }
 
@@ -653,7 +659,8 @@ fn main() -> Result<()> {
             })
         }
 
-        Cmd::Status { path } => {
+        Cmd::Status { path, path_flag } => {
+            let path = path_flag.unwrap_or(path);
             let (g, load_us) = load(&path)?;
             let bytes = std::fs::metadata(graph_path(&path))
                 .map(|m| m.len())

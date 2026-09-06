@@ -34,7 +34,35 @@ numbers below are measured and reproducible: every one comes from a script in
 
 ---
 
-## Two ways to use it
+## Three ways to use it
+
+### On its own, from the shell — no model, no key, no network
+
+The graph is the product; the agent is one consumer of it. Every query runs
+against a memory-mapped file on your own disk, so this half needs no API key,
+reaches nothing, and works on a plane.
+
+```bash
+leangraph index ~/repo
+leangraph find   QuerySet          # where is it defined
+leangraph callers  save   -p ~/repo   # who calls it
+leangraph callees  save   -p ~/repo   # what it calls
+leangraph impact   save   -p ~/repo   # what a change to it reaches
+leangraph context "issue text" -p ~/repo --source   # the code behind a bug report
+leangraph status   -p ~/repo
+```
+
+`context` is the interesting one: give it an issue, a stack trace or a commit
+message and it returns the ranked code, with `--source` emitting the source
+itself rather than a list of names. That is the same context the agent modes
+send to a model — you can read it, pipe it, or paste it wherever you like.
+
+```
+  nodes      40186          # astropy
+  edges     106469
+  on disk    4.7 MB
+  load       31 µs          (mmap + header check; nothing is deserialized)
+```
 
 ### In your editor, as an MCP server
 
