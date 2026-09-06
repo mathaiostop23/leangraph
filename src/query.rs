@@ -74,6 +74,11 @@ impl Why {
             Why::ProseSeed => 1.0,
             Why::OnPath => 0.9,
             Why::Caller => 0.6,
+            // Tried at 0.65, to put a called function above a file that merely
+            // imports the module (0.6 x 0.95 = 0.57). It reads well and it is
+            // wrong: on 60 SWE-bench instances file recall fell 84.4% -> 81.1%,
+            // django 78.7% -> 73.4%, for 32% fewer tokens. Those import-linked
+            // caller files are carrying real recall, not noise. Left at 0.5.
             Why::Callee => 0.5,
             Why::CoChange => 0.4,
         }

@@ -1398,6 +1398,49 @@ So the order worth doing is the opposite of the obvious one:
 Written down because "not built" and "measured and declined" are different
 things, and only one of them is a decision.
 
+## Scoring a patch, and three ways the scoring was wrong
+
+`bench/swefix.py` applies a candidate patch in the instance's own Docker image,
+applies the benchmark's test patch on top, and requires every FAIL_TO_PASS test
+to pass and every PASS_TO_PASS test to still pass. That is the benchmark's
+definition and it is not negotiable. Getting *there* took three corrections,
+each of which had been quietly producing zeros.
+
+**django was never being asked the right question.** Its instances name tests
+the way django's own runner does — `test_accent (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)`
+— and no pytest node id matches that, so every django instance reported zero
+passes and read as a broken image. django is 13 of the first 20 instances, so
+this was most of the sample. With `tests/runtests.py` and the matching parser,
+`django-11087` scores its gold patch at F2P 1/1, P2P 41/41.
+
+**The output was being truncated before it was read.** The run ended in
+`tail -120`; `pytest -rA` prints one line per test, so any instance with more
+than about a hundred tests lost the evidence that it had passed. A 732-test
+suite reported 0/732. Filter to result lines first, truncate second.
+
+**The published dataset contains ids that cannot match.** astropy names a test
+`test_non_mapping_init[ceci n'est pas un dict]`, and SWE-bench Verified stores
+it split on whitespace — the first fragment being `test_non_mapping_init[ceci`.
+This was checked against the parquet on HuggingFace; it is upstream, not
+something the fetcher did. Handing pytest such an id is a *usage* error rather
+than a collection error, so `--continue-on-collection-errors` does not help:
+pytest exits having run nothing at all. 676 ids are affected, which is 1.1% of
+them — but one is enough to zero an instance, so they poison 65 of the 500.
+Dropping ids whose brackets do not balance took `astropy-13236` from 0/644 to
+642/642.
+
+### The gold gate
+
+`--gate` scores the benchmark's own patch first and drops any instance it
+fails. This is not leniency. An instance whose reference patch leaves its tests
+red is measuring the harness, the image, or the network, and counting it as a
+loss for every arm is a wrong denominator. What survives the gate is small and
+honest; what it excludes is named in the output rather than absorbed.
+
+Three kinds of thing get excluded here, all of them legitimate: tests that need
+a postgres server, astropy coordinate tests that want IERS data the container
+cannot download, and instances whose gold patch genuinely does not reproduce.
+
 ## What is still unmeasured
 
 - **Edge precision outside flask.** Now measured directly where the runtime oracle can settle it — 78.1% over 688 edges at 560 call sites, and 94.8% in the confidence-100 bucket (`bench/edgeprecision.py`). That subset is one repository in one language, because it needs a test suite that runs offline. Everywhere else it is still a floor from `edgefacts` and a ceiling from fan-out.
