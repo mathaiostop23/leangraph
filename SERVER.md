@@ -522,6 +522,42 @@ or one generated into `master.key` (0600) on first run. Decrypted only in the
 worker, only into memory, never logged. `GET /secrets` returns names and hints,
 never values.
 
+### 5.7 Choosing the provider and the model
+
+Everything the operator picks goes through the same store, so nothing here
+needs a rebuild or a redeploy:
+
+| Secret | What it does |
+|---|---|
+| `anthropic_key` / `openai_key` | the credential; supplying one is enough |
+| `provider` | which to use when both keys are present |
+| `model` | overrides the model for every job |
+| `model_triage` `model_analyse` `model_fix` `model_escalate` | override one job; beats `model` |
+
+```
+curl -H "Authorization: Bearer $TOKEN" -d 'sk-...' \
+     http://localhost:7017/secrets/openai_key
+curl -H "Authorization: Bearer $TOKEN" -d 'gpt-5.6-luna' \
+     http://localhost:7017/secrets/model
+```
+
+Each also reads from `LEANGRAPH_MODEL`, `LEANGRAPH_MODEL_FIX` and so on, since
+`secret` falls back to the environment — which is what a container wants.
+
+Set nothing and the defaults in `Provider::model` apply: a cheap model to
+triage, a stronger one to analyse and to write the patch, the strongest to
+escalate. That ladder is a reasonable default, not a policy. Whoever pays for
+the calls should be able to say "use this one", and a model published after
+this binary was compiled should be reachable the day it ships rather than the
+day someone cuts a release.
+
+Nothing validates the name. The provider is the authority on which ids exist,
+one it does not recognise comes back as its own error, and a table of
+known-good models in here would be wrong within a month. A model with no
+published rate is still billed correctly — the receipt reports what the
+response says was used, and the price table falls back to the dearest arm, so
+an unknown model is over-reported rather than under-reported.
+
 ---
 
 ## 6. Data model

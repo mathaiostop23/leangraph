@@ -23,6 +23,54 @@
 
 use serde_json::{json, Value};
 
+/// What the operator chose to run, when they chose anything.
+///
+/// The defaults in `Provider::model` are a reasonable ladder, not a policy. An
+/// operator paying for the calls should be able to say "use this one" without
+/// rebuilding, and a model released after this binary was compiled should be
+/// reachable the same day it ships. `all` covers every role; a per-role entry
+/// beats it, so triage can stay cheap while the fix gets the good model.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct Models {
+    pub all: Option<String>,
+    pub triage: Option<String>,
+    pub analyse: Option<String>,
+    pub fix: Option<String>,
+    pub escalate: Option<String>,
+}
+
+impl Models {
+    pub fn pick(&self, role: Role) -> Option<&str> {
+        let per = match role {
+            Role::Triage => &self.triage,
+            Role::Analyse => &self.analyse,
+            Role::Fix => &self.fix,
+            Role::Escalate => &self.escalate,
+        };
+        per.as_deref()
+            .or(self.all.as_deref())
+            .filter(|m| !m.trim().is_empty())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        Role::ALL.into_iter().all(|r| self.pick(r).is_none())
+    }
+}
+
+impl Role {
+    pub const ALL: [Role; 4] = [Role::Triage, Role::Analyse, Role::Fix, Role::Escalate];
+
+    /// The secret that overrides this role, e.g. `model_fix`.
+    pub fn secret_name(self) -> &'static str {
+        match self {
+            Role::Triage => "model_triage",
+            Role::Analyse => "model_analyse",
+            Role::Fix => "model_fix",
+            Role::Escalate => "model_escalate",
+        }
+    }
+}
+
 /// What a call is *for*. The provider picks the model, because "the cheap one"
 /// and "the one that reasons" are the stable ideas and the ids are not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -382,5 +430,66 @@ mod tests {
     fn only_the_provider_that_has_them_claims_caching_and_batch() {
         assert!(Provider::Anthropic.caching() && Provider::Anthropic.batch());
         assert!(!Provider::OpenAi.caching() && !Provider::OpenAi.batch());
+    }
+
+    #[test]
+    fn choosing_nothing_leaves_every_role_on_the_default() {
+        let m = Models::default();
+        assert!(m.is_empty());
+        for role in Role::ALL {
+            assert_eq!(m.pick(role), None, "{role:?} should be untouched");
+        }
+    }
+
+    #[test]
+    fn one_name_covers_every_role() {
+        let m = Models {
+            all: Some("gpt-5.6-luna".into()),
+            ..Default::default()
+        };
+        for role in Role::ALL {
+            assert_eq!(m.pick(role), Some("gpt-5.6-luna"));
+        }
+    }
+
+    #[test]
+    fn a_role_beats_the_blanket_choice() {
+        // The point of the split: pay for reasoning where it decides the patch
+        // and stay cheap where the job is only to classify.
+        let m = Models {
+            all: Some("gpt-5.6-luna".into()),
+            triage: Some("gpt-4.1-mini".into()),
+            ..Default::default()
+        };
+        assert_eq!(m.pick(Role::Triage), Some("gpt-4.1-mini"));
+        assert_eq!(m.pick(Role::Fix), Some("gpt-5.6-luna"));
+        assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn an_empty_setting_is_not_a_choice() {
+        // A secret cleared to "" or to spaces must fall back to the default
+        // rather than send the provider a request for a model named nothing.
+        let m = Models {
+            all: Some("   ".into()),
+            fix: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(m.pick(Role::Fix), None);
+        assert_eq!(m.pick(Role::Analyse), None);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn every_role_has_its_own_secret_and_they_are_distinct() {
+        let names: Vec<&str> = Role::ALL.iter().map(|r| r.secret_name()).collect();
+        assert_eq!(names.len(), 4);
+        for n in &names {
+            assert!(n.starts_with("model_"), "{n} should be namespaced");
+        }
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "two roles share a secret");
     }
 }

@@ -11,7 +11,7 @@
 //! `webhook.rs` are the first line; this is the second.
 
 use super::db::{self, Db};
-use super::provider::{Ask, Block, Provider, Role};
+use super::provider::{Ask, Block, Models, Provider, Role};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
@@ -152,6 +152,7 @@ pub struct Client {
     key: String,
     base: String,
     provider: Provider,
+    models: Models,
 }
 
 impl Client {
@@ -166,6 +167,7 @@ impl Client {
         anthropic: Option<String>,
         openai: Option<String>,
         named: Option<String>,
+        models: Models,
     ) -> Option<Client> {
         let anthropic = anthropic.filter(|k| !k.is_empty());
         let openai = openai.filter(|k| !k.is_empty());
@@ -175,6 +177,7 @@ impl Client {
             Provider::OpenAi => openai?,
         };
         Some(Client {
+            models,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(180))
                 .build()
@@ -194,9 +197,10 @@ impl Client {
         self.provider
     }
 
-    /// The model this provider uses for a given job.
-    pub fn model_for(&self, role: Role) -> &'static str {
-        self.provider.model(role)
+    /// The model this job runs on: whatever the operator chose, or the
+    /// provider's default ladder when they chose nothing.
+    pub fn model_for(&self, role: Role) -> &str {
+        self.models.pick(role).unwrap_or_else(|| self.provider.model(role))
     }
 
     async fn call(&self, body: Value, model: &str) -> Result<Reply> {

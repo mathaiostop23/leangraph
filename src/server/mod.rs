@@ -110,6 +110,31 @@ impl App {
         std::env::var(env_name(name)).ok().filter(|v| !v.is_empty())
     }
 
+    /// Which model each job runs on, when the operator has said.
+    ///
+    /// `model` covers every role; `model_fix` and friends beat it for one. Both
+    /// go through `secret`, so either the encrypted store or the environment
+    /// works, and neither needs a rebuild. Nothing is validated here: the
+    /// provider is the authority on what ids exist, a name it does not know
+    /// comes back as its own error, and a model released after this binary was
+    /// compiled is reachable the day it ships.
+    pub fn models(&self) -> provider::Models {
+        let mut m = provider::Models {
+            all: self.secret("model"),
+            ..Default::default()
+        };
+        for role in provider::Role::ALL {
+            let chosen = self.secret(role.secret_name());
+            match role {
+                provider::Role::Triage => m.triage = chosen,
+                provider::Role::Analyse => m.analyse = chosen,
+                provider::Role::Fix => m.fix = chosen,
+                provider::Role::Escalate => m.escalate = chosen,
+            }
+        }
+        m
+    }
+
     /// The write token for whichever host this repository lives on.
     pub fn provider_token(&self, repo: &db::Repo) -> Option<String> {
         self.secret(if repo.provider == "gitlab" {
@@ -1133,6 +1158,7 @@ If that is wrong, say so on the issue and I will look properly.\n",
         app.secret("anthropic_key"),
         app.secret("openai_key"),
         app.secret("provider"),
+        app.models(),
     ) else {
         app.db.finish_run(
             run_id,
@@ -1371,6 +1397,7 @@ async fn backfill(app: &App, job: &db::Job, only_stale: bool) -> Result<Outcome>
         app.secret("anthropic_key"),
         app.secret("openai_key"),
         app.secret("provider"),
+        app.models(),
     ) else {
         anyhow::bail!("backfill needs an API key");
     };
@@ -1494,6 +1521,7 @@ async fn collect_batch(app: &App, job: &db::Job) -> Result<Outcome> {
         app.secret("anthropic_key"),
         app.secret("openai_key"),
         app.secret("provider"),
+        app.models(),
     ) else {
         anyhow::bail!("collecting a batch needs an API key");
     };
