@@ -156,6 +156,9 @@ enum Cmd {
         /// Emit the selected file set as JSON, for the cost benchmark
         #[arg(long)]
         files_json: bool,
+        /// Emit the source of each selected node, for feeding a model
+        #[arg(long)]
+        source: bool,
     },
     /// Dump nodes and edges as JSONL, for differential verification
     Dump {
@@ -402,6 +405,7 @@ fn main() -> Result<()> {
             max_nodes,
             max_bytes,
             files_json,
+            source,
         } => {
             let (g, _) = load(&path)?;
             let ctx = query::build_from_text(
@@ -428,6 +432,10 @@ fn main() -> Result<()> {
                     ctx.items.len(),
                     ctx.est_tokens
                 );
+                return Ok(());
+            }
+            if source {
+                emit_source(&g, &ctx, &path, max_bytes);
                 return Ok(());
             }
             println!(
@@ -764,6 +772,67 @@ fn short_path(path: &str) -> String {
     }
     let tail: Vec<&str> = path.rsplit('/').take(3).collect();
     format!("…/{}", tail.into_iter().rev().collect::<Vec<_>>().join("/"))
+}
+
+/// Print the source behind the ranked nodes, richest first, until the byte
+/// budget runs out.
+///
+/// The ranking alone is useless to a model that has to write a patch: it names
+/// `_cstack` without showing it, so the model falls back on whatever it recalls
+/// of the file and invents context that does not match. Whole files are not the
+/// answer either — the twelve files behind one astropy query are 457 KB, so a
+/// budget spent alphabetically is gone before it reaches the one file that
+/// matters. Node spans are the unit that is both complete and small.
+fn emit_source(g: &Graph, ctx: &query::Context, root: &std::path::Path, max_bytes: usize) {
+    use std::collections::{HashMap, HashSet};
+    let mut cache: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut seen: HashSet<(u32, u32, u32)> = HashSet::new();
+    let mut left = max_bytes;
+    let mut shown = 0usize;
+
+    for it in &ctx.items {
+        let (file, start, end) = g.location(it.node);
+        // A module node spans its whole file; emitting that defeats the budget.
+        if g.node_kind(it.node) == DefKind::Module as u8 || end <= start {
+            continue;
+        }
+        if !seen.insert((file, start, end)) {
+            continue;
+        }
+        let rel = g.path(file);
+        let bytes = cache
+            .entry(file)
+            .or_insert_with(|| std::fs::read(root.join(rel)).unwrap_or_default());
+        let (mut s, e) = (start as usize, (end as usize).min(bytes.len()));
+        if s >= e {
+            continue;
+        }
+        // Back up to the start of the line. A node's recorded start sits at its
+        // name, so slicing from it hands the model `cstack(left, right):` with
+        // the `def _` shorn off — a signature it cannot match against the file
+        // it is being asked to patch.
+        while s > 0 && bytes[s - 1] != b'\n' {
+            s -= 1;
+        }
+        let body = String::from_utf8_lossy(&bytes[s..e]);
+        // Skip what will not fit, do not stop at it. One 40 KB class early in
+        // the ranking must not silently truncate every smaller node behind it —
+        // that is how `separability_matrix` fell out of a context that had
+        // ranked it and had room for it.
+        if body.len() + 32 > left {
+            continue;
+        }
+        left -= body.len() + 32;
+        shown += 1;
+        println!("### {} — {}\n```\n{}\n```\n", rel, g.name(it.node), body);
+    }
+    eprintln!(
+        "  {} of {} nodes carried source, {} bytes left of {}",
+        shown,
+        ctx.items.len(),
+        left,
+        max_bytes
+    );
 }
 
 fn describe(g: &Graph, n: NodeId) -> String {
