@@ -200,7 +200,9 @@ impl Client {
     /// The model this job runs on: whatever the operator chose, or the
     /// provider's default ladder when they chose nothing.
     pub fn model_for(&self, role: Role) -> &str {
-        self.models.pick(role).unwrap_or_else(|| self.provider.model(role))
+        self.models
+            .pick(role)
+            .unwrap_or_else(|| self.provider.model(role))
     }
 
     async fn call(&self, body: Value, model: &str) -> Result<Reply> {
