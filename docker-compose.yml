@@ -13,8 +13,24 @@ services:
       # Required. Without it the webhook endpoint refuses everything, which is
       # the correct failure mode for an unauthenticated door into an agent.
       LEANGRAPH_WEBHOOK_SECRET: ${LEANGRAPH_WEBHOOK_SECRET:?set this in .env}
-      # Your key. It is spent on your issues; nothing here proxies it anywhere.
-      LEANGRAPH_ANTHROPIC_KEY: ${LEANGRAPH_ANTHROPIC_KEY:?set this in .env}
+      # Your key, spent on your issues; nothing here proxies it anywhere. Set
+      # whichever provider you have — one is enough, and neither is required at
+      # boot. This file used to demand the Anthropic one with `:?`, which meant
+      # an install holding only an OpenAI key could not start the stack at all,
+      # in a build that supports OpenAI.
+      LEANGRAPH_ANTHROPIC_KEY: ${LEANGRAPH_ANTHROPIC_KEY:-}
+      LEANGRAPH_OPENAI_KEY: ${LEANGRAPH_OPENAI_KEY:-}
+      # Which to use when both are present. Unset with one key, there is
+      # nothing to decide.
+      LEANGRAPH_PROVIDER: ${LEANGRAPH_PROVIDER:-}
+      # Which model to run. Unset, the provider's default ladder applies: cheap
+      # to triage, stronger to analyse and to patch. `LEANGRAPH_MODEL_FIX` and
+      # friends override one job.
+      LEANGRAPH_MODEL: ${LEANGRAPH_MODEL:-}
+      LEANGRAPH_MODEL_TRIAGE: ${LEANGRAPH_MODEL_TRIAGE:-}
+      LEANGRAPH_MODEL_ANALYSE: ${LEANGRAPH_MODEL_ANALYSE:-}
+      LEANGRAPH_MODEL_FIX: ${LEANGRAPH_MODEL_FIX:-}
+      LEANGRAPH_MODEL_ESCALATE: ${LEANGRAPH_MODEL_ESCALATE:-}
       # Only needed for private repos and for posting comments back.
       LEANGRAPH_GITHUB_TOKEN: ${LEANGRAPH_GITHUB_TOKEN:-}
       # Encrypts secrets at rest in the database.

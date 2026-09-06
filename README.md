@@ -59,10 +59,17 @@ on purpose.
 ### On a server, answering your issues
 
 ```bash
+leangraph secret set openai_key        # or anthropic_key; reads stdin
 docker compose up -d
 curl -X POST localhost:7777/repos -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d '{"url":"https://github.com/owner/name"}'
 ```
+
+One key is enough. `leangraph secret set model gpt-5.6-luna` changes what it
+runs on, `model_fix` and friends change one job, and `leangraph secret list`
+shows what is set without ever printing a value. In a container the same
+settings read from `LEANGRAPH_OPENAI_KEY`, `LEANGRAPH_MODEL` and so on, which
+is what `docker-compose.yml` passes through.
 
 One binary, one volume, **no database container** — SQLite is compiled in. Point
 a GitHub webhook at `/webhook/github` or a GitLab one at `/webhook/gitlab`,
