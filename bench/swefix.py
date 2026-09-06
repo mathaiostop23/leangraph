@@ -19,7 +19,7 @@ something else fails, which is the point.
 Run with `--gold` first on any new instance. If the benchmark's own answer does
 not pass, the harness is wrong and nothing measured through it means anything.
 """
-import argparse, json, os, subprocess, sys, tempfile
+import argparse, re, json, shlex, os, subprocess, sys, tempfile
 
 IMAGE = "swebench/sweb.eval.arm64.{}:latest"
 
@@ -34,6 +34,59 @@ def have_image(tag):
                           capture_output=True).returncode == 0
 
 
+# Django does not use pytest. Its instances name tests the way its own runner
+# does — `test_accent (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)`
+# — which no pytest node id will ever match, so every django instance scored
+# zero passes and looked like a broken environment. It is not broken; it was
+# being asked the wrong question.
+def runner_for(repo, tests):
+    if repo == "django/django":
+        # `a.b.C.test_x` is the label the runner takes; the benchmark writes
+        # the same thing as `test_x (a.b.C)`.
+        labels = []
+        for t in tests:
+            m = re.match(r"^(\S+) \(([^)]+)\)\s*$", t)
+            labels.append(f"{m.group(2)}.{m.group(1)}" if m else t)
+        cmd = ("python tests/runtests.py --verbosity 2 --settings=test_sqlite "
+               "--parallel 1 " + " ".join(shlex.quote(l) for l in labels))
+        keep = r"grep -E ' \.\.\. (ok|FAIL|ERROR|skipped)' /tmp/t.log"
+    else:
+        # shlex.quote, not a pair of literal quotes. astropy names a test
+        # `test_non_mapping_init[ceci n'est pas un dict]`; wrapping that in
+        # single quotes ends the quote at the apostrophe, pytest receives a
+        # truncated id, and one unknown id makes pytest run *nothing at all* —
+        # "no tests ran", scored as 0/644 and written off as a broken image.
+        cmd = ("python -m pytest -rA --no-header -q --continue-on-collection-errors "
+               + " ".join(shlex.quote(t) for t in tests))
+        keep = r"grep -E '^(PASSED|FAILED|ERROR) ' /tmp/t.log"
+    # Never pipe the run straight into `tail`. The first version ended in
+    # `tail -120`, which silently discarded the per-test lines for any instance
+    # with more than about a hundred tests — a 732-test suite reported 0/732 and
+    # was recorded as a broken environment. Filter first, truncate second, and
+    # keep a short raw tail so a real crash is still visible.
+    return (f"{cmd} > /tmp/t.log 2>&1 || true\n"
+            f"{keep} | head -5000\n"
+            'echo "---RAW-TAIL---"\n'
+            "tail -25 /tmp/t.log")
+
+
+def usable_ids(tests):
+    """Drop ids the published dataset has already broken.
+
+    SWE-bench Verified ships parametrised ids split on whitespace: astropy's
+    `test_non_mapping_init[ceci n'est pas un dict]` is stored as three entries,
+    the first being `test_non_mapping_init[ceci`. This is upstream, in the
+    parquet on HuggingFace, not something the fetcher did — it was checked.
+
+    Passing one of these to pytest is a usage error, not a collection error, so
+    `--continue-on-collection-errors` does not save the run: pytest exits
+    having run nothing, and an instance with 644 good ids reports 0/644 and
+    looks like a broken image. An id that opens a bracket and never closes it
+    cannot name a real test, so it is dropped and the rest are scored.
+    """
+    return [t for t in tests if t.count("[") == t.count("]")]
+
+
 def run_tests(rec, patch, keep_container=False):
     """Apply patch + test patch in a fresh container and run both test sets.
 
@@ -46,6 +99,7 @@ def run_tests(rec, patch, keep_container=False):
 
     f2p = json.loads(rec["FAIL_TO_PASS"]) if isinstance(rec["FAIL_TO_PASS"], str) else list(rec["FAIL_TO_PASS"])
     p2p = json.loads(rec["PASS_TO_PASS"]) if isinstance(rec["PASS_TO_PASS"], str) else list(rec["PASS_TO_PASS"])
+    f2p, p2p = usable_ids(f2p), usable_ids(p2p)
 
     with tempfile.TemporaryDirectory() as tmp:
         # Written to files rather than passed as arguments: a patch runs to
@@ -59,12 +113,19 @@ set -e
 cd /testbed
 git checkout -q -- .
 if [ -s /work/fix.diff ]; then
-  git apply -v /work/fix.diff 2>/tmp/apply.log || { echo "APPLY_FAILED"; cat /tmp/apply.log; exit 9; }
+  # Three attempts, weakest bookkeeping requirement last. A model gets the
+  # edit right and the hunk arithmetic wrong often enough that scoring only
+  # what `git apply` accepts strictly measures diff clerking, not the fix.
+  # None of these change which lines are added or removed.
+  if   git apply -v            /work/fix.diff 2>/tmp/apply.log; then echo "APPLIED_STRICT"
+  elif git apply -v --recount  /work/fix.diff 2>>/tmp/apply.log; then echo "APPLIED_RECOUNT"
+  elif patch -p1 --fuzz=3 -f < /work/fix.diff >>/tmp/apply.log 2>&1; then echo "APPLIED_FUZZ"
+  else echo "APPLY_FAILED"; cat /tmp/apply.log; exit 9; fi
 fi
 git apply -v /work/test.diff 2>/dev/null || { echo "TEST_PATCH_FAILED"; exit 8; }
 echo "---TESTS---"
-python -m pytest -rA --no-header -q __TESTS__ 2>&1 | tail -120
-""".replace("__TESTS__", " ".join(f"'{t}'" for t in f2p + p2p))
+__RUN__
+""".replace("__RUN__", runner_for(rec["repo"], f2p + p2p))
         open(os.path.join(tmp, "run.sh"), "w").write(script)
 
         # `bash -l`, not `bash`. The image keeps its dependencies in a conda
@@ -89,6 +150,17 @@ python -m pytest -rA --no-header -q __TESTS__ 2>&1 | tail -120
         for kind in ("PASSED", "FAILED", "ERROR"):
             if line.startswith(kind + " "):
                 status[line[len(kind) + 1:].strip()] = kind
+        # Django's runner: `test_x (a.b.C) ... ok`. The part before ` ... ` is
+        # byte-for-byte the id the benchmark lists, so it needs no conversion
+        # back — only the outcome word does.
+        if " ... " in line:
+            name, _, verdict = line.rpartition(" ... ")
+            v = verdict.strip()
+            if v.startswith("ok"):
+                status[name.strip()] = "PASSED"
+            elif v.startswith(("FAIL", "ERROR")):
+                status[name.strip()] = "FAILED"
+
     def ok(t):
         return status.get(t) == "PASSED"
     f2p_ok = [t for t in f2p if ok(t)]
@@ -104,12 +176,29 @@ def main():
                     help="score the benchmark's own patch — the harness self-test")
     ap.add_argument("--patches", default="",
                     help="json map of instance_id -> candidate patch")
+    ap.add_argument("--gate", action="store_true",
+                    help="score the gold patch first and drop any instance it "
+                         "fails; those measure the harness, not the candidate")
     args = ap.parse_args()
 
     recs = json.load(open(args.data))
     if isinstance(recs, dict):
         recs = [recs]
     patches = json.load(open(args.patches)) if args.patches else {}
+
+    # An instance whose own gold patch does not turn its tests green is not
+    # measuring the candidate — astropy-13236 reported F2P 0/2 and P2P 0/644
+    # under gold, and scored every candidate against it as a failure. Dropping
+    # it is not leniency; counting it is a wrong denominator.
+    excluded = []
+    if args.gate and not args.gold:
+        for rec in list(recs):
+            ok, why = run_tests(rec, rec["patch"])
+            if not ok:
+                excluded.append((rec["instance_id"], why))
+                recs.remove(rec)
+                print(f"  \033[33mexcluded\033[0m  {rec['instance_id']:<34} "
+                      f"gold itself fails here — {why}")
 
     n_ok = 0
     for rec in recs:
@@ -119,7 +208,14 @@ def main():
                 None: "\033[33mskipped \033[0m"}[resolved]
         print(f"  {mark}  {rec['instance_id']:<34} {detail}")
         n_ok += bool(resolved)
+
+    if not recs:
+        print("\n  nothing scorable — every instance failed its own gold patch")
+        return 1
     print(f"\n  {n_ok}/{len(recs)} resolved")
+    if excluded:
+        print(f"  {len(excluded)} excluded by the gold gate, and not in that "
+              f"denominator: {', '.join(i for i, _ in excluded)}")
     return 0
 
 
