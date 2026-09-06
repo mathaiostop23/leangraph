@@ -39,6 +39,31 @@ fn price(model: &str) -> Price {
             input: 5.0,
             output: 25.0,
         },
+        "gpt-4.1-mini" => Price {
+            input: 0.4,
+            output: 1.6,
+        },
+        "gpt-4.1" => Price {
+            input: 2.0,
+            output: 8.0,
+        },
+        // Short-context rates. Past the long-context threshold these roughly
+        // double, so a receipt for a very large request reads low, not high.
+        "gpt-5.6-luna" => Price {
+            input: 0.2,
+            output: 1.2,
+        },
+        "gpt-5.6-terra" => Price {
+            input: 2.0,
+            output: 12.0,
+        },
+        "gpt-5.6-sol" => Price {
+            input: 4.0,
+            output: 20.0,
+        },
+        // The OpenAI models were wired up in `provider` without ever landing
+        // here, so every OpenAI receipt fell to the arm below and reported
+        // roughly 2.5x what the run actually cost.
         _ => Price {
             input: 5.0,
             output: 25.0,

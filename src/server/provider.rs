@@ -111,9 +111,15 @@ impl Provider {
             (Provider::Anthropic, Role::Analyse) => "claude-sonnet-5",
             (Provider::Anthropic, Role::Fix) => "claude-sonnet-5",
             (Provider::Anthropic, Role::Escalate) => "claude-opus-5",
+            // Triage only sorts an issue into a bucket, so it stays on the
+            // cheap model; analysis and the fix itself get the newest one.
+            // `gpt-5.6-luna` was confirmed against the account's /v1/models
+            // listing rather than assumed. Its rate is not published in
+            // `agent::price`, so receipts fall through to the dearest arm and
+            // overstate: safe direction, but replace it once the rate is known.
             (Provider::OpenAi, Role::Triage) => "gpt-4.1-mini",
-            (Provider::OpenAi, Role::Analyse) => "gpt-4.1",
-            (Provider::OpenAi, Role::Fix) => "gpt-4.1",
+            (Provider::OpenAi, Role::Analyse) => "gpt-5.6-luna",
+            (Provider::OpenAi, Role::Fix) => "gpt-5.6-luna",
             (Provider::OpenAi, Role::Escalate) => "o3",
         }
     }
