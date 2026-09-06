@@ -394,11 +394,34 @@ pub async fn run(cfg: Config) -> Result<()> {
         .await
         .with_context(|| format!("bind {}", app.cfg.addr))?;
 
+    // Say at boot whether there is a key, because the alternative is finding
+    // out by labelling an issue and watching nothing happen: the run is marked
+    // `skipped` with "no api key" and nobody reads a run record before they
+    // have seen the thing work once. The webhook line below already sets this
+    // precedent — state the condition, name the fix.
+    let model_line = match provider::Provider::choose(
+        app.secret("provider").as_deref(),
+        app.secret("anthropic_key").is_some(),
+        app.secret("openai_key").is_some(),
+    ) {
+        Some(p) => {
+            let chosen = app.models();
+            let fix = chosen
+                .pick(provider::Role::Fix)
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| format!("{} (default)", p.model(provider::Role::Fix)));
+            format!("\x1b[32m{}\x1b[0m · {fix}", p.name())
+        }
+        None => "\x1b[33mno key — `leangraph secret set openai_key` or `anthropic_key`\x1b[0m"
+            .to_string(),
+    };
+
     println!(
-        "\n  \x1b[1mleangraph server\x1b[0m  http://{}\n  data      {}\n  workers   {}\n  webhook   {}\n  trigger   `{}` label\n  fix       `{}` label, and only where the repo has opted in\n",
+        "\n  \x1b[1mleangraph server\x1b[0m  http://{}\n  data      {}\n  workers   {}\n  model     {}\n  webhook   {}\n  trigger   `{}` label\n  fix       `{}` label, and only where the repo has opted in\n",
         app.cfg.addr,
         app.cfg.data_dir.display(),
         app.cfg.workers,
+        model_line,
         if app.cfg.webhook_secret.is_some() {
             "\x1b[32mverified\x1b[0m"
         } else {
