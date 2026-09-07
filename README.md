@@ -44,6 +44,7 @@ reaches nothing, and works on a plane.
 
 ```bash
 leangraph index ~/repo
+leangraph watch  ~/repo            # re-index on every change, 0.26 s on django
 leangraph find   QuerySet          # where is it defined
 leangraph callers  save   -p ~/repo   # who calls it
 leangraph callees  save   -p ~/repo   # what it calls
@@ -449,9 +450,12 @@ measured it.
   open depends on; measured and declined. The order worth doing is a
   filesystem watcher first (`--since` already exists and the server uses it),
   incremental resolution second, CSR patching last.
-- **No local watcher.** A push webhook syncs the server automatically. On a
-  developer's machine nothing watches the filesystem — you re-run `index`, and
-  the extraction cache makes that cheap rather than instant.
+- **The watcher re-indexes; it does not resolve incrementally.** `leangraph
+  watch` notices a write and re-indexes — 0.26 s on django's 3,038 files, fast
+  enough to keep pace with an agent editing code. But it re-resolves the whole
+  repository each time, because resolution is global: a definition added
+  anywhere can change what a reference elsewhere binds to. Incremental
+  resolution is the next thing worth building and the hard one.
 - **Fix mode runs the tests, but supplies no sandbox.** A repository sets
   `test_command` and the patch is checked against its own suite. The process
   gets a scrubbed environment, its own process group and a timeout — not

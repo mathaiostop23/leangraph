@@ -26,6 +26,7 @@ mod resolve;
 mod server;
 #[cfg(test)]
 mod testkit;
+mod watch;
 
 use crate::core::{DefKind, EdgeKind, NodeId, Provenance};
 use crate::graph::{Graph, Neighbor};
@@ -182,6 +183,18 @@ enum Cmd {
         /// nodes | edges | semantic
         #[arg(long, default_value = "nodes")]
         what: String,
+    },
+    /// Re-index whenever the repository changes on disk
+    Watch {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How long the tree must be quiet before indexing. A save emits
+        /// several events and a branch checkout emits thousands; this is what
+        /// makes those one index instead of thousands.
+        #[arg(long, value_name = "MS", default_value_t = 300)]
+        debounce: u64,
+        #[arg(short, long)]
+        threads: Option<usize>,
     },
     /// Store the API key, provider and model choices the server runs on
     Secret {
@@ -582,6 +595,16 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+
+        Cmd::Watch {
+            path,
+            debounce,
+            threads,
+        } => watch::run(&watch::Config {
+            path,
+            debounce: std::time::Duration::from_millis(debounce),
+            threads,
+        }),
 
         Cmd::Secret { op, data } => {
             use server::SecretOp;
