@@ -41,12 +41,43 @@ def have_image(tag):
 # being asked the wrong question.
 def runner_for(repo, tests):
     if repo == "django/django":
-        # `a.b.C.test_x` is the label the runner takes; the benchmark writes
-        # the same thing as `test_x (a.b.C)`.
+        # Run the *class*, not the method, and let the parser match what gets
+        # printed. Converting `test_x (a.b.C)` into the label `a.b.C.test_x`
+        # looks right and breaks on the ones that matter: with --verbosity 2
+        # django prints a test's **docstring** in place of its name when it has
+        # one, and the benchmark stores what django prints. So the id reads
+        # `Regression for #9362 (admin_inlines.tests.TestInline)`, the label
+        # built from it names no method, and unittest reports
+        # `unittest.loader._FailedTest` — ten of them on django-11149, counted
+        # as ten pre-existing tests the patch had broken.
+        #
+        # The parenthesised half is always a real class, and django prints one
+        # line per test in the form the ids already use. Running the class and
+        # matching the output needs no translation and cannot drift.
         labels = []
         for t in tests:
-            m = re.match(r"^(\S+) \(([^)]+)\)\s*$", t)
-            labels.append(f"{m.group(2)}.{m.group(1)}" if m else t)
+            m = re.match(r"^(.*) \(([^)]+)\)\s*$", t)
+            if not m:
+                labels.append(t)
+                continue
+            target = m.group(2)
+            # Down to the module, not the class. unittest at --verbosity 2
+            # prints two lines for a test that has a docstring — the id, then
+            # the docstring — and SWE-bench stored whichever it saw, so 3,643
+            # ids across 167 django instances are a bare docstring with no
+            # class attached. Nothing can be derived from those, and running
+            # only the classes that *are* named leaves them unexecuted and
+            # therefore unconfirmed. Running their module executes them and
+            # django prints them in the form the ids already use.
+            #
+            # A trailing segment that starts with a capital is a class; the
+            # module is what remains.
+            parts = target.split(".")
+            while len(parts) > 1 and parts[-1][:1].isupper():
+                parts.pop()
+            labels.append(".".join(parts))
+        # One module named forty times is one label.
+        labels = sorted(set(labels))
         cmd = ("python tests/runtests.py --verbosity 2 --settings=test_sqlite "
                "--parallel 1 " + " ".join(shlex.quote(l) for l in labels))
         keep = r"grep -E ' \.\.\. (ok|FAIL|ERROR|skipped)' /tmp/t.log"
