@@ -56,7 +56,13 @@ def runner_for(repo, tests):
         # single quotes ends the quote at the apostrophe, pytest receives a
         # truncated id, and one unknown id makes pytest run *nothing at all* —
         # "no tests ran", scored as 0/644 and written off as a broken image.
-        cmd = ("python -m pytest -rA --no-header -q --continue-on-collection-errors "
+        # `--color=no`: pytest colours its summary when it believes it is
+        # attached to a terminal, and some images make it believe that. The
+        # result is `\033[32mPASSED\033[0m …\033[1mtest_name\033[0m`, which
+        # matches neither the line prefix nor the test id. astropy-14995 ran
+        # 180 tests, passed all 180, and was recorded as 0/179.
+        cmd = ("python -m pytest -rA --no-header -q --color=no "
+               "--continue-on-collection-errors "
                + " ".join(shlex.quote(t) for t in tests))
         keep = r"grep -E '^(PASSED|FAILED|ERROR) ' /tmp/t.log"
     # Never pipe the run straight into `tail`. The first version ended in
@@ -68,6 +74,9 @@ def runner_for(repo, tests):
             f"{keep} | head -5000\n"
             'echo "---RAW-TAIL---"\n'
             "tail -25 /tmp/t.log")
+
+
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def usable_ids(tests):
@@ -146,6 +155,10 @@ __RUN__
     # pytest -rA prints one PASSED/FAILED line per test id; that is the record
     # to score against, not the summary counts, which merge the two sets.
     status = {}
+    # Belt and braces: `--color=no` covers pytest, but django's runner and any
+    # plugin can colour too, and a parser that silently matches nothing is the
+    # failure mode this whole file has already been bitten by twice.
+    text = ANSI.sub("", text)
     for line in text.splitlines():
         for kind in ("PASSED", "FAILED", "ERROR"):
             if line.startswith(kind + " "):
