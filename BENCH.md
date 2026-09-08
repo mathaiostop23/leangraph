@@ -1398,7 +1398,7 @@ So the order worth doing is the opposite of the obvious one:
 Written down because "not built" and "measured and declined" are different
 things, and only one of them is a decision.
 
-## Scoring a patch, and three ways the scoring was wrong
+## Scoring a patch, and five ways the scoring was wrong
 
 `bench/swefix.py` applies a candidate patch in the instance's own Docker image,
 applies the benchmark's test patch on top, and requires every FAIL_TO_PASS test
@@ -1429,6 +1429,40 @@ them — but one is enough to zero an instance, so they poison 65 of the 500.
 Dropping ids whose brackets do not balance took `astropy-13236` from 0/644 to
 642/642.
 
+**pytest was colouring its output.** `astropy-14995` ran 180 tests, passed all
+180, and was recorded as 0/179. The lines read
+`\033[32mPASSED\033[0m …\033[1mtest_name\033[0m`, so a parser looking for a
+line starting `PASSED ` matched nothing, and the test id carried escape codes
+of its own so matching the id would have failed too. Some images make pytest
+believe it is attached to a terminal and some do not, which is why this struck
+three instances and left the rest looking healthy. `--color=no` stops it and
+the parser strips escapes anyway.
+
+    astropy-14309   0/141 -> 141/141
+    astropy-14369   0/716 -> 716/716
+    astropy-14995   0/179 -> 179/179
+
+All three had been written off as broken environments — twice, in reports
+written here.
+
+**django ids name a docstring, not a method.** unittest at `--verbosity 2`
+prints two lines for a test carrying one — the id, then the docstring — and the
+benchmark stored whichever it saw. So 3,643 ids across 167 django instances are
+a bare docstring: `Regression for #9362`, with no class attached. Turning
+`test_x (a.b.C)` into the label `a.b.C.test_x` therefore produces
+`a.b.C.Regression for #9362`, which names nothing, and unittest answers
+`unittest.loader._FailedTest`; ten of those on django-11149 were counted as ten
+tests the candidate had broken. Running the *module* and matching what django
+prints needs no translation and cannot drift.
+
+    django-10973   F2P 4/5  P2P   0/0  ->  5/5   0/0
+    django-11141   F2P 0/1  P2P 18/24  ->  1/1  24/24
+    django-11149   F2P 2/2  P2P 36/46  ->  2/2  46/46
+    django-11292   F2P 1/1  P2P 28/31  ->  1/1  31/31
+
+One of those had been recorded here as needing a postgres server. It needed
+nothing.
+
 ### The gold gate
 
 `--gate` scores the benchmark's own patch first and drops any instance it
@@ -1437,9 +1471,16 @@ red is measuring the harness, the image, or the network, and counting it as a
 loss for every arm is a wrong denominator. What survives the gate is small and
 honest; what it excludes is named in the output rather than absorbed.
 
-Three kinds of thing get excluded here, all of them legitimate: tests that need
-a postgres server, astropy coordinate tests that want IERS data the container
-cannot download, and instances whose gold patch genuinely does not reproduce.
+What the gate excluded fell from 8 of 14 to 1 of 14 as those five defects were
+found, on the same instances and the same stored patches — nothing was
+regenerated and nothing was spent. That is the measure of how much of an
+"exclusion" was ever about the benchmark: almost none of it. What remains is
+`astropy-13398`, whose coordinate tests want IERS data the container cannot
+download.
+
+The lesson is not that these were hard to fix. Each was a few lines. It is that
+all five produced *zeros*, and a zero is indistinguishable from a hard problem
+until someone reads the container's own output.
 
 ## What is still unmeasured
 
