@@ -2,6 +2,8 @@
 
 **Give a coding agent the relevant code instead of making it grep for it.**
 
+[**mathaiostop23.github.io/leangraph**](https://mathaiostop23.github.io/leangraph/) — the numbers below, on a page.
+
 leangraph reads a repository once and builds a graph of what calls what — every
 function, class, import and reference, with a confidence score on each link.
 That graph then answers the question an agent actually has: *given this bug
