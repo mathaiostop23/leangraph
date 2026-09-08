@@ -1,0 +1,977 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leangraph — find where the code has to change</title>
+<meta name="description" content="A code graph that points a coding agent at the code that has to change. 81.8% of the files an accepted fix touched, over 500 real issues, at one eighteenth of the tokens keyword search reads.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F2F4F8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#080D19" media="(prefers-color-scheme: dark)">
+<link rel="canonical" href="https://mathaiostop23.github.io/leangraph/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="leangraph">
+<meta property="og:description" content="Coding agents don't struggle to write code. They struggle to find where to write it.">
+<meta property="og:url" content="https://mathaiostop23.github.io/leangraph/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=&#39;http://www.w3.org/2000/svg&#39; viewBox=&#39;0 0 32 32&#39;%3E%3Ccircle cx=&#39;16&#39; cy=&#39;9&#39; r=&#39;3.4&#39; fill=&#39;%23E8A24A&#39;/%3E%3Ccircle cx=&#39;7&#39; cy=&#39;23&#39; r=&#39;2.6&#39; fill=&#39;%236C7691&#39;/%3E%3Ccircle cx=&#39;25&#39; cy=&#39;23&#39; r=&#39;2.6&#39; fill=&#39;%236C7691&#39;/%3E%3Cpath d=&#39;M16 9 7 23M16 9l9 14M7 23h18&#39; stroke=&#39;%236C7691&#39; stroke-width=&#39;1.6&#39; fill=&#39;none&#39;/%3E%3C/svg%3E">
+<style>
+/* The artifact host ships a reset; a standalone page does not. */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; }
+img, svg, canvas { display: block; max-width: 100%; }
+button { font: inherit; }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;1,8..60,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+/* ── tokens ──────────────────────────────────────────────────────────────
+   Light is the blueprint: ink on paper, the graph drawn as a plotter would.
+   Dark is the instrument: the same graph lit from inside. Both are designed;
+   neither is an inversion of the other.                                    */
+:root {
+  --ground:      #F2F4F8;
+  --paper:       #FFFFFF;
+  --sunk:        #E7EBF2;
+  --ink:         #0E1424;
+  --ink-soft:    #414B63;
+  --muted:       #6C7691;
+  --rule:        #D3DAE6;
+  --edge:        #A9B4C8;
+  --node:        #33405C;
+  --signal:      #B4671B;
+  --signal-dim:  #E0A468;
+  --shadow:      0 1px 2px rgba(14,20,36,.06), 0 8px 24px rgba(14,20,36,.06);
+  --measure:     66ch;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:     #080D19;
+    --paper:      #0F1626;
+    --sunk:       #131C2E;
+    --ink:        #E9EDF6;
+    --ink-soft:   #B3BDD2;
+    --muted:      #8792AB;
+    --rule:       #1F2941;
+    --edge:       #2B3856;
+    --node:       #7C8AA8;
+    --signal:     #E8A24A;
+    --signal-dim: #8A5F27;
+    --shadow:     0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"] {
+  --ground:     #080D19;
+  --paper:      #0F1626;
+  --sunk:       #131C2E;
+  --ink:        #E9EDF6;
+  --ink-soft:   #B3BDD2;
+  --muted:      #8792AB;
+  --rule:       #1F2941;
+  --edge:       #2B3856;
+  --node:       #7C8AA8;
+  --signal:     #E8A24A;
+  --signal-dim: #8A5F27;
+  --shadow:     0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, .ui {
+  font-family: Archivo, "Helvetica Neue", Arial, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+code, .mono, .num {
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+a { color: inherit; }
+
+/* padding-inline, not the shorthand. `.wrap` is a class and `section` is an
+   element, so `padding: 0 28px` here silently zeroed the 96px of vertical
+   padding every section thought it had — which is why the cards sat against
+   the next rule with nothing between them. Each rule now owns one axis. */
+.wrap {
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding-inline: 28px;
+}
+
+/* ── hero ─────────────────────────────────────────────────────────────── */
+.hero {
+  position: relative;
+  min-height: 92vh;
+  min-height: 92svh;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border-bottom: 1px solid var(--rule);
+}
+#graph {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* The graph is the argument, so it does not sit behind a full scrim. Only the
+   column the words occupy is washed, fading out well before the graph's own
+   territory — enough to hold contrast over a moving field, not enough to
+   announce itself. */
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    to right,
+    var(--ground) 0%,
+    color-mix(in srgb, var(--ground) 86%, transparent) 26%,
+    color-mix(in srgb, var(--ground) 40%, transparent) 44%,
+    transparent 62%
+  );
+}
+@supports not (background: color-mix(in srgb, red 50%, transparent)) {
+  .hero::before { background: linear-gradient(to right, var(--ground) 0%, transparent 62%); }
+}
+.hero-inner {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  padding-block: 96px 72px;
+}
+.hero-copy { max-width: 30rem; }
+
+h1 {
+  font-size: clamp(2.4rem, 6.2vw, 4rem);
+  line-height: 1.02;
+  margin: 0 0 24px;
+  letter-spacing: -0.03em;
+}
+/* Same family as the rest of the line. A serif italic dropped into a
+   grotesque headline reads as a different voice, and the emphasis is on one
+   word, not a change of speaker. Weight and colour carry it instead. */
+h1 .where {
+  font-weight: 700;
+  color: var(--signal);
+}
+
+.lede {
+  font-size: 1.16rem;
+  color: var(--ink-soft);
+  margin: 0 0 34px;
+  max-width: 30rem;
+}
+
+.cta-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-family: Archivo, sans-serif;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  text-decoration: none;
+  padding: 11px 20px;
+  border-radius: 999px;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--ground);
+  transition: transform .16s ease, opacity .16s ease;
+}
+.btn:hover { transform: translateY(-1px); opacity: .9; }
+.btn.ghost {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--rule);
+}
+.btn.ghost:hover { border-color: var(--ink-soft); }
+.btn:focus-visible, a:focus-visible, button:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 3px;
+}
+
+.install {
+  margin-top: 30px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+.install code {
+  color: var(--ink-soft);
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+  padding: 7px 14px;
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 13px;
+}
+
+/* ── sections ─────────────────────────────────────────────────────────── */
+section { padding-block: 104px; }
+.rule-top { border-top: 1px solid var(--rule); }
+
+.kicker {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+h2 {
+  font-size: clamp(1.6rem, 3.4vw, 2.2rem);
+  line-height: 1.14;
+  margin: 0 0 18px;
+  letter-spacing: -0.02em;
+}
+.sub { color: var(--ink-soft); max-width: var(--measure); margin: 0 0 44px; }
+
+/* ── the measurement, as an instrument readout ────────────────────────── */
+.readout {
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.readout-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sunk);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11.5px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.row { padding: 22px 22px 24px; border-bottom: 1px solid var(--rule); }
+.row:last-child { border-bottom: 0; }
+
+/* Name and figure share a baseline — the first version let the percentage
+   float at the top of the row while its label sat at the bottom, so the eye
+   had to pair them across a gap of nothing. */
+.row-head, .row-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 24px;
+}
+.row-foot { margin-top: 2px; }
+
+.row-name { font-family: Archivo, sans-serif; font-weight: 600; font-size: 15.5px; }
+.row.lead .row-name { color: var(--signal); }
+.row-note { color: var(--muted); font-size: 14px; }
+.fig-main {
+  font-size: clamp(1.6rem, 3.4vw, 2rem);
+  font-weight: 500;
+  letter-spacing: -.02em;
+  line-height: 1;
+  white-space: nowrap;
+}
+.row.lead .fig-main { color: var(--signal); }
+.fig-sub { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+
+/* the token bars — length is the whole point, so they are drawn to scale */
+.bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+  overflow: hidden;
+  margin-top: 14px;
+}
+.bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--edge);
+  transition: width 1.1s cubic-bezier(.22,.8,.3,1);
+}
+.row.lead .bar > i { background: var(--signal); }
+
+
+/* ── what it actually prints ──────────────────────────────────────────── */
+.term {
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.75;
+}
+.term-head {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sunk);
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.term-body { padding: 20px; overflow-x: auto; }
+.term-body pre { margin: 0; }
+.term .q { color: var(--ink); display: block; margin-bottom: 4px; }
+.term .q b { color: var(--signal); font-weight: 500; }
+.term .meta { color: var(--muted); display: block; margin: 14px 0 10px; }
+.term .l { display: grid; grid-template-columns: 4.5rem 3rem 4rem 1fr; gap: 0 12px; color: var(--ink-soft); white-space: nowrap; }
+.term .why { color: var(--muted); }
+.term .why.hot { color: var(--signal); }
+.term .sc { color: var(--ink); font-variant-numeric: tabular-nums; }
+.term .kind { color: var(--muted); }
+.term .where { color: var(--ink-soft); }
+.term .where u { text-decoration: none; color: var(--muted); }
+.term-note { color: var(--muted); font-size: 13.5px; margin: 18px 0 0; font-family: "Source Serif 4", Georgia, serif; }
+@media (max-width: 700px) {
+  .term { font-size: 11.5px; }
+  .term .l { grid-template-columns: 4rem 2.6rem 3.4rem 1fr; }
+}
+
+/* ── stat strip ───────────────────────────────────────────────────────── */
+/* Four cards that breathe, not one box divided four ways. Hairline dividers
+   made every cell a hard rectangle sharing corners with its neighbour, which
+   is a lot of corners for four numbers. */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+}
+.stat {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  padding: 28px 24px 26px;
+}
+.stat .n {
+  font-family: Archivo, sans-serif;
+  font-weight: 600;
+  font-size: clamp(2rem, 4vw, 2.6rem);
+  letter-spacing: -.035em;
+  line-height: 1;
+  display: block;
+  margin-bottom: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* The unit is not part of the magnitude, so it does not compete with it. */
+.stat .n i { font-style: normal; }
+.stat .n em {
+  font-style: normal;
+  font-size: .42em;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--muted);
+  margin-left: .28em;
+}
+.stat .l { color: var(--ink-soft); font-size: 14.5px; line-height: 1.45; display: block; max-width: 22ch; }
+
+/* ── how ──────────────────────────────────────────────────────────────── */
+.steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 34px; }
+.step h3 {
+  font-size: 16px;
+  margin: 0 0 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.step h3 span {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  color: var(--signal);
+  font-weight: 400;
+}
+.step p { margin: 0; color: var(--ink-soft); font-size: 15px; }
+
+/* ── honesty ──────────────────────────────────────────────────────────── */
+.loses {
+  border-left: 2px solid var(--signal);
+  padding-left: 26px;
+  max-width: var(--measure);
+}
+.loses li { margin-bottom: 14px; color: var(--ink-soft); }
+.loses b { color: var(--ink); font-weight: 600; font-family: Archivo, sans-serif; font-size: 15px; }
+
+/* ── footer ───────────────────────────────────────────────────────────── */
+footer {
+  border-top: 1px solid var(--rule);
+  padding: 54px 0 70px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.foot-row { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; align-items: center; }
+footer a { text-decoration: none; border-bottom: 1px solid var(--rule); }
+footer a:hover { border-bottom-color: var(--signal); color: var(--ink); }
+
+/* theme toggle sits with the content, not floating over the graph */
+.corner {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 5;
+  display: flex;
+  gap: 8px;
+}
+.corner > * {
+  width: 34px; height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: grid; place-items: center;
+  text-decoration: none;
+  transition: color .15s ease, border-color .15s ease;
+}
+.corner > *:hover { color: var(--ink); border-color: var(--ink-soft); }
+.corner svg { width: 17px; height: 17px; display: block; }
+
+/* ── entrance ─────────────────────────────────────────────────────────── */
+.rise { opacity: 0; transform: translateY(14px); }
+.rise.in { opacity: 1; transform: none; transition: opacity .7s ease, transform .7s cubic-bezier(.22,.8,.3,1); }
+.d1 { transition-delay: .06s } .d2 { transition-delay: .14s }
+.d3 { transition-delay: .22s } .d4 { transition-delay: .3s }
+
+@media (prefers-reduced-motion: reduce) {
+  .rise, .rise.in { opacity: 1; transform: none; transition: none; }
+  .bar > i { transition: none; }
+  .btn { transition: none; }
+}
+
+@media (max-width: 640px) {
+  body { font-size: 16px; }
+  section { padding-block: 72px; }
+  .hero { min-height: 88vh; }
+  .row { grid-template-columns: 1fr; }
+  .row-fig { text-align: left; }
+}
+</style>
+
+</head>
+<body>
+<div class="corner">
+  <a href="https://github.com/mathaiostop23/leangraph" aria-label="Source on GitHub" title="Source on GitHub">
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+  </a>
+  <button class="ui" id="themeBtn" aria-label="Switch colour theme" title="Switch theme">◐</button>
+</div>
+
+<header class="hero">
+  <canvas id="graph" aria-hidden="true"></canvas>
+  <div class="wrap hero-inner">
+    <div class="hero-copy">
+      <h1 class="rise d1">Coding agents don't struggle to write&nbsp;code.<br>They struggle to find <span class="where">where</span>.</h1>
+      <p class="lede rise d2">
+        leangraph reads a repository once and builds a graph of what calls what —
+        every function, class, import and reference, each link carrying a confidence
+        score. Describe what's wrong in your own words and it points at the code
+        that has to change.
+      </p>
+      <div class="cta-row rise d3">
+        <a class="btn" href="https://github.com/mathaiostop23/leangraph">Read the source</a>
+        <a class="btn ghost" href="#measured">See the measurements</a>
+      </div>
+      <p class="install rise d3"><code>cargo install --path .</code> &nbsp;·&nbsp; no API key, no services, nothing leaves your machine</p>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section id="measured" class="wrap">
+    <p class="kicker">SWE-bench Verified · 500 real issues · twelve repositories</p>
+    <h2>Better aim, for a fraction of the reading.</h2>
+    <p class="sub">
+      Each issue is pinned to the commit it was filed against. The question asked is the
+      issue exactly as a human wrote it; the right answer is the set of files the
+      accepted fix actually touched, test files excluded.
+    </p>
+
+    <div class="readout" id="readout">
+      <div class="readout-head">
+        <span>file recall / tokens per query</span>
+        <span>bench/swebench.py</span>
+      </div>
+
+      <div class="row lead">
+        <div class="row-head">
+          <span class="row-name">leangraph</span>
+          <span class="fig-main num" data-count="81.8" data-suffix="%">0%</span>
+        </div>
+        <div class="row-foot">
+          <span class="row-note">100 nodes of ranked context</span>
+          <span class="fig-sub num">15,742 tokens</span>
+        </div>
+        <div class="bar"><i data-w="5.6"></i></div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="row-name">keyword search, top 10 files</span>
+          <span class="fig-main num" data-count="50.6" data-suffix="%">0%</span>
+        </div>
+        <div class="row-foot">
+          <span class="row-note">what an agent without an index falls back to</span>
+          <span class="fig-sub num">282,720 tokens</span>
+        </div>
+        <div class="bar"><i data-w="100"></i></div>
+      </div>
+
+      <div class="row">
+        <div class="row-head">
+          <span class="row-name">keyword search, held to our budget</span>
+          <span class="fig-main num" data-count="12.4" data-suffix="%">0%</span>
+        </div>
+        <div class="row-foot">
+          <span class="row-note">one Python file usually exceeds the budget on its own</span>
+          <span class="fig-sub num">41,290 tokens</span>
+        </div>
+        <div class="bar"><i data-w="14.6"></i></div>
+      </div>
+    </div>
+
+    <p class="sub" style="margin-top:26px; margin-bottom:0">
+      Bar length is drawn to the token figures. Better recall than reading ten whole
+      files, for one eighteenth of the input. On Rust, across another 239 issues, 74.2%.
+    </p>
+  </section>
+
+  <section class="wrap rule-top">
+    <p class="kicker">What it prints</p>
+    <h2>A ranked answer, and why each line is in it.</h2>
+    <p class="sub">
+      Every entry says how it was reached. A name that resolved is not the same
+      kind of evidence as a word matched in a docstring, and an agent that
+      cannot tell them apart weighs them the same.
+    </p>
+
+    <div class="term">
+      <div class="term-head">leangraph context</div>
+      <div class="term-body"><pre><span class="q">$ leangraph context <b>"separability_matrix is wrong for nested CompoundModels"</b></span>
+<span class="meta">context  8 nodes · ~2,140 tokens</span>
+<span class="l"><span class="why hot">seed</span><span class="sc">1.00</span><span class="kind">fn</span><span class="where">separability_matrix  astropy/modeling/separable.py<u>@2017</u></span></span>
+<span class="l"><span class="why hot">prose</span><span class="sc">1.00</span><span class="kind">fn</span><span class="where">_separable  astropy/modeling/separable.py<u>@8778</u></span></span>
+<span class="l"><span class="why">callee</span><span class="sc">0.50</span><span class="kind">fn</span><span class="where">_coord_matrix  astropy/modeling/separable.py<u>@5448</u></span></span>
+<span class="l"><span class="why">caller</span><span class="sc">0.60</span><span class="kind">fn</span><span class="where">_cstack  astropy/modeling/separable.py<u>@6916</u></span></span>
+<span class="l"><span class="why">path</span><span class="sc">0.90</span><span class="kind">fn</span><span class="where">_compute_n_outputs  astropy/modeling/separable.py<u>@3513</u></span></span>
+<span class="l"><span class="why hot">seed</span><span class="sc">1.00</span><span class="kind">method</span><span class="where">_calculate_separability_matrix  astropy/modeling/core.py<u>@30909</u></span></span>
+<span class="l"><span class="why">caller</span><span class="sc">0.57</span><span class="kind">file</span><span class="where">astropy/modeling/tests/test_separable.py</span></span>
+<span class="l"><span class="why">co-chg</span><span class="sc">0.40</span><span class="kind">file</span><span class="where">astropy/modeling/functional_models.py</span></span></pre></div>
+    </div>
+    <p class="term-note">
+      Illustrative — the shape is exactly what the command prints, the query is a
+      real issue. Add <code>--source</code> and it emits the code behind those
+      lines instead of their names.
+    </p>
+  </section>
+
+  <section class="wrap rule-top">
+    <p class="kicker">Why it is quick</p>
+    <h2>Loading is a memory map, not deserialization.</h2>
+    <p class="sub">
+      A graph is a file laid out so that querying it needs no parsing step. Opening one
+      is an <code>mmap</code> and a header check, which is why an agent can afford to ask.
+    </p>
+    <div class="stats" id="stats">
+      <div class="stat"><span class="n"><i class="num" data-count="3" data-suffix="">0</i><em>ms</em></span><span class="l">to open a graph and answer</span></div>
+      <div class="stat"><span class="n"><i class="num" data-count="0.84" data-suffix="">0</i><em>s</em></span><span class="l">to index django, all 3,038 files</span></div>
+      <div class="stat"><span class="n"><i class="num" data-count="0.26" data-suffix="">0</i><em>s</em></span><span class="l">to re-index after a file changes</span></div>
+      <div class="stat"><span class="n"><i class="num" data-count="14" data-suffix="">0</i></span><span class="l">languages, eleven checked against an oracle</span></div>
+    </div>
+  </section>
+
+  <section class="wrap rule-top">
+    <p class="kicker">How it works</p>
+    <h2>Four passes, and everything after the first is an integer.</h2>
+    <div class="steps">
+      <div class="step">
+        <h3><span>01</span> Discover</h3>
+        <p>The repository's own ignore rules decide what counts as source. Nothing else is read.</p>
+      </div>
+      <div class="step">
+        <h3><span>02</span> Extract</h3>
+        <p>One tree-sitter pass per file collects definitions, references — and the comments and docstrings, which are the only part of a repository written in the words its users actually use.</p>
+      </div>
+      <div class="step">
+        <h3><span>03</span> Resolve</h3>
+        <p>Three tiers: lexical scope, explicit import, then a name match across the repository. Each edge keeps how it was found, so a proven call never weighs the same as a guess.</p>
+      </div>
+      <div class="step">
+        <h3><span>04</span> Persist</h3>
+        <p>Adjacency in both directions, as CSR. <code>callers()</code> is two array reads and a slice — no descent, no decode, no allocation.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap rule-top">
+    <p class="kicker">Where it loses</p>
+    <h2>The part most tools leave out.</h2>
+    <p class="sub">
+      Every number here comes from a script in <code>bench/</code> that you can run yourself.
+      So do these.
+    </p>
+    <ul class="loses">
+      <li><b>It returns nothing useful on a seventh of issues.</b> 14.4% of SWE-bench Verified, and plain keyword search beats it outright on another 5.2%.</li>
+      <li><b>TypeScript is the weak language.</b> 42.6% against Python's 81.8%. A third of the gap is the benchmark asking a harder question; the rest is a repository that ships its documentation as code, where a demo matches a bug report better than the implementation does.</li>
+      <li><b>Edge precision is measured on one repository.</b> 78.1% overall and 94.8% at the highest confidence tier, settled by running a real test suite and recording which call actually happened.</li>
+      <li><b>A one-file change re-resolves the whole repository.</b> Resolution is global: a definition added anywhere can change what a reference elsewhere binds to.</li>
+    </ul>
+  </section>
+</main>
+
+<footer class="wrap">
+  <div class="foot-row">
+    <span>Open source under MIT. Written in Rust.</span>
+    <span><a href="https://github.com/mathaiostop23/leangraph">github.com/mathaiostop23/leangraph</a></span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ── theme ──────────────────────────────────────────────────────────── */
+  const root = document.documentElement;
+  const btn = document.getElementById("themeBtn");
+  try {
+    const saved = localStorage.getItem("lg-theme");
+    if (saved === "dark" || saved === "light") root.dataset.theme = saved;
+  } catch (e) { /* private window, or storage blocked — the default is fine */ }
+
+  btn.addEventListener("click", () => {
+    const dark = root.dataset.theme
+      ? root.dataset.theme === "dark"
+      : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("lg-theme", root.dataset.theme); } catch (e) {}
+    readPalette();
+  });
+
+  /* ── entrance ───────────────────────────────────────────────────────── */
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      e.target.classList.add("in");
+      io.unobserve(e.target);
+    }
+  }, { rootMargin: "0px 0px -12% 0px" });
+  document.querySelectorAll(".rise").forEach((n) => io.observe(n));
+  requestAnimationFrame(() =>
+    document.querySelectorAll(".hero .rise").forEach((n) => n.classList.add("in")));
+
+  /* ── counters and bars ──────────────────────────────────────────────── */
+  const animateNumber = (el) => {
+    const target = parseFloat(el.dataset.count);
+    const suffix = el.dataset.suffix || "";
+    const dp = (el.dataset.count.split(".")[1] || "").length;
+    if (reduced) { el.textContent = target.toFixed(dp) + suffix; return; }
+    const t0 = performance.now(), dur = 900;
+    const tick = (now) => {
+      const k = Math.min(1, (now - t0) / dur);
+      const eased = 1 - Math.pow(1 - k, 3);
+      el.textContent = (target * eased).toFixed(dp) + suffix;
+      if (k < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
+
+  const reveal = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      e.target.querySelectorAll("[data-count]").forEach(animateNumber);
+      e.target.querySelectorAll(".bar > i").forEach((b) => { b.style.width = b.dataset.w + "%"; });
+      reveal.unobserve(e.target);
+    }
+  }, { threshold: 0.25 });
+  ["readout", "stats"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) reveal.observe(el);
+  });
+
+  /* ── the graph ──────────────────────────────────────────────────────────
+     Not decoration: it is the thing the tool builds. Nodes cluster the way
+     files do, most edges stay inside a cluster, and a handful of nodes carry
+     the signal colour — the answer a query resolved to.
+
+     Drawn in plain 2-D canvas with the projection done by hand. A library
+     would be a network request, and this page makes none.                  */
+  const cv = document.getElementById("graph");
+  const ctx = cv.getContext("2d");
+  let W = 0, H = 0, dpr = 1;
+  let pal = {};
+
+  function readPalette() {
+    const cs = getComputedStyle(document.body);
+    pal = {
+      edge:   cs.getPropertyValue("--edge").trim(),
+      node:   cs.getPropertyValue("--node").trim(),
+      signal: cs.getPropertyValue("--signal").trim(),
+    };
+  }
+
+  /* A real call graph is not evenly spread. A few definitions are called from
+     everywhere and most are called once or twice, packages differ wildly in
+     size, and edges stay inside a package far more often than they cross it.
+     Drawing it uniformly is what made the first version look like confetti. */
+  const N = 340;
+  const CLUSTERS = 9;
+  const nodes = [];
+  const edges = [];
+
+  function build() {
+    nodes.length = 0; edges.length = 0;
+
+    // Package sizes fall off sharply; two of them hold most of the code.
+    const weights = [];
+    let total = 0;
+    for (let c = 0; c < CLUSTERS; c++) {
+      const w = 1 / Math.pow(c + 1, 0.8);
+      weights.push(w); total += w;
+    }
+
+    const centres = [];
+    for (let c = 0; c < CLUSTERS; c++) {
+      // Spread on a sphere rather than a ring, so rotation reveals depth
+      // instead of sliding a flat disc past the eye.
+      const phi = Math.acos(1 - 2 * (c + 0.5) / CLUSTERS);
+      const theta = Math.PI * (1 + Math.sqrt(5)) * c;
+      const r = 0.52 + (c % 3) * 0.16;
+      centres.push({
+        x: Math.cos(theta) * Math.sin(phi) * r,
+        y: Math.cos(phi) * r * 0.72,
+        z: Math.sin(theta) * Math.sin(phi) * r,
+      });
+    }
+
+    // Assign nodes to packages by weight, and give each package one or two
+    // hubs — the definitions everything else in it reaches for.
+    const members = Array.from({ length: CLUSTERS }, () => []);
+    for (let i = 0; i < N; i++) {
+      let pick = Math.random() * total, c = 0;
+      while (c < CLUSTERS - 1 && (pick -= weights[c]) > 0) c++;
+      const ctr = centres[c];
+      const spread = 0.2 + weights[c] * 0.5;
+      nodes.push({
+        c,
+        tx: ctr.x + (Math.random() - 0.5) * spread * 2,
+        ty: ctr.y + (Math.random() - 0.5) * spread * 1.5,
+        tz: ctr.z + (Math.random() - 0.5) * spread * 2,
+        // Scattered at load, so the first second reads as the graph resolving.
+        x: (Math.random() - 0.5) * 4.2,
+        y: (Math.random() - 0.5) * 3,
+        z: (Math.random() - 0.5) * 4.2,
+        deg: 0,
+        hub: false,
+        hit: false,
+        ph: Math.random() * Math.PI * 2,
+        // A little drift, so it breathes instead of rotating like a solid.
+        dr: 0.006 + Math.random() * 0.012,
+      });
+      members[c].push(i);
+    }
+
+    const hubs = [];
+    for (let c = 0; c < CLUSTERS; c++) {
+      const m = members[c];
+      if (!m.length) continue;
+      const count = m.length > 40 ? 2 : 1;
+      for (let h = 0; h < count; h++) {
+        const idx = m[Math.floor(Math.random() * m.length)];
+        nodes[idx].hub = true;
+        hubs.push(idx);
+      }
+    }
+
+    const seen = new Set();
+    const link = (a, b) => {
+      if (a === b) return;
+      const k = a < b ? a + ":" + b : b + ":" + a;
+      if (seen.has(k)) return;
+      seen.add(k);
+      edges.push([a, b]);
+      nodes[a].deg++; nodes[b].deg++;
+    };
+
+    // Most edges point at a hub inside the same package.
+    for (let c = 0; c < CLUSTERS; c++) {
+      const m = members[c];
+      const localHubs = m.filter((i) => nodes[i].hub);
+      for (const i of m) {
+        if (nodes[i].hub) continue;
+        if (localHubs.length && Math.random() < 0.72) {
+          link(i, localHubs[Math.floor(Math.random() * localHubs.length)]);
+        }
+        // …plus a neighbour or two, which is what makes it a graph and not a star.
+        const extra = Math.random() < 0.55 ? 2 : 1;
+        for (let e = 0; e < extra; e++) {
+          link(i, m[Math.floor(Math.random() * m.length)]);
+        }
+      }
+    }
+    // Imports across packages: few, and mostly hub to hub.
+    for (let e = 0; e < Math.round(N * 0.16); e++) {
+      const a = hubs[Math.floor(Math.random() * hubs.length)];
+      const b = Math.random() < 0.6
+        ? hubs[Math.floor(Math.random() * hubs.length)]
+        : Math.floor(Math.random() * N);
+      link(a, b);
+    }
+
+    // The answer to a query is a connected neighbourhood, never a scatter.
+    const seedHub = hubs[Math.floor(Math.random() * hubs.length)];
+    const fam = nodes[seedHub].c;
+    const near = members[fam].slice().sort(
+      (a, b) => dist2(nodes[a], nodes[seedHub]) - dist2(nodes[b], nodes[seedHub]));
+    for (const i of near.slice(0, 9)) nodes[i].hit = true;
+    nodes[seedHub].hit = true;
+  }
+
+  function dist2(a, b) {
+    const dx = a.tx - b.tx, dy = a.ty - b.ty, dz = a.tz - b.tz;
+    return dx * dx + dy * dy + dz * dz;
+  }
+
+  function resize() {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    const rect = cv.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  let mx = 0, my = 0, tmx = 0, tmy = 0;
+  window.addEventListener("pointermove", (e) => {
+    tmx = (e.clientX / window.innerWidth - 0.5);
+    tmy = (e.clientY / window.innerHeight - 0.5);
+  }, { passive: true });
+
+  const t0 = performance.now();
+  const P = [];
+
+  function frame(now) {
+    const t = (now - t0) / 1000;
+    const settle = reduced ? 1 : Math.min(1, Math.pow(Math.min(1, t / 1.9), 0.55));
+    mx += (tmx - mx) * 0.045;
+    my += (tmy - my) * 0.045;
+
+    const rotY = (reduced ? 0.4 : t * 0.062) + mx * 0.5;
+    const rotX = -0.2 + my * 0.26;
+    const cy = Math.cos(rotY), sy = Math.sin(rotY);
+    const cx = Math.cos(rotX), sx = Math.sin(rotX);
+
+    const wide = W > 900;
+    const ox = wide ? W * 0.66 : W * 0.5;
+    const oy = H * 0.5;
+    const scale = Math.min(W, H) * (wide ? 0.5 : 0.42);
+
+    ctx.clearRect(0, 0, W, H);
+
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      const drift = reduced ? 0 : Math.sin(t * n.dr * 9 + n.ph) * 0.022;
+      const px = n.x + (n.tx - n.x) * settle;
+      const py = n.y + (n.ty - n.y) * settle + drift;
+      const pz = n.z + (n.tz - n.z) * settle;
+      const X = px * cy - pz * sy;
+      let Z = px * sy + pz * cy;
+      const Y = py * cx - Z * sx;
+      Z = py * sx + Z * cx;
+      const persp = 2.9 / (2.9 + Z);
+      P[i] = {
+        x: ox + X * scale * persp,
+        y: oy + Y * scale * persp,
+        d: persp,
+        hit: n.hit,
+        hub: n.hub,
+        deg: n.deg,
+        ph: n.ph,
+      };
+    }
+
+    // Edges first, back to front, with depth carried by alpha rather than by
+    // culling — the far half of a graph is still the graph.
+    for (let e = 0; e < edges.length; e++) {
+      const a = P[edges[e][0]], b = P[edges[e][1]];
+      const depth = (a.d + b.d) / 2;
+      const both = a.hit && b.hit;
+      const alpha = (0.1 + Math.max(0, depth - 0.6) * 0.9) * (both ? 1.6 : 0.62) * settle;
+      if (alpha <= 0.008) continue;
+      ctx.globalAlpha = Math.min(0.8, alpha);
+      ctx.strokeStyle = both ? pal.signal : pal.edge;
+      ctx.lineWidth = both ? 1.2 : Math.max(0.5, depth * 0.9);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+
+    // Nodes painted far-to-near so the near ones sit on top.
+    const order = P.map((_, i) => i).sort((i, j) => P[i].d - P[j].d);
+    for (const i of order) {
+      const p = P[i];
+      const size = (1.05 + Math.min(3.4, p.deg * 0.26) + (p.hub ? 1.5 : 0)) * p.d;
+      const alpha = Math.min(1, 0.18 + Math.max(0, p.d - 0.55) * 1.5) * settle;
+      if (p.hit) {
+        const pulse = reduced ? 1 : 1 + Math.sin(t * 1.9 + p.ph) * 0.2;
+        ctx.globalAlpha = alpha * 0.14;
+        ctx.fillStyle = pal.signal;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size * 5 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size * 1.35 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = pal.node;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    requestAnimationFrame(frame);
+  }
+
+  readPalette();
+  build();
+  resize();
+  addEventListener("resize", resize);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", readPalette);
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
