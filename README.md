@@ -431,17 +431,17 @@ measured it.
   files that had to change is where the *context* is right. Whether a patch
   built on it passes the repository's own tests is a different question, and it
   is still open. `bench/swefix.py` now runs end to end with a model behind it,
-  over both arms on the same instances — and the honest reading of the first
-  run is that it settles nothing: 3 of 6 against keyword's 2 of 6, one instance
-  apart, on the six whose own gold patch passes. A sample that small is a
-  working pipeline, not a result.
-  Getting there meant fixing three ways the scoring was silently wrong — django
-  was being asked for pytest ids it does not use, output was truncated before
-  it was read, and the published dataset ships test ids split on whitespace
-  that make pytest run nothing at all. Each had been reporting zeros that
-  looked like a hard benchmark. The gate that drops instances whose own gold
-  patch fails currently drops more than half of them, and closing that is what
-  stands between here and a sample worth quoting.
+  over both arms on the same instances, and the honest reading is that the
+  sample does not yet carry a conclusion: 6 of 13 against keyword's 4 of 13,
+  four discordant pairs, three of them our way. A sign test on four pairs
+  cannot reach significance whichever way they fall.
+  Getting there meant finding five ways the scoring was silently wrong, each
+  reporting zeros that looked like a hard benchmark rather than a broken
+  harness — the full account is in [BENCH.md](./BENCH.md). Fixing them took
+  what the gate excluded from 8 of 14 down to 1 of 14, on the same instances
+  and the same stored patches, so the sample more than doubled without
+  regenerating anything. A larger run is what decides this, and the pipeline
+  can now carry one.
 - **A one-file change re-resolves the whole repository.** 167 ms on django,
   555 ms on a 27,730-file monorepo — and 56% of the larger one is `resolve`,
   not the graph rewrite the heading of that section in
